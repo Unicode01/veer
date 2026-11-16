@@ -4103,13 +4103,6 @@ static __always_inline int redirect_egress_nat_forward(struct __sk_buff *skb, co
 		front_value->front_addr, front_value->front_port, nat_cfg_flags);
 }
 
-#if FORWARD_ENABLE_TRAFFIC_STATS
-/* Cached packets would bypass the per-rule counters. */
-static __always_inline const struct tc_flow_cache_state_v4 *tc_flow_cache_writable(__u32 ifindex)
-{
-	return 0;
-}
-#else
 /* Whether a plugin hook runs for packets entering this interface. */
 static __always_inline int tc_flow_cache_plugin_hooked(__u32 ifindex)
 {
@@ -4157,7 +4150,6 @@ static __always_inline const struct tc_flow_cache_state_v4 *tc_flow_cache_writab
 		return 0;
 	return state;
 }
-#endif
 
 /*
  * The stamp of a fast-path record made in the window that began at
@@ -4354,7 +4346,7 @@ static __always_inline int try_egress_nat_forward_fast(struct __sk_buff *skb, co
 	}
 	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
 		add_rule_traffic_bytes(rule->rule_id, FORWARD_GET_PAYLOAD_LEN(ctx), 0);
-	else if (!prefer_reply_l2_cache(nat_cfg_flags) && nat_addr == front_flow->nat_addr)
+	if (!prefer_reply_l2_cache(nat_cfg_flags) && nat_addr == front_flow->nat_addr)
 		remember_flow_fast_v4(skb, ctx, live, front_flow->session_id, l2, bpf_ntohl(ctx->dst_addr));
 	if (rewrite_l4_snat(skb, ctx, nat_addr, front_flow->nat_port) < 0)
 		return TC_ACT_SHOT;
@@ -5007,7 +4999,7 @@ static __always_inline int try_fullnat_reply_fast(struct __sk_buff *skb, const s
 	}
 	if (FORWARD_FLOW_TRAFFIC_ENABLED(flow))
 		add_rule_traffic_bytes(flow->rule_id, 0, FORWARD_GET_PAYLOAD_LEN(ctx));
-	else if (is_egress_nat_flow(flow) && bank == FORWARD_TC_FLOW_BANK_ACTIVE && reply_key &&
+	if (is_egress_nat_flow(flow) && bank == FORWARD_TC_FLOW_BANK_ACTIVE && reply_key &&
 		 (!flow_fast_current_v4(flow) || (l2 && l2->max_len > flow->fast.max_len)))
 		remember_flow_fast_v4(skb, ctx, lookup_flow_v4_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, reply_key),
 			flow->session_id, l2, 0);
@@ -5944,6 +5936,7 @@ static __always_inline int send_flow_fast_v4(struct __sk_buff *skb, const struct
 	return bpf_redirect(hop->out_ifindex, 0);
 }
 
+
 static __always_inline const struct tc_flow_cache_state_v4 *flow_fast_enabled_v4(void)
 {
 	const struct tc_flow_cache_state_v4 *state;
@@ -5967,6 +5960,8 @@ static __always_inline int try_front_flow_fast_v4(struct __sk_buff *skb)
 	const struct flow_value_v4 *flow;
 	__u32 nat_addr;
 	__u16 nat_port;
+	__u32 rule_id;
+	int counted;
 	__u32 hints;
 	int full_cone = 0;
 
@@ -6000,9 +5995,14 @@ static __always_inline int try_front_flow_fast_v4(struct __sk_buff *skb)
 		return FORWARD_TC_SLOW_PATH;
 	nat_addr = flow->nat_addr;
 	nat_port = flow->nat_port;
+	/* A packet sent from the record counts into its rule as the core's would. */
+	counted = FORWARD_FLOW_TRAFFIC_ENABLED(flow);
+	rule_id = flow->rule_id;
 	read_flow_fast_hop_v4(&flow->fast, &hop);
 	if (!flow_fast_read_end_v4(flow, &read))
 		return FORWARD_TC_SLOW_PATH;
+	if (counted)
+		add_rule_traffic_bytes(rule_id, FORWARD_GET_PAYLOAD_LEN(&ctx), 0);
 	if (rewrite_l4_snat(skb, &ctx, nat_addr, nat_port) < 0)
 		return TC_ACT_SHOT;
 	return send_flow_fast_v4(skb, &hop);
@@ -6019,6 +6019,8 @@ static __always_inline int try_reply_flow_fast_v4(struct __sk_buff *skb)
 	const struct flow_value_v4 *flow;
 	__u32 front_addr, client_addr;
 	__u16 front_port, client_port;
+	__u32 rule_id;
+	int counted;
 	int full_cone;
 
 	if (!state || !flow_fast_packet_v4(skb, &ctx))
@@ -6045,9 +6047,14 @@ static __always_inline int try_reply_flow_fast_v4(struct __sk_buff *skb)
 	front_port = flow->front_port;
 	client_addr = flow->client_addr;
 	client_port = flow->client_port;
+	/* A packet sent from the record counts into its rule as the core's would. */
+	counted = FORWARD_FLOW_TRAFFIC_ENABLED(flow);
+	rule_id = flow->rule_id;
 	read_flow_fast_hop_v4(&flow->fast, &hop);
 	if (!flow_fast_read_end_v4(flow, &read))
 		return FORWARD_TC_SLOW_PATH;
+	if (counted)
+		add_rule_traffic_bytes(rule_id, 0, FORWARD_GET_PAYLOAD_LEN(&ctx));
 	if (!full_cone && rewrite_l4_snat(skb, &ctx, front_addr, front_port) < 0)
 		return TC_ACT_SHOT;
 	if (rewrite_l4_dnat(skb, &ctx, client_addr, client_port) < 0)

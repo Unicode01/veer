@@ -45,6 +45,7 @@ const (
 	egressNATHelperObservedEnv     = "FORWARD_EGRESS_NAT_OBSERVED_FILE"
 	egressNATHelperObservedFmtEnv  = "FORWARD_EGRESS_NAT_OBSERVED_FORMAT"
 	egressNATHelperStreamCyclesEnv = "FORWARD_EGRESS_NAT_STREAM_CYCLES"
+	egressNATHelperStreamEchoEnv   = "FORWARD_EGRESS_NAT_STREAM_ECHO"
 	egressNATTestToken             = dataplanePerfToken
 	egressNATBridgeAddr            = "198.18.0.1"
 	egressNATClientAddr            = "198.18.0.2"
@@ -1417,11 +1418,29 @@ func runEgressNATBackendHelper() error {
 			return err
 		}
 		if streamCycles > 0 {
+			// A client that echoes each chunk back gets its data read and
+			// discarded until it closes, so neither side resets the stream.
+			var echoes chan error
+			if egressNATHelperStreamEcho() {
+				echoes = make(chan error, 1)
+				go func() {
+					_, err := io.Copy(io.Discard, conn)
+					echoes <- err
+				}()
+			}
 			for range streamCycles {
 				if _, err := io.Copy(conn, bytes.NewReader(buf[:n])); err != nil {
 					return err
 				}
 				time.Sleep(25 * time.Millisecond)
+			}
+			if echoes != nil {
+				if tcpConn, ok := conn.(*net.TCPConn); ok {
+					if err := tcpConn.CloseWrite(); err != nil {
+						return err
+					}
+				}
+				return <-echoes
 			}
 			return nil
 		}
@@ -1543,12 +1562,18 @@ func runEgressNATClientHelper() error {
 		}
 		buf := make([]byte, len(payload))
 		if streamCycles > 0 {
+			echo := egressNATHelperStreamEcho()
 			for range streamCycles {
 				if _, err := io.ReadFull(conn, buf); err != nil {
 					return err
 				}
 				if !bytes.Equal(buf, payload) {
 					return fmt.Errorf("tcp stream echo mismatch: got %q want %q", string(buf), string(payload))
+				}
+				if echo {
+					if _, err := conn.Write(buf); err != nil {
+						return err
+					}
 				}
 			}
 			return nil
@@ -1561,6 +1586,12 @@ func runEgressNATClientHelper() error {
 		}
 		return nil
 	}
+}
+
+// egressNATHelperStreamEcho reports whether a streaming client sends each
+// chunk it receives back, so the stream carries data both ways.
+func egressNATHelperStreamEcho() bool {
+	return strings.TrimSpace(os.Getenv(egressNATHelperStreamEchoEnv)) == "1"
 }
 
 func egressNATHelperStreamCycles() (int, error) {

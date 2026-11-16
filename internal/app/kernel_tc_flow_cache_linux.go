@@ -35,14 +35,12 @@ type tcFlowCacheStateV4 struct {
 }
 
 // kernelTCFlowCacheDisabledBy names the experimental feature that keeps a
-// configured flow cache off, or returns "". With traffic stats, cached packets
-// would bypass the per-rule counters. With the reply L2 cache or the neighbour
-// redirect, the core's fast paths send packets without a next hop from the
-// FIB, so it records no entry and the cache could only miss.
-func kernelTCFlowCacheDisabledBy(trafficStats, replyL2Cache, redirectNeighFast bool) string {
+// configured flow cache off, or returns "". With the reply L2 cache or the
+// neighbour redirect, the core's fast paths send packets without a next hop
+// from the FIB, so it records no entry and the cache could only miss. Traffic
+// stats do not: a packet sent from a record counts into its rule as well.
+func kernelTCFlowCacheDisabledBy(replyL2Cache, redirectNeighFast bool) string {
 	switch {
-	case trafficStats:
-		return experimentalFeatureKernelTraffic
 	case replyL2Cache:
 		return experimentalFeatureKernelTCReplyL2Cache
 	case redirectNeighFast:

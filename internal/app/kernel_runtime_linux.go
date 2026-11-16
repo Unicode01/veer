@@ -691,7 +691,7 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 	}
 	flowCacheDisabledBy := ""
 	if enableFlowCache {
-		flowCacheDisabledBy = kernelTCFlowCacheDisabledBy(enableTrafficStats, enableReplyL2Cache, enableRedirectNeighFast)
+		flowCacheDisabledBy = kernelTCFlowCacheDisabledBy(enableReplyL2Cache, enableRedirectNeighFast)
 	}
 	return &linuxKernelRuleRuntime{
 		cfg:                     cfg,

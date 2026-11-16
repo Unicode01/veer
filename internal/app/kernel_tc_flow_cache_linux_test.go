@@ -52,7 +52,8 @@ func TestTCRuntimeKeepsFlowCacheOffBesideOptionsItCannotServe(t *testing.T) {
 		want    string
 	}{
 		{feature: "", want: ""},
-		{feature: experimentalFeatureKernelTraffic, want: experimentalFeatureKernelTraffic},
+		// Packets sent from records count into their rules.
+		{feature: experimentalFeatureKernelTraffic, want: ""},
 		{feature: experimentalFeatureKernelTCReplyL2Cache, want: experimentalFeatureKernelTCReplyL2Cache},
 		{feature: experimentalFeatureKernelTCRedirectNeighFast, want: experimentalFeatureKernelTCRedirectNeighFast},
 		// Prepared L2 only affects its own rules; the others still record.
