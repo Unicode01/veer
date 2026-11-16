@@ -4202,6 +4202,21 @@ static __always_inline __u32 flow_fast_stamp_v4(__u64 last_seen_ns, __u32 genera
 }
 
 /*
+ * A live entry as the record writers test it for null. Callers pass
+ * bank == ACTIVE ? entry : 0, and clang 14 then tests a spilled copy of the
+ * bank instead of the pointer. The 5.10 and 5.15 verifiers do not learn
+ * from the select's branch that the bank is not 0, so they also follow the
+ * path where the copy reads 0 with the pointer 0, and rejected the forward
+ * dispatcher, pipelines and core ("R1 invalid mem access 'inv'"). The empty
+ * asm hides where the pointer came from, so the test stays on the pointer.
+ */
+static __always_inline struct flow_value_v4 *flow_fast_live_v4(struct flow_value_v4 *live)
+{
+	asm volatile("" : "+r"(live));
+	return live;
+}
+
+/*
  * Records in the live flow entry how the fast path sends this packet, so the
  * dispatcher can send the flow's next packets straight from its flow lookup.
  * Only untagged TCP and UDP, which that check parses, and only next hops the
@@ -4223,6 +4238,7 @@ static __always_inline void remember_flow_fast_v4(struct __sk_buff *skb, const s
 	__u16 max_len;
 	__u32 stamp;
 
+	live = flow_fast_live_v4(live);
 	if (!live || !l2 || ctx->l3_off != (int)sizeof(struct ethhdr) || ctx->proto == IPPROTO_ICMP)
 		return;
 	state = tc_flow_cache_writable(skb->ifindex);
@@ -4270,6 +4286,7 @@ static __always_inline int flow_fast_current_v4(const struct flow_value_v4 *flow
 
 static __always_inline void retire_flow_fast_v4(struct flow_value_v4 *live)
 {
+	live = flow_fast_live_v4(live);
 	if (live)
 		live->fast.stamp = 0;
 }
