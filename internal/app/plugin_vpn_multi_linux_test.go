@@ -923,13 +923,22 @@ func runVPNMultiTopology(t *testing.T) {
 	for _, exit := range exits[:3] {
 		action(exit, "delete_profile", false)
 	}
+	var leakedRecords []string
 	for _, path := range []string{"vpn_core/resources/profiles", "vpn_core/resources/status", "wan_core/resources/profiles", "wan_core/resources/sessions", "wan_core/resources/status"} {
 		var response struct {
 			Records []json.RawMessage `json:"records"`
 		}
-		if err := json.Unmarshal(api("GET", "/api/plugins/"+path, nil, false), &response); err != nil || len(response.Records) != 0 {
-			t.Fatalf("resources leaked after multi-exit deletion: %s", path)
+		body := api("GET", "/api/plugins/"+path, nil, false)
+		if err := json.Unmarshal(body, &response); err != nil {
+			leakedRecords = append(leakedRecords, fmt.Sprintf("%s: unreadable response (%v): %s", path, err, body))
+			continue
 		}
+		for _, record := range response.Records {
+			leakedRecords = append(leakedRecords, fmt.Sprintf("%s: %s", path, record))
+		}
+	}
+	if len(leakedRecords) != 0 {
+		t.Fatalf("resources leaked after multi-exit deletion:\n%s", strings.Join(leakedRecords, "\n"))
 	}
 	for _, exit := range exits[:3] {
 		for _, name := range []string{exit.tunnel, exit.local, exit.pipeline} {

@@ -93,7 +93,7 @@ exports.onDeactivate = function () {
 
 exports.onResourceApply = function (ctx) {
   if (!ctx.resource || ctx.resource.id !== 'sessions') return;
-  var records = ctx.records || [];
+  var records = currentSessionRecords(ctx.records || []);
   try {
     applyRecords(records, true);
   } finally {
@@ -197,6 +197,27 @@ function armRepairTimer(records) {
     }
   }
   timer.clear('wan_repair');
+}
+
+// The host reads ctx.records before the event waits for this plugin's queue,
+// so an action that ran in between may have changed or deleted them. A
+// teardown with forget is such an action: applying its pre-delete snapshot
+// would write a new status record, or even recreate the boundary, for a WAN
+// that no longer exists. Use each stored record as it is now and skip deleted
+// ones. Records without a stored revision were supplied by the caller as is.
+function currentSessionRecords(records) {
+  var out = [];
+  for (var i = 0; i < records.length; i++) {
+    var record = records[i];
+    if (!record) continue;
+    if (!(record.revision > 0)) {
+      out.push(record);
+      continue;
+    }
+    var stored = resources.get('sessions', record.key);
+    if (stored) out.push(stored);
+  }
+  return out;
 }
 
 function mergedSessionRecords(records) {
