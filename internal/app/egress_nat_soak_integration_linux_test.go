@@ -281,6 +281,8 @@ func TestEgressNATSoakHelperProcess(t *testing.T) {
 		err = runEgressNATSoakServer(os.Getenv(egressNATSoakListenEnv))
 	case "client":
 		err = runEgressNATSoakClient()
+	case "hold":
+		err = runEgressNATSoakHold()
 	default:
 		err = errors.New("unknown soak role")
 	}
@@ -324,6 +326,65 @@ func runEgressNATSoakServer(listen string) error {
 			_, _ = io.Copy(conn, conn)
 		}()
 	}
+}
+
+// runEgressNATSoakHold opens a TCP connection to the target from every local
+// port of FORWARD_EGRESS_NAT_SOAK_PLAN ("first-last"), checks one echo on
+// each, prints READY and keeps them open until stdin closes. Each "check"
+// line on stdin echoes on every connection again and prints
+// "CHECK ok=N broken=M".
+func runEgressNATSoakHold() error {
+	var first, last int
+	if _, err := fmt.Sscanf(os.Getenv(egressNATSoakPlanEnv), "%d-%d", &first, &last); err != nil {
+		return err
+	}
+	target := os.Getenv(egressNATSoakListenEnv)
+	var conns []net.Conn
+	defer func() {
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+	}()
+	for port := first; port <= last; port++ {
+		dialer := net.Dialer{Timeout: egressNATSoakStall, LocalAddr: &net.TCPAddr{Port: port}}
+		conn, err := dialer.Dial("tcp", target)
+		if err != nil {
+			return fmt.Errorf("dial from port %d: %w", port, err)
+		}
+		conns = append(conns, conn)
+		_ = conn.SetDeadline(time.Now().Add(egressNATSoakStall))
+		msg := []byte(fmt.Sprintf("hold-%d", port))
+		buf := make([]byte, len(msg))
+		if _, err := conn.Write(msg); err != nil {
+			return fmt.Errorf("write from port %d: %w", port, err)
+		}
+		if _, err := io.ReadFull(conn, buf); err != nil || !bytes.Equal(buf, msg) {
+			return fmt.Errorf("echo from port %d: %v", port, err)
+		}
+		_ = conn.SetDeadline(time.Time{})
+	}
+	fmt.Println(egressNATHelperReadyLine)
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		if strings.TrimSpace(scanner.Text()) != "check" {
+			continue
+		}
+		ok, broken := 0, 0
+		for i, conn := range conns {
+			msg := []byte(fmt.Sprintf("check-%d", i))
+			buf := make([]byte, len(msg))
+			_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+			if _, err := conn.Write(msg); err == nil {
+				if _, err := io.ReadFull(conn, buf); err == nil && bytes.Equal(buf, msg) {
+					ok++
+					continue
+				}
+			}
+			broken++
+		}
+		fmt.Printf("CHECK ok=%d broken=%d\n", ok, broken)
+	}
+	return nil
 }
 
 func runEgressNATSoakClient() error {

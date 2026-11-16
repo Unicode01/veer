@@ -786,6 +786,8 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
       "attachment_summary": "eno1(3)/forward, eno1(3)/reply",
       "attachment_api": "tcx",
       "flow_cache": true,
+      "nat_port_min": 20000,
+      "nat_port_max": 32767,
       "tcp_established_idle_timeout_mode": "auto",
       "tcp_established_idle_timeout_seconds": 3600,
       "tcp_established_idle_timeout_auto_tier": "high"
@@ -793,6 +795,8 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
   ]
 }
 ```
+
+`nat_port_min` / `nat_port_max` 是内核 NAT 实际分配端口的范围：配置的 `kernel_nat_port_min` / `kernel_nat_port_max` 去掉宿主临时端口范围后剩下的较大一段（上例是 Linux 默认临时端口 32768–60999 下的默认值），避免 NAT 映射收走宿主自己连接的回包。
 
 TC 连接缓存的字段同样分两层：顶层 `kernel_tc_flow_cache` 是配置值（未配置时默认 `true`）；TC 引擎的 `flow_cache` 为 `true` 表示核心程序正在写入并使用连接表项里的快路径记录（`diag_flow_cache_hit` 是直接从记录发出的包数），配置开启却未生效时 `flow_cache_disabled_by` 给出原因所在的实验特性（`kernel_tc_reply_l2_cache` 或 `kernel_tc_redirect_neigh_fast`）。流量统计不影响缓存：上例同时开启了两者，从记录发出的包也计入规则流量。
 

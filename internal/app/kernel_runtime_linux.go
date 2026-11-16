@@ -661,7 +661,7 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 	rulesLimit := 0
 	flowsLimit := 0
 	natLimit := 0
-	natPortMin, natPortMax := effectiveKernelNATPortRange(0, 0)
+	natPortMin, natPortMax := 0, 0
 	enableTrafficStats := false
 	enableDiagnostics := false
 	enableDiagVerbose := false
@@ -676,7 +676,7 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 		rulesLimit = cfg.KernelRulesMapLimit
 		flowsLimit = cfg.KernelFlowsMapLimit
 		natLimit = cfg.KernelNATMapLimit
-		natPortMin, natPortMax = effectiveKernelNATPortRange(cfg.KernelNATPortMin, cfg.KernelNATPortMax)
+		natPortMin, natPortMax = cfg.KernelNATPortMin, cfg.KernelNATPortMax
 		enableTrafficStats = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTraffic)
 		enableDiagnostics = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiag)
 		enableDiagVerbose = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiagVerbose)
@@ -690,6 +690,7 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 	if enableDiagVerbose {
 		enableDiagnostics = true
 	}
+	natPortMin, natPortMax = effectiveKernelNATPortWindow(kernelEngineTC, natPortMin, natPortMax)
 	flowCacheDisabledBy := ""
 	if enableFlowCache {
 		flowCacheDisabledBy = kernelTCFlowCacheDisabledBy(enableReplyL2Cache, enableRedirectNeighFast)

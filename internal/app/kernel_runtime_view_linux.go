@@ -567,6 +567,8 @@ func (rt *linuxKernelRuleRuntime) snapshotRuntimeViewWithForce(force bool) Kerne
 		RulesMapCapacity:                  actualCapacities.Rules,
 		FlowsMapCapacity:                  actualCapacities.Flows,
 		NATMapCapacity:                    actualCapacities.NATPorts,
+		NATPortMin:                        rt.natPortMin,
+		NATPortMax:                        rt.natPortMax,
 		LastReconcileMode:                 rt.lastReconcileMode,
 		TrafficStats:                      rt.enableTrafficStats,
 		FlowCache:                         rt.enableFlowCache,
@@ -663,6 +665,7 @@ func (rt *xdpKernelRuleRuntime) snapshotRuntimeViewWithForce(force bool) KernelE
 	}
 	if useNATMaps {
 		view.NATMapCapacity = actualCapacities.NATPorts
+		view.NATPortMin, view.NATPortMax = rt.natPortMin, rt.natPortMax
 	}
 	applyKernelRuntimePressureView(&view, pressure)
 	applyKernelRuntimeObservabilityView(&view, obs)

@@ -245,7 +245,7 @@ Authorization: Bearer <web_token>
 - `kernel_flows_map_limit`：内核 flow map 容量，`0` 表示自适应
 - `kernel_tcp_established_idle_timeout_seconds`：内核已建立 TCP flow 的空闲超时；`0` 表示按 IPv4/IPv6 flow map 的最高利用率自动选择，正数表示固定秒数。auto 在利用率达到 50% / 70% / 85% 时依次采用 6 小时 / 1 小时 / 10 分钟，低负载采用 24 小时；回落阈值分别为 45% / 65% / 80%，避免临界点抖动
 - `kernel_nat_ports_map_limit`：内核 NAT 端口 map 容量，`0` 表示自适应
-- `kernel_nat_port_min` / `kernel_nat_port_max`：内核 Full NAT 临时端口池
+- `kernel_nat_port_min` / `kernel_nat_port_max`：内核 Full NAT / Egress NAT 的端口池，默认 20000–65535。NAT 地址就是宿主自己的地址，宿主连接用的临时端口（`net.ipv4.ip_local_port_range`，Linux 默认 32768–60999）若也被 NAT 占用，回包会被当作 NAT 回程转给内网主机（Full Cone 的回程不看对端），宿主那条连接只能超时。所以内核 NAT 启动时从端口池里去掉宿主的临时端口范围，取剩下较大的一段，默认配置下实际使用 20000–32767；运行时视图 TC/XDP 引擎的 `nat_port_min` / `nat_port_max` 显示实际范围。端口池整个落在临时端口范围内时按配置使用并记录警告。临时端口范围只在启动时读取，修改后重启 Veer 生效；需要更多 NAT 端口时可以调小宿主的临时端口范围，或把端口池配置到它之外
 - `kernel_tc_flow_cache`：TC 连接缓存，默认开启；只跑大量短连接时可设为 `false`，取舍见下文 Dataplane 一节
 - `experimental_features`：实验特性开关，默认都应保持关闭，按需验证后再开
 

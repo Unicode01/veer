@@ -226,7 +226,7 @@ func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 	rulesLimit := 0
 	flowsLimit := 0
 	natLimit := 0
-	natPortMin, natPortMax := effectiveKernelNATPortRange(0, 0)
+	natPortMin, natPortMax := 0, 0
 	tcpIdleTimeoutSeconds := int64(0)
 	if cfg != nil && cfg.ExperimentalFeatureEnabled(experimentalFeatureBridgeXDP) {
 		opts.enableBridge = true
@@ -241,9 +241,10 @@ func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 		rulesLimit = cfg.KernelRulesMapLimit
 		flowsLimit = cfg.KernelFlowsMapLimit
 		natLimit = cfg.KernelNATMapLimit
-		natPortMin, natPortMax = effectiveKernelNATPortRange(cfg.KernelNATPortMin, cfg.KernelNATPortMax)
+		natPortMin, natPortMax = cfg.KernelNATPortMin, cfg.KernelNATPortMax
 		tcpIdleTimeoutSeconds = cfg.KernelTCPEstablishedIdleTimeoutSeconds
 	}
+	natPortMin, natPortMax = effectiveKernelNATPortWindow(kernelEngineXDP, natPortMin, natPortMax)
 	return &xdpKernelRuleRuntime{
 		prepareOptions:     opts,
 		allowGenericAttach: allowGeneric,

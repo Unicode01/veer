@@ -478,6 +478,8 @@ type KernelEngineRuntimeView struct {
 	NATMapEntriesV6                         int       `json:"nat_map_entries_v6,omitempty"`
 	NATMapCapacityV6                        int       `json:"nat_map_capacity_v6,omitempty"`
 	NATMapOldCapacityV6                     int       `json:"nat_map_old_capacity_v6,omitempty"`
+	NATPortMin                              int       `json:"nat_port_min,omitempty"`
+	NATPortMax                              int       `json:"nat_port_max,omitempty"`
 	LastReconcileMode                       string    `json:"last_reconcile_mode,omitempty"`
 	TrafficStats                            bool      `json:"traffic_stats"`
 	FlowCache                               bool      `json:"flow_cache,omitempty"`
