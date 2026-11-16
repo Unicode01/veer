@@ -574,6 +574,8 @@ struct tc_plugin_metric_value {
 #define FORWARD_TC_MIN_PATH_MTU 576
 /* egress_nat_check_mtu_v4: the packet fits; any other value is its action. */
 #define FORWARD_TC_MTU_FITS (-100)
+/* egress_nat_check_mtu_v4: no route by the uplink to check a length against. */
+#define FORWARD_TC_PATH_UNCHECKED 0xffffU
 /* How long the later fragments of a datagram follow its first one. */
 #define FORWARD_TC_FRAGMENT_TTL_NS (5ULL * 1000000000ULL)
 #define FORWARD_TC_FRAGMENT_SEND 0
@@ -700,7 +702,9 @@ struct bpf_map_def SEC("maps") reply_l2_cache_v4 = {
  * Established NAT flows reuse the next hop their slow path last resolved
  * instead of a FIB lookup per packet. Each flow takes its slow path at least
  * once per FORWARD_TC_FAST_PATH_WINDOW_NS, which refreshes or removes the
- * entry, so a route or neighbour change is picked up within that window.
+ * entry, so a route or neighbour change is picked up within that window. An
+ * entry without out_ifindex names no next hop: the egress NAT uplink check
+ * found no route by the uplink (egress_nat_check_mtu_v4).
  */
 struct bpf_map_def SEC("maps") tc_l2_cache_v4 = {
 	.type = BPF_MAP_TYPE_LRU_HASH,
@@ -2921,8 +2925,15 @@ static __always_inline int redirect_ifindex(struct __sk_buff *skb, const struct 
  * stack would fragment it, but send it on without the NAT. Packets the FIB
  * already accepted at this size skip the lookup. Returns FORWARD_TC_MTU_FITS
  * to go on, or the action for the packet (TC_ACT_OK hands it to the stack).
+ *
+ * fits, if given, receives the largest wire length known to fit when the
+ * packet does: FORWARD_TC_PATH_UNCHECKED when the FIB has no route by the
+ * uplink to judge by (a VPN boundary), which sends any length as the core
+ * would. That finding is kept in tc_l2_cache_v4 as an entry without a next
+ * hop, which fast paths trust; full paths (recheck) look the path up again,
+ * as they refresh the next hops of their flows once per window.
  */
-static __always_inline int egress_nat_check_mtu_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, __u32 nat_addr, __u16 nat_port, __u32 dst_addr, __u16 dst_port)
+static __always_inline int egress_nat_check_mtu_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, __u32 nat_addr, __u16 nat_port, __u32 dst_addr, __u16 dst_port, __u32 *fits, int recheck)
 {
 	struct redirect_target_v4 target = {};
 	struct tc_l2_key_v4 key = {};
@@ -2931,12 +2942,24 @@ static __always_inline int egress_nat_check_mtu_v4(struct __sk_buff *skb, const 
 	__u32 wire = tc_wire_len_v4(skb, ctx);
 	long act;
 
+	if (fits)
+		*fits = FORWARD_TC_MIN_PATH_MTU;
 	if (wire <= FORWARD_TC_MIN_PATH_MTU || !rule->out_ifindex)
 		return FORWARD_TC_MTU_FITS;
 	build_tc_l2_key_v4(rule->out_ifindex, nat_addr, dst_addr, &key);
 	known = bpf_map_lookup_elem(&tc_l2_cache_v4, &key);
-	if (known && known->out_ifindex && wire <= known->max_len)
+	if (known && known->out_ifindex && wire <= known->max_len) {
+		if (fits)
+			*fits = known->max_len;
 		return FORWARD_TC_MTU_FITS;
+	}
+	if (known && !known->out_ifindex && !recheck) {
+		if (fits)
+			*fits = FORWARD_TC_PATH_UNCHECKED;
+		return FORWARD_TC_MTU_FITS;
+	}
+	if (fits)
+		*fits = wire;
 	fib = lookup_scratch_fib_v4();
 	if (!fib)
 		return FORWARD_TC_MTU_FITS;
@@ -2958,8 +2981,20 @@ static __always_inline int egress_nat_check_mtu_v4(struct __sk_buff *skb, const 
 		remember_tc_l2_v4(&target, fib, fib->ifindex ? fib->ifindex : rule->out_ifindex, wire);
 		return FORWARD_TC_MTU_FITS;
 	}
-	if (act != BPF_FIB_LKUP_RET_FRAG_NEEDED)
+	if (act != BPF_FIB_LKUP_RET_FRAG_NEEDED) {
+		if (fits)
+			*fits = FORWARD_TC_PATH_UNCHECKED;
+		/* No route by the uplink at all, rather than one still resolving. */
+		if (act == BPF_FIB_LKUP_RET_NOT_FWDED && (!known || known->out_ifindex)) {
+			struct tc_l2_value_v4 unchecked = {};
+
+			unchecked.max_len = FORWARD_TC_PATH_UNCHECKED;
+			bpf_map_update_elem(&tc_l2_cache_v4, &key, &unchecked, BPF_ANY);
+		}
 		return FORWARD_TC_MTU_FITS;
+	}
+	if (known && !known->out_ifindex)
+		bpf_map_delete_elem(&tc_l2_cache_v4, &key);
 	if ((ctx->ip_flags & FORWARD_IP_FLAG_DF) != 0) {
 		tc_diag_pmtu_to_stack();
 		return TC_ACT_OK;
@@ -4123,10 +4158,25 @@ static __always_inline int send_egress_nat_forward(struct __sk_buff *skb, const 
 	return redirect_ifindex_l2(skb, ctx, &redirect, nat_cfg_flags, 1);
 }
 
+/*
+ * The next hop a prepared_l2 rule names itself, as send_egress_nat_forward
+ * uses it, for packets up to max_len (see egress_nat_check_mtu_v4).
+ */
+static __always_inline int egress_nat_prepared_hop_v4(const struct rule_value_v4 *rule, __u32 max_len, struct tc_l2_value_v4 *hop)
+{
+	if (!rule->out_ifindex || mac_is_zero(rule->egress_src_mac) || mac_is_zero(rule->egress_dst_mac))
+		return -1;
+	__builtin_memcpy(hop->dmac, rule->egress_dst_mac, ETH_ALEN);
+	__builtin_memcpy(hop->smac, rule->egress_src_mac, ETH_ALEN);
+	hop->out_ifindex = rule->out_ifindex;
+	hop->max_len = max_len;
+	return 0;
+}
+
 static __always_inline int redirect_egress_nat_forward(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, const struct flow_value_v4 *front_value, __u32 nat_cfg_flags)
 {
 	int action = egress_nat_check_mtu_v4(skb, ctx, rule, front_value->nat_addr, front_value->nat_port,
-		front_value->front_addr, front_value->front_port);
+		front_value->front_addr, front_value->front_port, 0, 1);
 
 	if (action != FORWARD_TC_MTU_FITS)
 		return action;
@@ -4332,6 +4382,7 @@ static __always_inline int tcp_packet_changes_state(const struct packet_ctx *ctx
 static __always_inline int try_egress_nat_forward_fast(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, const struct flow_value_v4 *front_flow, struct flow_value_v4 *live, __u64 now, __u32 nat_cfg_flags)
 {
 	const struct tc_l2_value_v4 *l2 = 0;
+	struct tc_l2_value_v4 prepared;
 	__u32 nat_addr;
 	__u32 dst_addr;
 	__u16 dst_port;
@@ -4371,14 +4422,27 @@ static __always_inline int try_egress_nat_forward_fast(struct __sk_buff *skb, co
 		dst_addr = front_flow->front_addr;
 		dst_port = front_flow->front_port;
 	}
-	/* The full-cone slow path always resolves through the FIB, so this does too. */
-	if ((full_cone || (rule->flags & FORWARD_RULE_FLAG_PREPARED_L2) == 0) && !prefer_redirect_neigh_fast(nat_cfg_flags)) {
+	/*
+	 * Like the slow path: a prepared_l2 rule names its next hop itself, which
+	 * also lets the flow cache record a boundary the FIB has no route by (a
+	 * VPN exit); any other rule takes the next hop its slow path resolved.
+	 */
+	if ((rule->flags & FORWARD_RULE_FLAG_PREPARED_L2) != 0) {
+		__u32 fits = 0;
+		int action = egress_nat_check_mtu_v4(skb, ctx, rule, nat_addr, front_flow->nat_port, dst_addr, dst_port, &fits, 0);
+
+		if (action != FORWARD_TC_MTU_FITS)
+			return action;
+		if (egress_nat_prepared_hop_v4(rule, fits, &prepared) < 0)
+			return FORWARD_TC_SLOW_PATH;
+		l2 = &prepared;
+	} else if (!prefer_redirect_neigh_fast(nat_cfg_flags)) {
 		/* Holds the packet to the wire length the FIB accepted, too. */
 		l2 = lookup_tc_l2_v4(skb, ctx, rule->out_ifindex, nat_addr, dst_addr);
 		if (!l2)
 			return FORWARD_TC_SLOW_PATH;
 	} else {
-		int action = egress_nat_check_mtu_v4(skb, ctx, rule, nat_addr, front_flow->nat_port, dst_addr, dst_port);
+		int action = egress_nat_check_mtu_v4(skb, ctx, rule, nat_addr, front_flow->nat_port, dst_addr, dst_port, 0, 0);
 
 		if (action != FORWARD_TC_MTU_FITS)
 			return action;
@@ -4402,16 +4466,6 @@ static __always_inline int try_egress_nat_forward_fast(struct __sk_buff *skb, co
 		return TC_ACT_SHOT;
 	if (l2)
 		return redirect_tc_l2_v4(skb, l2);
-	if (full_cone) {
-		struct redirect_target_v4 redirect = {};
-
-		redirect.ifindex = rule->out_ifindex;
-		redirect.src_addr = nat_addr;
-		redirect.dst_addr = dst_addr;
-		redirect.src_port = front_flow->nat_port;
-		redirect.dst_port = dst_port;
-		return redirect_ifindex_l2(skb, ctx, &redirect, nat_cfg_flags, 1);
-	}
 	return send_egress_nat_forward(skb, ctx, rule, nat_addr, front_flow->nat_port,
 		dst_addr, dst_port, nat_cfg_flags);
 }
@@ -4627,7 +4681,6 @@ static __always_inline int handle_egress_nat_forward_full_cone_new(struct __sk_b
 {
 	struct flow_key_v4 reply_key = {};
 	struct nat_port_key_v4 nat_key = {};
-	struct redirect_target_v4 redirect = {};
 	struct flow_value_v4 *front_value = lookup_scratch_flow_v4();
 	struct flow_value_v4 *reply_value = lookup_scratch_flow_aux_v4();
 	struct flow_value_v4 *front_flow;
@@ -4697,20 +4750,16 @@ static __always_inline int handle_egress_nat_forward_full_cone_new(struct __sk_b
 
 	{
 		int action = egress_nat_check_mtu_v4(skb, ctx, rule, front_value->nat_addr, front_value->nat_port,
-			bpf_ntohl(ctx->dst_addr), ctx->dst_port);
+			bpf_ntohl(ctx->dst_addr), ctx->dst_port, 0, 1);
 
 		if (action != FORWARD_TC_MTU_FITS)
 			return action;
 	}
 	if (rewrite_l4_snat(skb, ctx, front_value->nat_addr, front_value->nat_port) < 0)
 		return TC_ACT_SHOT;
-	/* Like the rest of the full-cone path, resolved through the FIB. */
-	redirect.ifindex = rule->out_ifindex;
-	redirect.src_addr = front_value->nat_addr;
-	redirect.src_port = front_value->nat_port;
-	redirect.dst_addr = bpf_ntohl(ctx->dst_addr);
-	redirect.dst_port = ctx->dst_port;
-	return redirect_ifindex_l2(skb, ctx, &redirect, nat_cfg_flags, 1);
+	/* The packet's own destination selects the next hop. */
+	return send_egress_nat_forward(skb, ctx, rule, front_value->nat_addr, front_value->nat_port,
+		bpf_ntohl(ctx->dst_addr), ctx->dst_port, nat_cfg_flags);
 }
 
 static __always_inline int handle_egress_nat_forward_non_full_cone(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule)
@@ -4857,7 +4906,7 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 
 	{
 		int action = egress_nat_check_mtu_v4(skb, ctx, rule, front_value->nat_addr, front_value->nat_port,
-			bpf_ntohl(ctx->dst_addr), ctx->dst_port);
+			bpf_ntohl(ctx->dst_addr), ctx->dst_port, 0, 1);
 
 		if (action != FORWARD_TC_MTU_FITS)
 			return action;
@@ -4865,13 +4914,9 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 	if (rewrite_l4_snat(skb, ctx, front_value->nat_addr, front_value->nat_port) < 0)
 		return TC_ACT_SHOT;
 
-	reply_or_nat.flow.ifindex = rule->out_ifindex;
-	reply_or_nat.flow.src_addr = front_value->nat_addr;
-	reply_or_nat.flow.src_port = front_value->nat_port;
-	reply_or_nat.flow.dst_addr = bpf_ntohl(ctx->dst_addr);
-	reply_or_nat.flow.dst_port = ctx->dst_port;
 	{
-		int action = redirect_ifindex_l2(skb, ctx, (const struct redirect_target_v4 *)&reply_or_nat.flow, nat_cfg_flags, 1);
+		int action = send_egress_nat_forward(skb, ctx, rule, front_value->nat_addr, front_value->nat_port,
+			bpf_ntohl(ctx->dst_addr), ctx->dst_port, nat_cfg_flags);
 
 		if (close_complete && action == TC_ACT_REDIRECT)
 			delete_fullnat_state(flow_bank, &close_reply_key, reply_value, ctx->proto);

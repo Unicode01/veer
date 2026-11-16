@@ -160,7 +160,7 @@ JavaScript 负责配置和恢复，不参与逐包转发。无需关闭 Veer 快
 2. 在 Linux 源码目录运行 `sh plugins/vpn_core/build.sh`，生成基础、helper 与 direct 三份适配对象。将整个插件目录复制到实际 `plugins_dir`，同时安装 `wan_core >=1.5.6 <2.0.0`。
 3. 开启 `plugins_enabled=true` 和 `plugins_dataplane_enabled=true`；保持默认 `plugins_remote_install_enabled=false` 以允许插件 exec。插件需要 Veer 的网络管理权限，不执行 shell 或用户提供的脚本。
 4. 打开 VPN 页面，保存私钥，再保存并应用 profile。空插件和仅保存的草稿不更改网络。
-5. 在 LAN 配置中选择此 WAN，或在出向 NAT 中设置出口接口、源 IPv4 与 `prepared_l2` 重定向模式。不要填写内核 `vwg*` 接口作为核心 NAT 出口。
+5. 在 LAN 配置中选择此 WAN，或在出向 NAT 中设置出口接口和源 IPv4。出口边界不做 ARP，核心自动按 `prepared_l2` 用边界自己的 MAC 发送，出向 NAT 页面无需（也无法）另设重定向模式。不要填写内核 `vwg*` 接口作为核心 NAT 出口。
 
 ## 配置示例
 
@@ -187,7 +187,7 @@ JavaScript 负责配置和恢复，不参与逐包转发。无需关闭 Veer 快
 | WAN Core ID | `wg_default` |
 | 出向 NAT 接口 | `veerwg1` |
 | 出向 NAT 源地址 | `10.77.0.1` |
-| 出向 NAT 重定向模式 | `prepared_l2` |
+| 出向 NAT 重定向模式 | `prepared_l2`（LAN 选择此 WAN 时写入；手工出向 NAT 由核心自动选择） |
 | pipeline veth | `veerwgp1` |
 | 内核 WG 接口 | `vwgdefault` |
 

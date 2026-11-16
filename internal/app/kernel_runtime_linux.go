@@ -4399,13 +4399,19 @@ func prepareKernelEgressNATRule(ctx *kernelPrepareContext, rule Rule, inLink net
 	}
 	var egressSrcMAC [6]byte
 	var egressDstMAC [6]byte
-	if normalizeEgressNATRedirectMode(rule.kernelRedirectMode) == egressNATRedirectModePreparedL2 {
+	switch normalizeEgressNATRedirectMode(rule.kernelRedirectMode) {
+	case egressNATRedirectModePreparedL2:
 		var redirectErr error
 		egressSrcMAC, egressDstMAC, redirectErr = resolveKernelEgressNATPreparedL2Redirect(outLink)
 		if redirectErr != nil {
 			return nil, fmt.Errorf("resolve egress nat prepared_l2 redirect on %q: %w", rule.OutInterface, redirectErr)
 		}
 		flags |= kernelRuleFlagPreparedL2
+	case "":
+		if mac, ok := kernelEgressNATExitWithoutARP(outLink); ok {
+			egressSrcMAC, egressDstMAC = mac, mac
+			flags |= kernelRuleFlagPreparedL2
+		}
 	}
 
 	prepared := make([]preparedKernelRule, 0, len(inLinks))
