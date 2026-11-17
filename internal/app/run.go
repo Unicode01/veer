@@ -60,6 +60,10 @@ func Main(buildNonce string) {
 		exitOnVeerCLIError("kfuncs", err)
 		return
 	}
+	if handled, err := runHotRestartCLI(os.Args[1:], os.Stdout, os.Stderr); handled {
+		exitOnVeerCLIError("hot-restart", err)
+		return
+	}
 
 	workerMode := flag.Bool("worker", false, "run in worker mode")
 	rangeWorkerMode := flag.Bool("range-worker", false, "run in range worker mode")

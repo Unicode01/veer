@@ -256,6 +256,18 @@ func kernelHotRestartXDPMetadataForHotRestart(attachments []xdpAttachment, objec
 	return kernelHotRestartMetadataWithABI(meta, kernelXDPHotRestartCompatToken(enableTrafficStats))
 }
 
+// runtimeMetadata describes the running tc runtime. It carries the compat
+// token a hot restart would hand over, so `veer hot-restart check` can compare
+// it with the token of the binary about to start.
+func (rt *linuxKernelRuleRuntime) runtimeMetadata() kernelHotRestartMetadata {
+	return kernelHotRestartMetadataWithABI(kernelHotRestartTCMetadata(rt.attachments, ""), kernelTCHotRestartCompatToken(rt.enableTrafficStats))
+}
+
+// runtimeMetadata is the xdp counterpart of the tc runtime's.
+func (rt *xdpKernelRuleRuntime) runtimeMetadata() kernelHotRestartMetadata {
+	return kernelHotRestartMetadataWithABI(kernelHotRestartXDPMetadata(rt.attachments, ""), kernelXDPHotRestartCompatToken(rt.prepareOptions.enableTrafficStats))
+}
+
 func kernelHotRestartMetadataWithRuleState(meta kernelHotRestartMetadata, rules []Rule, pending map[kernelFlowPurgeTarget]struct{}) kernelHotRestartMetadata {
 	byID := make(map[uint32]kernelHotRestartCandidateRule, len(rules))
 	for _, rule := range rules {
@@ -925,12 +937,39 @@ func validateKernelHotRestartMapCompatibility(name string, actual kernelHotResta
 	return nil
 }
 
+// kernelHotRestartMapComparison is the adoption check of one preserved map
+// against the map of the same name in the successor's object.
+type kernelHotRestartMapComparison struct {
+	name string
+	// actual and desired are set once the preserved map and the object's
+	// map could be read.
+	actual  *kernelHotRestartMapDescriptor
+	desired *kernelHotRestartMapDescriptor
+	// err is nil when the successor can adopt the map.
+	err error
+}
+
 func validateKernelHotRestartMapReplacements(spec *ebpf.CollectionSpec, replacements map[string]*ebpf.Map, allowSmallerCapacity map[string]bool) error {
+	comparisons, err := compareKernelHotRestartMapReplacements(spec, replacements, allowSmallerCapacity)
+	if err != nil {
+		return err
+	}
+	for _, comparison := range comparisons {
+		if comparison.err != nil {
+			return comparison.err
+		}
+	}
+	return nil
+}
+
+// compareKernelHotRestartMapReplacements checks every preserved map, in name
+// order, instead of stopping at the first one the successor cannot adopt.
+func compareKernelHotRestartMapReplacements(spec *ebpf.CollectionSpec, replacements map[string]*ebpf.Map, allowSmallerCapacity map[string]bool) ([]kernelHotRestartMapComparison, error) {
 	if spec == nil {
-		return fmt.Errorf("collection spec is missing")
+		return nil, fmt.Errorf("collection spec is missing")
 	}
 	if len(replacements) == 0 {
-		return nil
+		return nil, nil
 	}
 	names := make([]string, 0, len(replacements))
 	for name := range replacements {
@@ -938,22 +977,32 @@ func validateKernelHotRestartMapReplacements(spec *ebpf.CollectionSpec, replacem
 	}
 	sort.Strings(names)
 
+	comparisons := make([]kernelHotRestartMapComparison, 0, len(names))
 	for _, name := range names {
-		currentSpec := spec.Maps[name]
-		if currentSpec == nil {
-			return newKernelHotRestartIncompatibleError("map %q is preserved but missing from current object", name)
-		}
-		actual, err := kernelHotRestartMapDescriptorFromMap(replacements[name])
-		if err != nil {
-			return fmt.Errorf("read preserved map %q info: %w", name, err)
-		}
-		desired, err := kernelHotRestartMapDescriptorFromSpec(currentSpec)
-		if err != nil {
-			return fmt.Errorf("read current map %q spec: %w", name, err)
-		}
-		if err := validateKernelHotRestartMapCompatibility(name, actual, desired, allowSmallerCapacity[name]); err != nil {
-			return fmt.Errorf("map %q incompatible: %w", name, err)
-		}
+		comparison := kernelHotRestartMapComparison{name: name}
+		comparison.err = compareKernelHotRestartMapReplacement(spec, name, replacements[name], allowSmallerCapacity[name], &comparison)
+		comparisons = append(comparisons, comparison)
+	}
+	return comparisons, nil
+}
+
+func compareKernelHotRestartMapReplacement(spec *ebpf.CollectionSpec, name string, m *ebpf.Map, allowSmallerCapacity bool, out *kernelHotRestartMapComparison) error {
+	currentSpec := spec.Maps[name]
+	if currentSpec == nil {
+		return newKernelHotRestartIncompatibleError("map %q is preserved but missing from current object", name)
+	}
+	actual, err := kernelHotRestartMapDescriptorFromMap(m)
+	if err != nil {
+		return fmt.Errorf("read preserved map %q info: %w", name, err)
+	}
+	out.actual = &actual
+	desired, err := kernelHotRestartMapDescriptorFromSpec(currentSpec)
+	if err != nil {
+		return fmt.Errorf("read current map %q spec: %w", name, err)
+	}
+	out.desired = &desired
+	if err := validateKernelHotRestartMapCompatibility(name, actual, desired, allowSmallerCapacity); err != nil {
+		return fmt.Errorf("map %q incompatible: %w", name, err)
 	}
 	return nil
 }
@@ -988,6 +1037,120 @@ func kernelCollectionSpecWithReplacementMapCapacities(spec *ebpf.CollectionSpec,
 	return loadSpec, nil
 }
 
+// kernelHotRestartMapSource gives the maps a predecessor preserved. The
+// successor reads them from their pins; `veer hot-restart check` reads them
+// from the running daemon before it has pinned anything.
+type kernelHotRestartMapSource struct {
+	// load opens the named map; false means it was not preserved.
+	load func(name string) (*ebpf.Map, bool, error)
+	// exists reports whether the named map was preserved, without opening it.
+	exists func(name string) (bool, error)
+}
+
+func pinnedKernelHotRestartMapSource(engine string) kernelHotRestartMapSource {
+	return kernelHotRestartMapSource{
+		load: func(name string) (*ebpf.Map, bool, error) {
+			return loadPinnedKernelMap(kernelHotRestartPinPath(engine, name))
+		},
+		exists: func(name string) (bool, error) {
+			_, err := os.Stat(kernelHotRestartPinPath(engine, name))
+			if err == nil {
+				return true, nil
+			}
+			if os.IsNotExist(err) {
+				return false, nil
+			}
+			return false, err
+		},
+	}
+}
+
+// kernelTCHotRestartPreservedMapNames lists the maps a tc runtime pins for its
+// successor. present reports whether the running collection has a map.
+func kernelTCHotRestartPreservedMapNames(present func(string) bool, migrationFlags uint32, skipStats bool) []string {
+	names := []string{kernelFlowsMapName, kernelNatPortsMapName}
+	add := func(candidates ...string) {
+		for _, name := range candidates {
+			if present(name) {
+				names = append(names, name)
+			}
+		}
+	}
+	add(kernelFlowsMapNameV6, kernelNatPortsMapNameV6)
+	if migrationFlags&tcFlowMigrationFlagV4Old != 0 {
+		add(kernelTCFlowsOldMapNameV4, kernelTCNatPortsOldMapNameV4)
+	}
+	if migrationFlags&tcFlowMigrationFlagV6Old != 0 {
+		add(kernelTCFlowsOldMapNameV6, kernelTCNatPortsOldMapNameV6)
+	}
+	if !skipStats {
+		names = append(names, kernelStatsMapName)
+	}
+	return names
+}
+
+// kernelXDPHotRestartPreservedMapNames lists the maps an xdp runtime pins for
+// its successor. keepNAT is set when any NAT map holds entries.
+func kernelXDPHotRestartPreservedMapNames(present func(string) bool, migrationFlags uint32, keepNAT bool, skipStats bool) []string {
+	names := []string{kernelFlowsMapName}
+	if present(kernelFlowsMapNameV6) {
+		names = append(names, kernelFlowsMapNameV6)
+	}
+	if keepNAT {
+		names = append(names, kernelNatPortsMapName)
+		if present(kernelNatPortsMapNameV6) {
+			names = append(names, kernelNatPortsMapNameV6)
+		}
+	}
+	if migrationFlags&xdpFlowMigrationFlagV4Old != 0 {
+		names = append(names, kernelXDPFlowsOldMapNameV4)
+		if keepNAT {
+			names = append(names, kernelTCNatPortsOldMapNameV4)
+		}
+	}
+	if migrationFlags&xdpFlowMigrationFlagV6Old != 0 {
+		names = append(names, kernelXDPFlowsOldMapNameV6)
+		if keepNAT && present(kernelTCNatPortsOldMapNameV6) {
+			names = append(names, kernelTCNatPortsOldMapNameV6)
+		}
+	}
+	if !skipStats {
+		names = append(names, kernelStatsMapName)
+	}
+	return names
+}
+
+// kernelTCHotRestartFlexibleCapacityMaps names the tc maps a successor adopts
+// at their preserved size even when it wants them larger; the flow migration
+// drains them.
+func kernelTCHotRestartFlexibleCapacityMaps() map[string]bool {
+	return map[string]bool{
+		kernelFlowsMapName:           true,
+		kernelFlowsMapNameV6:         true,
+		kernelNatPortsMapName:        true,
+		kernelNatPortsMapNameV6:      true,
+		kernelTCFlowsOldMapNameV4:    true,
+		kernelTCFlowsOldMapNameV6:    true,
+		kernelTCNatPortsOldMapNameV4: true,
+		kernelTCNatPortsOldMapNameV6: true,
+	}
+}
+
+// kernelXDPHotRestartFlexibleCapacityMaps is the xdp counterpart of
+// kernelTCHotRestartFlexibleCapacityMaps.
+func kernelXDPHotRestartFlexibleCapacityMaps() map[string]bool {
+	return map[string]bool{
+		kernelFlowsMapName:           true,
+		kernelFlowsMapNameV6:         true,
+		kernelXDPFlowsOldMapNameV4:   true,
+		kernelXDPFlowsOldMapNameV6:   true,
+		kernelNatPortsMapName:        true,
+		kernelNatPortsMapNameV6:      true,
+		kernelTCNatPortsOldMapNameV4: true,
+		kernelTCNatPortsOldMapNameV6: true,
+	}
+}
+
 func loadTCKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRestartValidationOptions) (*kernelHotRestartMapState, error) {
 	if !kernelHotRestartStateExists(kernelEngineTC) {
 		return nil, nil
@@ -999,10 +1162,25 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRest
 	if err := validateKernelHotRestartMetadataWithOptions(meta, opts); err != nil {
 		return nil, fmt.Errorf("validate tc hot restart metadata: %w", err)
 	}
+	skipStats := kernelHotRestartSkipStatsRequested()
+	state, err := buildTCKernelHotRestartMapState(desired, pinnedKernelHotRestartMapSource(kernelEngineTC), skipStats)
+	if err != nil || state == nil {
+		return nil, err
+	}
+	state.predecessorAttachments = kernelAttachmentsFromHotRestartMetadata(meta.TCAttachments)
+	if skipStats {
+		log.Printf("kernel dataplane hot restart: skipping preserved %s map for tc; counters will rebuild from live flow state", kernelStatsMapName)
+	}
+	return state, nil
+}
+
+// buildTCKernelHotRestartMapState decides which preserved tc maps a successor
+// adopts and under which names. An incompatible error means the preserved set
+// cannot be adopted and the successor starts with fresh maps.
+func buildTCKernelHotRestartMapState(desired kernelMapCapacities, source kernelHotRestartMapSource, skipStats bool) (*kernelHotRestartMapState, error) {
 	state := &kernelHotRestartMapState{
-		replacements:           make(map[string]*ebpf.Map, 9),
-		actualCapacities:       desired,
-		predecessorAttachments: kernelAttachmentsFromHotRestartMetadata(meta.TCAttachments),
+		replacements:     make(map[string]*ebpf.Map, 9),
+		actualCapacities: desired,
 	}
 	loadedAny := false
 	haveActiveFlowsV4 := false
@@ -1013,9 +1191,8 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRest
 	haveOldNATV4 := false
 	haveOldFlowsV6 := false
 	haveOldNATV6 := false
-	skipStats := kernelHotRestartSkipStatsRequested()
 
-	flowsMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineTC, kernelFlowsMapName))
+	flowsMap, ok, err := source.load(kernelFlowsMapName)
 	if err != nil {
 		state.close()
 		return nil, fmt.Errorf("load pinned tc flows map: %w", err)
@@ -1026,7 +1203,7 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRest
 		state.replacements[kernelFlowsMapName] = flowsMap
 	}
 
-	flowsMapV6, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineTC, kernelFlowsMapNameV6))
+	flowsMapV6, ok, err := source.load(kernelFlowsMapNameV6)
 	if err != nil {
 		state.close()
 		return nil, fmt.Errorf("load pinned tc IPv6 flows map: %w", err)
@@ -1037,7 +1214,7 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRest
 		state.replacements[kernelFlowsMapNameV6] = flowsMapV6
 	}
 
-	natMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineTC, kernelNatPortsMapName))
+	natMap, ok, err := source.load(kernelNatPortsMapName)
 	if err != nil {
 		state.close()
 		return nil, fmt.Errorf("load pinned tc nat map: %w", err)
@@ -1048,7 +1225,7 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRest
 		state.replacements[kernelNatPortsMapName] = natMap
 	}
 
-	natMapV6, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineTC, kernelNatPortsMapNameV6))
+	natMapV6, ok, err := source.load(kernelNatPortsMapNameV6)
 	if err != nil {
 		state.close()
 		return nil, fmt.Errorf("load pinned tc IPv6 nat map: %w", err)
@@ -1059,7 +1236,7 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRest
 		state.replacements[kernelNatPortsMapNameV6] = natMapV6
 	}
 
-	flowsOldMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineTC, kernelTCFlowsOldMapNameV4))
+	flowsOldMap, ok, err := source.load(kernelTCFlowsOldMapNameV4)
 	if err != nil {
 		state.close()
 		return nil, fmt.Errorf("load pinned tc old IPv4 flows map: %w", err)
@@ -1070,7 +1247,7 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRest
 		state.replacements[kernelTCFlowsOldMapNameV4] = flowsOldMap
 	}
 
-	flowsOldMapV6, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineTC, kernelTCFlowsOldMapNameV6))
+	flowsOldMapV6, ok, err := source.load(kernelTCFlowsOldMapNameV6)
 	if err != nil {
 		state.close()
 		return nil, fmt.Errorf("load pinned tc old IPv6 flows map: %w", err)
@@ -1081,7 +1258,7 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRest
 		state.replacements[kernelTCFlowsOldMapNameV6] = flowsOldMapV6
 	}
 
-	natOldMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineTC, kernelTCNatPortsOldMapNameV4))
+	natOldMap, ok, err := source.load(kernelTCNatPortsOldMapNameV4)
 	if err != nil {
 		state.close()
 		return nil, fmt.Errorf("load pinned tc old IPv4 nat map: %w", err)
@@ -1092,7 +1269,7 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRest
 		state.replacements[kernelTCNatPortsOldMapNameV4] = natOldMap
 	}
 
-	natOldMapV6, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineTC, kernelTCNatPortsOldMapNameV6))
+	natOldMapV6, ok, err := source.load(kernelTCNatPortsOldMapNameV6)
 	if err != nil {
 		state.close()
 		return nil, fmt.Errorf("load pinned tc old IPv6 nat map: %w", err)
@@ -1104,7 +1281,7 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRest
 	}
 
 	if !skipStats {
-		statsMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineTC, kernelStatsMapName))
+		statsMap, ok, err := source.load(kernelStatsMapName)
 		if err != nil {
 			state.close()
 			return nil, fmt.Errorf("load pinned tc stats map: %w", err)
@@ -1117,11 +1294,11 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRest
 				state.oldStatsMap = statsMap
 			}
 		}
-	} else if _, err := os.Stat(kernelHotRestartPinPath(kernelEngineTC, kernelStatsMapName)); err == nil {
-		loadedAny = true
-	} else if !os.IsNotExist(err) {
+	} else if exists, err := source.exists(kernelStatsMapName); err != nil {
 		state.close()
 		return nil, fmt.Errorf("stat pinned tc stats map: %w", err)
+	} else if exists {
+		loadedAny = true
 	}
 
 	if !loadedAny {
@@ -1213,9 +1390,6 @@ func loadTCKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRest
 			haveStats,
 		)
 	}
-	if skipStats {
-		log.Printf("kernel dataplane hot restart: skipping preserved %s map for tc; counters will rebuild from live flow state", kernelStatsMapName)
-	}
 	return state, nil
 }
 
@@ -1230,6 +1404,20 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRes
 	if err := validateKernelHotRestartMetadataWithOptions(meta, opts); err != nil {
 		return nil, fmt.Errorf("validate xdp hot restart metadata: %w", err)
 	}
+	skipStats := kernelHotRestartSkipStatsRequested()
+	state, err := buildXDPKernelHotRestartMapState(desired, pinnedKernelHotRestartMapSource(kernelEngineXDP), skipStats)
+	if err != nil || state == nil {
+		return nil, err
+	}
+	if skipStats {
+		log.Printf("xdp dataplane hot restart: skipping preserved %s map; counters will rebuild from live flow state", kernelStatsMapName)
+	}
+	return state, nil
+}
+
+// buildXDPKernelHotRestartMapState is the xdp counterpart of
+// buildTCKernelHotRestartMapState.
+func buildXDPKernelHotRestartMapState(desired kernelMapCapacities, source kernelHotRestartMapSource, skipStats bool) (*kernelHotRestartMapState, error) {
 	state := &kernelHotRestartMapState{
 		replacements:     make(map[string]*ebpf.Map, 9),
 		actualCapacities: desired,
@@ -1246,9 +1434,8 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRes
 	haveActiveNATV6 := false
 	haveOldNATV4 := false
 	haveOldNATV6 := false
-	skipStats := kernelHotRestartSkipStatsRequested()
 
-	flowsMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineXDP, kernelFlowsMapName))
+	flowsMap, ok, err := source.load(kernelFlowsMapName)
 	if err != nil {
 		state.close()
 		return nil, fmt.Errorf("load pinned xdp flows map: %w", err)
@@ -1261,7 +1448,7 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRes
 		state.replacements[kernelFlowsMapName] = flowsMap
 	}
 
-	flowsMapV6, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineXDP, kernelFlowsMapNameV6))
+	flowsMapV6, ok, err := source.load(kernelFlowsMapNameV6)
 	if err != nil {
 		state.close()
 		return nil, fmt.Errorf("load pinned xdp IPv6 flows map: %w", err)
@@ -1274,7 +1461,7 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRes
 		state.replacements[kernelFlowsMapNameV6] = flowsMapV6
 	}
 
-	flowsOldMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineXDP, kernelXDPFlowsOldMapNameV4))
+	flowsOldMap, ok, err := source.load(kernelXDPFlowsOldMapNameV4)
 	if err != nil {
 		state.close()
 		return nil, fmt.Errorf("load pinned xdp old IPv4 flows map: %w", err)
@@ -1287,7 +1474,7 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRes
 		state.xdpFlowMigrationFlags |= xdpFlowMigrationFlagV4Old
 	}
 
-	flowsOldMapV6, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineXDP, kernelXDPFlowsOldMapNameV6))
+	flowsOldMapV6, ok, err := source.load(kernelXDPFlowsOldMapNameV6)
 	if err != nil {
 		state.close()
 		return nil, fmt.Errorf("load pinned xdp old IPv6 flows map: %w", err)
@@ -1300,7 +1487,7 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRes
 		state.xdpFlowMigrationFlags |= xdpFlowMigrationFlagV6Old
 	}
 
-	natMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineXDP, kernelNatPortsMapName))
+	natMap, ok, err := source.load(kernelNatPortsMapName)
 	if err != nil {
 		state.close()
 		return nil, fmt.Errorf("load pinned xdp nat map: %w", err)
@@ -1311,7 +1498,7 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRes
 		state.replacements[kernelNatPortsMapName] = natMap
 	}
 
-	natMapV6, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineXDP, kernelNatPortsMapNameV6))
+	natMapV6, ok, err := source.load(kernelNatPortsMapNameV6)
 	if err != nil {
 		state.close()
 		return nil, fmt.Errorf("load pinned xdp IPv6 nat map: %w", err)
@@ -1322,7 +1509,7 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRes
 		state.replacements[kernelNatPortsMapNameV6] = natMapV6
 	}
 
-	natOldMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineXDP, kernelTCNatPortsOldMapNameV4))
+	natOldMap, ok, err := source.load(kernelTCNatPortsOldMapNameV4)
 	if err != nil {
 		state.close()
 		return nil, fmt.Errorf("load pinned xdp old IPv4 nat map: %w", err)
@@ -1333,7 +1520,7 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRes
 		state.replacements[kernelTCNatPortsOldMapNameV4] = natOldMap
 	}
 
-	natOldMapV6, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineXDP, kernelTCNatPortsOldMapNameV6))
+	natOldMapV6, ok, err := source.load(kernelTCNatPortsOldMapNameV6)
 	if err != nil {
 		state.close()
 		return nil, fmt.Errorf("load pinned xdp old IPv6 nat map: %w", err)
@@ -1408,7 +1595,7 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRes
 	}
 
 	if !skipStats {
-		statsMap, ok, err := loadPinnedKernelMap(kernelHotRestartPinPath(kernelEngineXDP, kernelStatsMapName))
+		statsMap, ok, err := source.load(kernelStatsMapName)
 		if err != nil {
 			state.close()
 			return nil, fmt.Errorf("load pinned xdp stats map: %w", err)
@@ -1421,11 +1608,11 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRes
 				state.oldStatsMap = statsMap
 			}
 		}
-	} else if _, err := os.Stat(kernelHotRestartPinPath(kernelEngineXDP, kernelStatsMapName)); err == nil {
-		loadedAny = true
-	} else if !os.IsNotExist(err) {
+	} else if exists, err := source.exists(kernelStatsMapName); err != nil {
 		state.close()
 		return nil, fmt.Errorf("stat pinned xdp stats map: %w", err)
+	} else if exists {
+		loadedAny = true
 	}
 
 	if !loadedAny {
@@ -1444,9 +1631,6 @@ func loadXDPKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRes
 			haveFlows,
 			haveStats,
 		)
-	}
-	if skipStats {
-		log.Printf("xdp dataplane hot restart: skipping preserved %s map; counters will rebuild from live flow state", kernelStatsMapName)
 	}
 	return state, nil
 }

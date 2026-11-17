@@ -1302,6 +1302,37 @@ build_release() {
     ok "构建完成"
 }
 
+# Tells, before deploy.sh restarts the service, whether the new binary can
+# adopt the kernel maps the running daemon preserves, or the hot restart falls
+# back to fresh maps: a cold restart that drops kernel NAT connections and
+# per-rule counters. It only reports; the deploy goes ahead either way.
+check_hot_restart() {
+    local binary="${FORWARD_DEPLOY_DIR}/veer-linux-${GOARCH}"
+    local args=(hot-restart check --install-dir "${INSTALL_DIR:-/opt/veer}")
+    local output=""
+    local line=""
+    local verdict=""
+
+    [[ -x "${binary}" ]] || return 0
+    if array_contains "--no-inherit-stats" "${DEPLOY_ARGS[@]}"; then
+        args+=(--no-inherit-stats)
+    fi
+    if ! output="$("${binary}" "${args[@]}" 2>&1)"; then
+        warn "热更新预检未完成，不影响部署: ${output##*$'\n'}"
+        return 0
+    fi
+    while IFS= read -r line; do
+        printf '        %s\n' "${line}"
+    done <<< "${output}"
+    verdict="$(printf '%s\n' "${output}" | sed -n 's/^verdict: *\([a-z]*\).*/\1/p')"
+    case "${verdict}" in
+        hot) ok "热更新预检: 新版本可接管内核 map，NAT 连接与规则计数会保留" ;;
+        cold) warn "热更新预检: 本次热更新会回退为冷启动，内核 NAT 连接与规则计数将丢失" ;;
+        nothing) info "热更新预检: 没有需要保留的内核状态" ;;
+        *) warn "热更新预检: 无法判断能否接管内核 map，见上方输出" ;;
+    esac
+}
+
 run_deploy() {
     cd "${FORWARD_DEPLOY_DIR}"
     VEER_INSTALL_PLUGINS="${FORWARD_INSTALL_PLUGINS}" bash ./deploy.sh "${DEPLOY_ARGS[@]}"
@@ -1355,6 +1386,8 @@ main() {
         set_step "构建内核扩展"
         build_release_kernel_module
     fi
+    set_step "热更新预检"
+    check_hot_restart
     set_step "执行部署"
     run_deploy
 }

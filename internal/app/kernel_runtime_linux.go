@@ -1218,16 +1218,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 			clearKernelHotRestartState(kernelEngineTC)
 		}
 	} else if state != nil {
-		if err := validateKernelHotRestartMapReplacements(spec, state.replacements, map[string]bool{
-			kernelFlowsMapName:           true,
-			kernelFlowsMapNameV6:         true,
-			kernelNatPortsMapName:        true,
-			kernelNatPortsMapNameV6:      true,
-			kernelTCFlowsOldMapNameV4:    true,
-			kernelTCFlowsOldMapNameV6:    true,
-			kernelTCNatPortsOldMapNameV4: true,
-			kernelTCNatPortsOldMapNameV6: true,
-		}); err != nil {
+		if err := validateKernelHotRestartMapReplacements(spec, state.replacements, kernelTCHotRestartFlexibleCapacityMaps()); err != nil {
 			log.Printf(
 				"kernel dataplane hot restart: preserved tc maps are incompatible, abandoning handoff and falling back to fresh maps (cold restart): %s",
 				kernelHotRestartIncompatibilityReason(err),
@@ -1646,7 +1637,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		mergeKernelStatsCorrections(rt.statsCorrection, purgeCorrections)
 		log.Printf("kernel dataplane reconcile: purged %d stale tc flow entry(s) for %d flow purge target(s)", purgedFlows, len(flowPurgeAttempt))
 	}
-	if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments, "")); err != nil {
+	if err := writeKernelRuntimeMetadata(kernelEngineTC, rt.runtimeMetadata()); err != nil {
 		log.Printf("kernel dataplane runtime metadata: write tc runtime metadata failed: %v", err)
 	}
 	if hotRestartState != nil {
@@ -2019,36 +2010,14 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 		rt.cleanupLocked()
 		return true
 	}
-	maps := map[string]*ebpf.Map{
-		kernelFlowsMapName:    rt.coll.Maps[kernelFlowsMapName],
-		kernelNatPortsMapName: rt.coll.Maps[kernelNatPortsMapName],
-	}
-	if rt.coll.Maps[kernelFlowsMapNameV6] != nil {
-		maps[kernelFlowsMapNameV6] = rt.coll.Maps[kernelFlowsMapNameV6]
-	}
-	if rt.coll.Maps[kernelNatPortsMapNameV6] != nil {
-		maps[kernelNatPortsMapNameV6] = rt.coll.Maps[kernelNatPortsMapNameV6]
-	}
-	if existingMigrationFlags&tcFlowMigrationFlagV4Old != 0 {
-		if m := rt.coll.Maps[kernelTCFlowsOldMapNameV4]; m != nil {
-			maps[kernelTCFlowsOldMapNameV4] = m
-		}
-		if m := rt.coll.Maps[kernelTCNatPortsOldMapNameV4]; m != nil {
-			maps[kernelTCNatPortsOldMapNameV4] = m
-		}
-	}
-	if existingMigrationFlags&tcFlowMigrationFlagV6Old != 0 {
-		if m := rt.coll.Maps[kernelTCFlowsOldMapNameV6]; m != nil {
-			maps[kernelTCFlowsOldMapNameV6] = m
-		}
-		if m := rt.coll.Maps[kernelTCNatPortsOldMapNameV6]; m != nil {
-			maps[kernelTCNatPortsOldMapNameV6] = m
-		}
-	}
-	if kernelHotRestartSkipStatsRequested() {
+	skipStats := kernelHotRestartSkipStatsRequested()
+	if skipStats {
 		log.Printf("kernel dataplane hot restart: preserving tc flow/nat maps without %s as requested", kernelStatsMapName)
-	} else {
-		maps[kernelStatsMapName] = rt.coll.Maps[kernelStatsMapName]
+	}
+	present := func(name string) bool { return rt.coll.Maps[name] != nil }
+	maps := make(map[string]*ebpf.Map, 9)
+	for _, name := range kernelTCHotRestartPreservedMapNames(present, existingMigrationFlags, skipStats) {
+		maps[name] = rt.coll.Maps[name]
 	}
 	if err := pinKernelHotRestartMaps(kernelEngineTC, maps); err != nil {
 		log.Printf("kernel dataplane hot restart: preserve tc maps failed, falling back to full cleanup: %v", err)
@@ -3104,7 +3073,7 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
 	if len(rt.attachments) > 0 {
-		if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments, "")); err != nil {
+		if err := writeKernelRuntimeMetadata(kernelEngineTC, rt.runtimeMetadata()); err != nil {
 			log.Printf("kernel dataplane runtime metadata: refresh tc runtime metadata failed after rule drain: %v", err)
 		}
 	}
@@ -3328,7 +3297,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 		metrics.AttachDuration = attachDuration
 		metrics.FlowPurgeDuration = flowPurgeDuration
 	}
-	if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments, "")); err != nil {
+	if err := writeKernelRuntimeMetadata(kernelEngineTC, rt.runtimeMetadata()); err != nil {
 		log.Printf("kernel dataplane runtime metadata: write tc runtime metadata failed after in-place update: %v", err)
 	}
 	if detachedAttachments > 0 {
