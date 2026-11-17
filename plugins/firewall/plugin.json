@@ -1,0 +1,44 @@
+{
+  "api_version": "v1",
+  "id": "firewall",
+  "name": "Firewall",
+  "version": "0.1.0",
+  "kind": "pipeline",
+  "stability": "lab",
+  "description": "Stateless XDP source filter for TCP and UDP ports, ahead of the Veer dataplane. Applied rule sets need confirmation or roll back by themselves.",
+  "compatibility": {
+    "os": ["linux"],
+    "runtime": ">=1.0.0 <2.0.0",
+    "control_api_abi": 1,
+    "kernel": ">=5.10.0",
+    "features": [
+      "dataplane.xdp_pipeline.v1",
+      "dataplane.hook_bindings.v1",
+      "ebpf.map_state.v1",
+      "ebpf.map_transactions.v1",
+      "control.net_admin",
+      "control.modules.v1",
+      "control.resource_schema.v1",
+      "ui.capabilities.v1"
+    ]
+  },
+  "control": {
+    "main": "control.js",
+    "permissions": [
+      "crypto",
+      "ebpf.load",
+      "ebpf.map_read",
+      "ebpf.map_write",
+      "hook.attach",
+      "kv",
+      "net.admin",
+      "plugin.register",
+      "resource",
+      "timer",
+      "ui"
+    ],
+    "net_access": [
+      {"interfaces": ["*"], "operations": ["link.read"]}
+    ]
+  }
+}

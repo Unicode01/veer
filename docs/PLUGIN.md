@@ -1168,6 +1168,7 @@ socket 生命周期不受单次 handler 结束影响，但一次拨号、手工�
 - `pppoe_client`（stable）：Goja + raw L2 PPPoE 控制面和双向 TC 隧道插件。插件目录内保留控制面自测和 Linux 黑盒脚本，覆盖 discovery、PAP/CHAP、IPv6CP、DHCPv6-PD、keepalive/redial、disconnect 和 tunnel map 写入。生产使用前仍应在目标运营商/AC 上跑真实断线重拨、IPv4/IPv6/PD、长流稳定性和目标拓扑吞吐验收。
 - `packet_observer`（lab）：TC pipeline 观测示例，需要执行 `build.sh` 生成 eBPF object。
 - `router_wizard`（lab）：组合 PPPoE/WAN/LAN 资源的路由配置向导示例。
+- [firewall](plugins/firewall/DESIGN.md)（lab）：XDP 无状态来源过滤，按 TCP/UDP 目标端口（可选目标地址）配置来源 CIDR 的放行/丢弃，在 Veer 核心之前执行，不影响 TC 连接缓存；解析 VLAN、PPPoE 会话和 L3 接口，IPv4/IPv6 都支持。规则写入不活动的一代后整体切换，应用后需页面确认，超时自动回滚到上一次确认的规则。需要执行 `build.sh` 生成 eBPF object。
 - [vpn_core](plugins/vpn_core/README.md)（lab）：把内核 WireGuard、Mihomo、sing-box 或外部 TUN 接入 WAN Core 与双向 TC 适配器；提供出口表单、WG 配置导入和核心版本管理，LAN/指定下游通过现有出向 NAT 选择出口，不默认安装。
 
 VPN 的“拆除”保留配置，“删除”清理自有出口、配置和未被其他出口引用的凭据；已安装的核心版本保留。sing-box 可在出站接口旁指定该接口上的出站源 IP，使用核心原生绑定。WAN Core 的 `teardown` 动作支持可选 `forget:true`：仅在网络清理完整成功后移除对应 profiles / sessions / status 记录，失败时保留记录供重试。

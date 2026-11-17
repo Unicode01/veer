@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Firewall</title>
+  <style>
+    .fw-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .fw-grow { flex: 1 1 220px; min-width: 0; }
+    .fw-banner { border-left: 4px solid var(--veer-warning, #d97706); padding: 10px 12px; }
+    .fw-error { color: var(--veer-danger, #dc2626); white-space: pre-wrap; }
+    .fw-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+    .fw-ifaces { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px; }
+    .fw-iface { display: flex; gap: 6px; align-items: flex-start; }
+    textarea.veer-input { min-height: 84px; resize: vertical; }
+    .fw-counter { white-space: nowrap; }
+  </style>
+</head>
+<body>
+<script>
+(function () {
+  'use strict';
+  var F = window.VeerPluginHost;
+  if (!F) { document.body.textContent = 'VeerPluginHost is not available.'; return; }
+  var C = F.classes;
+
+  var messages = {
+    'zh-CN': {
+      title: '防火墙',
+      desc: '按目标端口限制来源。规则在 XDP 中执行，排在 Veer 转发之前；保存的是草稿，点"应用"后生效。应用后页面会自动确认；如果新规则挡住了这个页面，截止时间一到就回滚到上一次确认的规则。',
+      apply: '应用', confirm: '确认保留', rollback: '立即回滚', refresh: '刷新',
+      pendingTitle: '已应用，等待确认', pendingBody: '剩余 {{seconds}} 秒；不确认会回滚到上一次确认的规则。',
+      draftChanged: '草稿与已应用的规则不同', draftSame: '草稿已应用',
+      rolledBack: '上一次应用在 {{time}} 回滚（{{reason}}）。',
+      reason_deadline: '确认超时', reason_manual: '手动', reason_restart: 'Veer 重启时未确认',
+      settings: '设置', interfaces: '挂载接口', interfacesHint: '选物理网卡；网桥、VLAN 等没有原生 XDP 的接口会以 generic 模式挂载。首次启用和全部停用时，部分网卡会短暂断流。',
+      trusted: '信任来源（每行一个，始终放行）', timeout: '确认超时（秒）', saveSettings: '保存设置',
+      policies: '策略', newPolicy: '新建策略', edit: '编辑', remove: '删除', save: '保存', cancel: '取消',
+      name: '名称', protocol: '协议', ports: '端口（逗号分隔，可写区间 1000-2000）', destinations: '目标地址（每行一个，留空表示任意）',
+      defaultAction: '未列出的来源', sources: '来源规则（每行"地址 allow|drop"）', enabled: '启用',
+      allow: '放行', drop: '丢弃', any: '任意',
+      colName: '名称', colMatch: '匹配', colDefault: '默认', colSources: '来源', colCounters: '放行 / 丢弃 / 信任', colEnabled: '状态',
+      on: '启用', off: '停用', none: '还没有策略。',
+      evasive: '规避解析被丢弃的包', notLoaded: '数据面未加载（还没有挂载接口，或正在挂载）',
+      generation: '当前代', applying: '应用中…', confirmed: '已应用并确认。', confirmFailed: '无法确认：规则会在截止时间回滚。',
+      applyConfirm: '应用草稿？{{seconds}} 秒内未确认会自动回滚。', deleteConfirm: '删除策略 {{name}}？',
+      saved: '已保存（草稿）。', rolledBackNow: '已回滚。', lastError: '最近错误'
+    },
+    'en-US': {
+      title: 'Firewall',
+      desc: 'Limits sources per destination port. Rules run in XDP ahead of Veer forwarding. Edits are drafts until you apply them. The page confirms an apply by itself; if the new rules cut this page off, the deadline restores the last confirmed rules.',
+      apply: 'Apply', confirm: 'Keep', rollback: 'Roll back now', refresh: 'Refresh',
+      pendingTitle: 'Applied, waiting for confirmation', pendingBody: '{{seconds}} s left; without confirmation the last confirmed rules come back.',
+      draftChanged: 'The draft differs from the applied rules', draftSame: 'Draft applied',
+      rolledBack: 'The last apply was rolled back at {{time}} ({{reason}}).',
+      reason_deadline: 'not confirmed in time', reason_manual: 'manual', reason_restart: 'unconfirmed when Veer restarted',
+      settings: 'Settings', interfaces: 'Interfaces', interfacesHint: 'Pick physical NICs; bridges, VLANs and other interfaces without native XDP attach in generic mode. Some NICs drop the link briefly when the first hook attaches or the last one leaves.',
+      trusted: 'Trusted sources (one per line, always pass)', timeout: 'Confirmation timeout (s)', saveSettings: 'Save settings',
+      policies: 'Policies', newPolicy: 'New policy', edit: 'Edit', remove: 'Delete', save: 'Save', cancel: 'Cancel',
+      name: 'Name', protocol: 'Protocol', ports: 'Ports (comma separated, ranges like 1000-2000)', destinations: 'Destinations (one per line, empty means any)',
+      defaultAction: 'Unlisted sources', sources: 'Source rules (one "address allow|drop" per line)', enabled: 'Enabled',
+      allow: 'Allow', drop: 'Drop', any: 'any',
+      colName: 'Name', colMatch: 'Match', colDefault: 'Default', colSources: 'Sources', colCounters: 'Pass / drop / trusted', colEnabled: 'State',
+      on: 'On', off: 'Off', none: 'No policies yet.',
+      evasive: 'Packets dropped for evading the parser', notLoaded: 'Dataplane not loaded (no interface bound yet, or attaching)',
+      generation: 'Generation', applying: 'Applying…', confirmed: 'Applied and confirmed.', confirmFailed: 'Could not confirm: the rules roll back at the deadline.',
+      applyConfirm: 'Apply the draft? Without confirmation within {{seconds}} s it rolls back.', deleteConfirm: 'Delete policy {{name}}?',
+      saved: 'Saved (draft).', rolledBackNow: 'Rolled back.', lastError: 'Last error'
+    }
+  };
+  function t(key, params) { return F.t(messages, key, params); }
+
+  var root = F.h('div', {className: C.page});
+  document.body.appendChild(root);
+  var state = {policies: [], settings: {}, status: null, interfaces: [], editing: null};
+  var timerHandle = 0;
+
+  function lines(text) { return String(text || '').split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean); }
+  function field(label, input) { return F.h('label', {className: C.field}, [F.h('span', {text: label}), input]); }
+  function input(value, attrs) { var el = F.h('input', {className: C.input, attrs: attrs || {}}); el.value = value == null ? '' : value; return el; }
+  function textarea(value) { var el = F.h('textarea', {className: C.input}); el.value = value || ''; return el; }
+  function select(options, value) {
+    var el = F.h('select', {className: C.input});
+    options.forEach(function (o) { var opt = F.h('option', {text: o[1], attrs: {value: o[0]}}); el.appendChild(opt); });
+    el.value = value;
+    return el;
+  }
+
+  async function load() {
+    var results = await Promise.all([
+      F.data.list('policies', {limit: 256}),
+      F.data.list('settings', {limit: 1}),
+      F.action('status', {}).catch(function () { return {}; }),
+      F.action('interfaces', {}).catch(function () { return {}; })
+    ]);
+    state.policies = (results[0].records || []).sort(function (a, b) { return a.key < b.key ? -1 : 1; });
+    var s = (results[1].records || [])[0];
+    state.settings = s ? s.data : {};
+    state.status = results[2].result || null;
+    state.interfaces = results[3].result || [];
+    render();
+  }
+
+  async function refreshStatus() {
+    try { state.status = (await F.action('status', {})).result || null; } catch (e) { /* keep the last one */ }
+    render();
+  }
+
+  function scheduleTick() {
+    clearTimeout(timerHandle);
+    if (state.status && state.status.pending) timerHandle = setTimeout(refreshStatus, 2000);
+  }
+
+  async function apply() {
+    var seconds = Number(state.settings.confirm_timeout_seconds || 120);
+    if (!(await F.confirm({title: t('apply'), message: t('applyConfirm', {seconds: seconds})}))) return;
+    F.toast(t('applying'));
+    try {
+      await F.action('apply', {});
+    } catch (e) {
+      F.toastError(e);
+      await refreshStatus();
+      return;
+    }
+    // A fresh round trip under the new rules proves this page still reaches
+    // the API; only then keep them.
+    await new Promise(function (resolve) { setTimeout(resolve, 2000); });
+    try {
+      await F.action('status', {});
+      await F.action('confirm', {});
+      F.notify(t('confirmed'), 4000, 'success');
+    } catch (e) {
+      F.toastError(t('confirmFailed'));
+    }
+    await load();
+  }
+
+  async function confirmNow() {
+    try { await F.action('confirm', {}); F.notify(t('confirmed'), 4000, 'success'); } catch (e) { F.toastError(e); }
+    await load();
+  }
+
+  async function rollbackNow() {
+    try { await F.action('rollback', {}); F.notify(t('rolledBackNow'), 4000, 'info'); } catch (e) { F.toastError(e); }
+    await load();
+  }
+
+  function statusCard() {
+    var st = state.status;
+    var children = [];
+    var toolbar = F.h('div', {className: 'fw-row'}, [
+      F.button(t('apply'), apply),
+      F.button(t('refresh'), load, true)
+    ]);
+    children.push(F.h('h2', {className: C.title, text: t('title')}));
+    children.push(F.h('p', {className: C.description, text: t('desc')}));
+    children.push(toolbar);
+    if (st) {
+      var badges = F.h('div', {className: 'fw-row'}, [
+        F.badge(t('generation') + ' ' + st.generation),
+        F.badge(st.draft_changed ? t('draftChanged') : t('draftSame'))
+      ]);
+      children.push(badges);
+      if (st.pending) {
+        children.push(F.h('div', {className: C.card + ' fw-banner'}, [
+          F.h('strong', {text: t('pendingTitle')}),
+          F.h('p', {text: t('pendingBody', {seconds: st.pending.remaining_seconds})}),
+          F.h('div', {className: 'fw-row'}, [F.button(t('confirm'), confirmNow), F.button(t('rollback'), rollbackNow, true)])
+        ]));
+      } else if (st.rolled_back_at && (!st.confirmed_at || st.rolled_back_at > st.confirmed_at)) {
+        children.push(F.h('p', {className: C.muted, text: t('rolledBack', {time: new Date(st.rolled_back_at).toLocaleString(), reason: t('reason_' + (st.rollback_reason || 'manual'))})}));
+      }
+      if (!st.loaded) children.push(F.h('p', {className: C.muted, text: t('notLoaded')}));
+      if (st.last_error) children.push(F.h('p', {className: 'fw-error', text: t('lastError') + ': ' + st.last_error}));
+      if (st.evasive_drops) children.push(F.stat(t('evasive'), st.evasive_drops));
+    }
+    return F.card(children);
+  }
+
+  function settingsCard() {
+    var current = state.settings || {};
+    var chosen = {};
+    (current.interfaces || []).forEach(function (n) { chosen[n] = true; });
+    var boxes = state.interfaces.map(function (l) {
+      var box = F.h('input', {attrs: {type: 'checkbox'}});
+      box.checked = !!chosen[l.name];
+      box.addEventListener('change', function () { chosen[l.name] = box.checked; });
+      var note = [l.kind || 'device'];
+      if (l.master) note.push('→ ' + l.master);
+      if (l.l3) note.push('L3');
+      return F.h('label', {className: 'fw-iface'}, [box, F.h('span', {text: l.name}), F.h('span', {className: C.muted, text: note.join(' ')})]);
+    });
+    (current.interfaces || []).forEach(function (n) {
+      if (!state.interfaces.some(function (l) { return l.name === n; })) {
+        var box = F.h('input', {attrs: {type: 'checkbox'}});
+        box.checked = true;
+        box.addEventListener('change', function () { chosen[n] = box.checked; });
+        boxes.push(F.h('label', {className: 'fw-iface'}, [box, F.h('span', {text: n + ' (?)'})]));
+      }
+    });
+    var trusted = textarea((current.trusted_sources || []).join('\n'));
+    var timeout = input(current.confirm_timeout_seconds || 120, {type: 'number', min: 30, max: 600});
+    var save = F.button(t('saveSettings'), async function () {
+      var data = {
+        interfaces: Object.keys(chosen).filter(function (n) { return chosen[n]; }),
+        trusted_sources: lines(trusted.value),
+        confirm_timeout_seconds: Number(timeout.value) || 120
+      };
+      try { await F.data.upsert('settings', 'default', data); F.toast(t('saved')); await load(); } catch (e) { F.toastError(e); }
+    });
+    return F.card([
+      F.h('h3', {className: C.title, text: t('settings')}),
+      F.h('div', {className: C.description, text: t('interfacesHint')}),
+      field(t('interfaces'), F.h('div', {className: 'fw-ifaces'}, boxes)),
+      field(t('trusted'), trusted),
+      field(t('timeout'), timeout),
+      save
+    ]);
+  }
+
+  function countersFor(key) {
+    var st = state.status;
+    var item = st && (st.policies || []).find(function (p) { return p.key === key; });
+    if (!item || !item.counters) return '–';
+    return item.counters.pass + ' / ' + item.counters.drop + ' / ' + item.counters.trusted;
+  }
+
+  function policyRow(record) {
+    var d = record.data || {};
+    var match = (d.protocol || 'tcp') + ' ' + (d.ports || []).join(',') + ((d.destinations || []).length ? ' → ' + d.destinations.join(', ') : '');
+    var allows = (d.sources || []).filter(function (s) { return s.action === 'allow'; }).length;
+    var drops = (d.sources || []).length - allows;
+    return [
+      d.name || record.key,
+      F.h('span', {className: 'fw-mono', text: match}),
+      t(d.default_action === 'allow' ? 'allow' : 'drop'),
+      allows + ' ' + t('allow') + ', ' + drops + ' ' + t('drop'),
+      F.h('span', {className: 'fw-counter', text: countersFor(record.key)}),
+      record.enabled === false ? t('off') : t('on'),
+      F.h('div', {className: 'fw-row'}, [
+        F.button(t('edit'), function () { state.editing = record; render(); }, true),
+        F.button(t('remove'), async function () {
+          if (!(await F.confirm({title: t('remove'), message: t('deleteConfirm', {name: d.name || record.key}), danger: true}))) return;
+          try { await F.data.delete('policies', record.key); await load(); } catch (e) { F.toastError(e); }
+        }, true)
+      ])
+    ];
+  }
+
+  function editorCard() {
+    var record = state.editing;
+    var d = record.data || {};
+    var name = input(d.name || '');
+    var protocol = select([['tcp', 'TCP'], ['udp', 'UDP'], ['tcp+udp', 'TCP + UDP']], d.protocol || 'tcp');
+    var ports = input((d.ports || []).join(', '));
+    var dsts = textarea((d.destinations || []).join('\n'));
+    var def = select([['drop', t('drop')], ['allow', t('allow')]], d.default_action || 'drop');
+    var sources = textarea((d.sources || []).map(function (s) { return s.cidr + ' ' + s.action; }).join('\n'));
+    var enabled = F.h('input', {attrs: {type: 'checkbox'}});
+    enabled.checked = record.enabled !== false;
+    var error = F.h('p', {className: 'fw-error'});
+    var save = F.button(t('save'), async function () {
+      var data = {
+        name: name.value.trim(),
+        protocol: protocol.value,
+        ports: ports.value.split(',').map(function (s) { return s.trim(); }).filter(Boolean),
+        destinations: lines(dsts.value),
+        default_action: def.value,
+        sources: lines(sources.value).map(function (line) {
+          var parts = line.split(/\s+/);
+          return {cidr: parts[0], action: (parts[1] || 'allow').toLowerCase() === 'drop' ? 'drop' : 'allow'};
+        })
+      };
+      try {
+        if (record.key) await F.data.update('policies', record.key, data, {enabled: enabled.checked});
+        else await F.data.create('policies', data, {enabled: enabled.checked});
+        state.editing = null;
+        F.toast(t('saved'));
+        await load();
+      } catch (e) {
+        error.textContent = F.errorText(e);
+        F.requestResize();
+      }
+    });
+    return F.card([
+      F.h('h3', {className: C.title, text: record.key ? t('edit') + ' ' + (d.name || record.key) : t('newPolicy')}),
+      F.h('div', {className: 'fw-row'}, [F.h('div', {className: 'fw-grow'}, field(t('name'), name)), F.h('div', {className: 'fw-grow'}, field(t('protocol'), protocol))]),
+      field(t('ports'), ports),
+      field(t('destinations'), dsts),
+      field(t('defaultAction'), def),
+      field(t('sources'), sources),
+      F.h('label', {className: 'fw-iface'}, [enabled, F.h('span', {text: t('enabled')})]),
+      error,
+      F.h('div', {className: 'fw-row'}, [save, F.button(t('cancel'), function () { state.editing = null; render(); }, true)])
+    ]);
+  }
+
+  function policiesCard() {
+    var rows = state.policies.map(policyRow);
+    var body = rows.length
+      ? F.table([t('colName'), t('colMatch'), t('colDefault'), t('colSources'), t('colCounters'), t('colEnabled'), ''], rows)
+      : F.h('p', {className: C.muted, text: t('none')});
+    return F.card([
+      F.h('div', {className: 'fw-row'}, [
+        F.h('h3', {className: C.title + ' fw-grow', text: t('policies')}),
+        F.button(t('newPolicy'), function () { state.editing = {key: '', data: {protocol: 'tcp', default_action: 'drop'}, enabled: true}; render(); })
+      ]),
+      body
+    ]);
+  }
+
+  function render() {
+    root.textContent = '';
+    var parts = [statusCard()];
+    if (state.editing) parts.push(editorCard());
+    parts.push(policiesCard(), settingsCard());
+    root.appendChild(F.stack(parts));
+    F.requestResize();
+    scheduleTick();
+  }
+
+  F.onLocaleChange(render);
+  load().catch(function (e) { F.toastError(e); });
+})();
+</script>
+</body>
+</html>
