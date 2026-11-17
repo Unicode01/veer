@@ -1,9 +1,6 @@
 package app
 
-import (
-	"os"
-	"runtime"
-)
+import "runtime"
 
 const optionalKernelModuleName = "veer_kfuncs"
 
@@ -20,6 +17,13 @@ type KernelHelperModuleStatus struct {
 	ModuleInstalled     bool     `json:"module_installed"`
 	OtherModuleReleases []string `json:"other_module_releases,omitempty"`
 	RebuildCommand      string   `json:"rebuild_command,omitempty"`
+	// srcversion of the loaded module and of the installed file. A hot
+	// restart keeps the loaded module, so they differ after a module update
+	// until a full restart; ReloadHint then says how to load the file.
+	LoadedSrcVersion       string `json:"loaded_srcversion,omitempty"`
+	InstalledSrcVersion    string `json:"installed_srcversion,omitempty"`
+	LoadedMatchesInstalled *bool  `json:"loaded_matches_installed,omitempty"`
+	ReloadHint             string `json:"reload_hint,omitempty"`
 }
 
 func optionalKernelModuleRuntimeStatus() KernelHelperModuleStatus {
@@ -29,13 +33,29 @@ func optionalKernelModuleRuntimeStatus() KernelHelperModuleStatus {
 	if runtime.GOOS != "linux" {
 		return status
 	}
-	info, err := os.Stat("/sys/module/" + optionalKernelModuleName)
-	status.Loaded = err == nil && info.IsDir()
+	loaded, isLoaded := loadedKernelHelperModuleBuild(kernelHelperSysModuleDir)
+	status.Loaded = isLoaded
 	executable, install, ok := currentKernelHelperInstall()
 	if !ok {
 		return status
 	}
-	return withKernelHelperInstall(status, executable, install)
+	status = withKernelHelperInstall(status, executable, install)
+	if isLoaded && install.ModuleInstalled {
+		if installed, err := readKernelHelperModuleBuild(install.ModulePath); err == nil {
+			status = withKernelHelperBuilds(status, loaded, installed, install.ModulePath)
+		}
+	}
+	return status
+}
+
+func withKernelHelperBuilds(status KernelHelperModuleStatus, loaded, installed kernelHelperModuleBuild, path string) KernelHelperModuleStatus {
+	status.LoadedSrcVersion = loaded.SrcVersion
+	status.InstalledSrcVersion = installed.SrcVersion
+	if matches, known := kernelHelperLoadedMatches(loaded, installed); known {
+		status.LoadedMatchesInstalled = &matches
+	}
+	status.ReloadHint = kernelHelperStaleDetail(loaded, installed, path)
+	return status
 }
 
 func withKernelHelperInstall(status KernelHelperModuleStatus, executable string, install kernelHelperInstall) KernelHelperModuleStatus {

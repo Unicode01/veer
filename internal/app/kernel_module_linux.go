@@ -175,11 +175,35 @@ func loadOptionalKernelModule() error {
 }
 
 func startOptionalKernelModule() (func(), error) {
-	return manageOptionalKernelModule("/run/veer-kfuncs", kernelModuleSystem{
+	release, err := manageOptionalKernelModule("/run/veer-kfuncs", kernelModuleSystem{
 		identity: realKernelModuleIdentity, load: loadOptionalKernelModule,
 		unload: func() error { return unix.DeleteModule(optionalKernelModuleName, unix.O_NONBLOCK) },
 		probe:  probeOptionalKernelModule,
 	}, kernelHotRestartRequested)
+	if err == nil {
+		logStaleOptionalKernelModule()
+	}
+	return release, err
+}
+
+// logStaleOptionalKernelModule warns when the module in use, kept by a hot
+// restart or loaded outside Veer, has other sources than the installed file.
+func logStaleOptionalKernelModule() {
+	loaded, ok := loadedKernelHelperModuleBuild(kernelHelperSysModuleDir)
+	if !ok {
+		return
+	}
+	_, install, inspected := currentKernelHelperInstall()
+	if !inspected || !install.ModuleInstalled {
+		return
+	}
+	installed, err := readKernelHelperModuleBuild(install.ModulePath)
+	if err != nil {
+		return
+	}
+	if detail := kernelHelperStaleDetail(loaded, installed, install.ModulePath); detail != "" {
+		log.Printf("optional kernel module: %s", detail)
+	}
 }
 
 // Each daemon holds a shared lease. Only the last daemon may unload a module
