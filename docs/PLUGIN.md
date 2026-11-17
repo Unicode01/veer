@@ -847,7 +847,7 @@ XDP Hook 可以用 `veer_xdp_meta_reserve(xdp, len)` 在包前的 metadata 区�
 
 Hook 的 `interfaces` 中有接口不存在时，只跳过该接口并在插件状态中给出提示，其余已存在接口上的 Hook 照常挂载；一个 Hook 的接口全部不存在时只移除这个 Hook，插件的所有 Hook 都无法挂载时才报错。接口出现后由 link 事件触发的 reconcile 重新挂上，不会退化成全局 Hook。
 
-Veer 使用独立最小 Dispatcher，不改写实验性的 Forward XDP NAT object。只要 catalog 中存在可运行的 TC/XDP 插件 Hook，核心转发规则就固定走 TC，避免 XDP Core 绕过插件链；XDP 插件仍可在相同 ingress 上先于 TC 执行。目标接口已有任何 XDP 程序时会报告冲突，Veer 不替换、不接管；driver 模式不可用时，只有显式开启 `xdp_generic` 才尝试 generic 模式。
+Veer 使用独立最小 Dispatcher，不改写实验性的 Forward XDP NAT object。只要 catalog 中存在可运行的 TC/XDP 插件 Hook，核心转发规则就固定走 TC，避免 XDP Core 绕过插件链；XDP 插件仍可在相同 ingress 上先于 TC 执行。目标接口已有任何 XDP 程序时会报告冲突，Veer 不替换、不接管。Dispatcher 在所有接口上都先试 driver 模式，驱动不支持时改用 generic 模式（`xdp_generic` 默认开启，设为 `false` 时只用 driver 模式）。generic 模式在 skb 分配之后、TC 之前执行，非线性的 skb（例如 GRO 聚合包）要先复制成线性缓冲区。
 
 没有 XDP Hook、插件被禁用或插件系统关闭时，Dispatcher 会从接口完全卸载，不给无插件热路径增加 lookup；上一个进程留下的 Dispatcher 也会在这时卸载。接口删除后，同名接口重建会按新 ifindex 重新挂载；崩溃恢复同时核对原进程 start-time 和 XDP program ID，绝不根据旧 ifindex 盲目删除其他程序。
 

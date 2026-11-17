@@ -1071,7 +1071,7 @@ func (rt *kernelXDPPluginPipelineRuntime) reconcileAttachmentsLocked(desired []i
 	for _, att := range rt.attachments {
 		oldByIndex[att.ifindex] = att
 	}
-	allowGeneric := rt.cfg != nil && rt.cfg.ExperimentalFeatureEnabled(experimentalFeatureXDPGeneric)
+	allowGeneric := rt.cfg.XDPGenericEnabled()
 	result := make([]xdpAttachment, 0, len(desired))
 	added := make([]xdpAttachment, 0, len(desired))
 	adopted := make([]xdpAttachment, 0)
@@ -1112,7 +1112,7 @@ func attachKernelXDPPluginDispatcher(ifindex int, prog *ebpf.Program, allowGener
 		return xdpAttachment{}, fmt.Errorf("interface already has xdp program id %d; Veer will not replace it", attrs.Xdp.ProgId)
 	}
 	var failures []string
-	for _, mode := range xdpAttachOrder(link, nil, allowGeneric) {
+	for _, mode := range xdpPluginAttachOrder(allowGeneric) {
 		flags := mode | nl.XDP_FLAGS_UPDATE_IF_NOEXIST
 		if err := netlink.LinkSetXdpFdWithFlags(link, prog.FD(), flags); err == nil {
 			return xdpAttachment{ifindex: ifindex, flags: mode}, nil
@@ -1121,9 +1121,22 @@ func attachKernelXDPPluginDispatcher(ifindex int, prog *ebpf.Program, allowGener
 		}
 	}
 	if !allowGeneric {
-		failures = append(failures, "generic skipped: "+xdpGenericAttachmentExperimentalReason())
+		failures = append(failures, "generic skipped: "+xdpGenericAttachmentDisabledReason())
 	}
 	return xdpAttachment{}, errors.New(strings.Join(failures, "; "))
+}
+
+// xdpPluginAttachOrder tries driver mode first on every interface and falls
+// back to generic mode where the driver has none. The core XDP engine prefers
+// generic mode on veth and bridge ports for the sake of its devmap redirects;
+// plugin hooks run ahead of TC and mostly drop or pass, and driver mode skips
+// the skb allocation wherever the NIC supports it, a bridge port's NIC
+// included.
+func xdpPluginAttachOrder(allowGeneric bool) []int {
+	if !allowGeneric {
+		return []int{nl.XDP_FLAGS_DRV_MODE}
+	}
+	return []int{nl.XDP_FLAGS_DRV_MODE, nl.XDP_FLAGS_SKB_MODE}
 }
 
 func (rt *kernelXDPPluginPipelineRuntime) attachmentsHealthyLocked(desired []kernelXDPPluginDesiredPlugin) bool {

@@ -12,7 +12,6 @@ import (
 
 const (
 	experimentalFeatureBridgeXDP                 = "bridge_xdp"
-	experimentalFeatureXDPGeneric                = "xdp_generic"
 	experimentalFeatureKernelTraffic             = "kernel_traffic_stats"
 	experimentalFeatureKernelTCDiag              = "kernel_tc_diag"
 	experimentalFeatureKernelTCDiagVerbose       = "kernel_tc_diag_verbose"
@@ -62,6 +61,7 @@ type Config struct {
 	KernelNATPortMin                       int                       `json:"kernel_nat_port_min"`
 	KernelNATPortMax                       int                       `json:"kernel_nat_port_max"`
 	KernelTCFlowCacheSetting               *bool                     `json:"kernel_tc_flow_cache,omitempty"`
+	XDPGenericSetting                      *bool                     `json:"xdp_generic,omitempty"`
 	Experimental                           map[string]bool           `json:"experimental_features"`
 	Tags                                   []string                  `json:"tags"`
 
@@ -253,6 +253,18 @@ func (cfg *Config) KernelTCFlowCacheEnabled() bool {
 		return legacy
 	}
 	return true
+}
+
+// XDPGenericEnabled reports whether an XDP program may attach in generic (skb)
+// mode on an interface whose driver has no native XDP. It is on by default and
+// only the setting turns it off. The former experimental feature of the same
+// name is ignored: deploy wrote it into every config as false while generic
+// attachment was off by default, so a false there was never a choice.
+func (cfg *Config) XDPGenericEnabled() bool {
+	if cfg == nil || cfg.XDPGenericSetting == nil {
+		return true
+	}
+	return *cfg.XDPGenericSetting
 }
 
 func (cfg *Config) ManagedNetworkAutoRepairEnabled() bool {

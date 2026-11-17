@@ -617,30 +617,27 @@ func TestXDPRuntimeNATStateForDecisionIncludesPreparedNATMapsWithoutLiveEntries(
 	}
 }
 
-func TestNewXDPKernelRuleRuntimeDisablesGenericAttachByDefault(t *testing.T) {
+func TestNewXDPKernelRuleRuntimeAllowsGenericAttachByDefault(t *testing.T) {
 	stubHostEphemeralPortRange(t, 32768, 60999, nil)
 	rt, ok := newXDPKernelRuleRuntime(nil).(*xdpKernelRuleRuntime)
 	if !ok {
 		t.Fatal("newXDPKernelRuleRuntime(nil) did not return *xdpKernelRuleRuntime")
 	}
-	if rt.allowGenericAttach {
-		t.Fatal("allowGenericAttach = true, want false by default")
+	if !rt.allowGenericAttach {
+		t.Fatal("allowGenericAttach = false, want true by default")
 	}
 	// The default pool less Linux's default ephemeral range.
 	if rt.natPortMin != kernelDefaultNATPortMin || rt.natPortMax != 32767 {
 		t.Fatalf("default nat port range = (%d, %d), want (%d, 32767)", rt.natPortMin, rt.natPortMax, kernelDefaultNATPortMin)
 	}
 
-	rt, ok = newXDPKernelRuleRuntime(&Config{
-		Experimental: map[string]bool{
-			experimentalFeatureXDPGeneric: true,
-		},
-	}).(*xdpKernelRuleRuntime)
+	disabled := false
+	rt, ok = newXDPKernelRuleRuntime(&Config{XDPGenericSetting: &disabled}).(*xdpKernelRuleRuntime)
 	if !ok {
 		t.Fatal("newXDPKernelRuleRuntime(config) did not return *xdpKernelRuleRuntime")
 	}
-	if !rt.allowGenericAttach {
-		t.Fatal("allowGenericAttach = false, want true when xdp_generic is enabled")
+	if rt.allowGenericAttach {
+		t.Fatal("allowGenericAttach = true, want false with xdp_generic=false")
 	}
 
 	rt, ok = newXDPKernelRuleRuntime(&Config{
@@ -707,11 +704,22 @@ func TestXDPAttachOrderHonorsGenericExperiment(t *testing.T) {
 	}
 }
 
-func TestXDPGenericAttachmentExperimentalReason(t *testing.T) {
-	got := xdpGenericAttachmentExperimentalReason()
-	want := `xdp dataplane generic/mixed attachment requires experimental feature "xdp_generic"`
+func TestXDPGenericAttachmentDisabledReason(t *testing.T) {
+	got := xdpGenericAttachmentDisabledReason()
+	want := `xdp dataplane generic/mixed attachment is disabled by xdp_generic=false`
 	if got != want {
-		t.Fatalf("xdpGenericAttachmentExperimentalReason() = %q, want %q", got, want)
+		t.Fatalf("xdpGenericAttachmentDisabledReason() = %q, want %q", got, want)
+	}
+}
+
+// Plugin hooks try driver mode first everywhere, including the veth and
+// bridge ports where the core XDP engine starts with generic mode.
+func TestXDPPluginAttachOrderPrefersDriverMode(t *testing.T) {
+	if got, want := xdpPluginAttachOrder(true), []int{nl.XDP_FLAGS_DRV_MODE, nl.XDP_FLAGS_SKB_MODE}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("xdpPluginAttachOrder(true) = %v, want %v", got, want)
+	}
+	if got, want := xdpPluginAttachOrder(false), []int{nl.XDP_FLAGS_DRV_MODE}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("xdpPluginAttachOrder(false) = %v, want %v", got, want)
 	}
 }
 

@@ -1271,9 +1271,9 @@ hardcoded_defaults = OrderedDict([
     ("kernel_nat_port_min", 20000),
     ("kernel_nat_port_max", 65535),
     ("kernel_tc_flow_cache", True),
+    ("xdp_generic", True),
     ("experimental_features", OrderedDict([
         ("bridge_xdp", False),
-        ("xdp_generic", False),
         ("kernel_traffic_stats", False),
         ("kernel_tc_diag", False),
         ("kernel_tc_diag_verbose", False),
@@ -1305,6 +1305,13 @@ if isinstance(experimental_features, dict) and "kernel_tc_flow_cache" in experim
     legacy_flow_cache = experimental_features.pop("kernel_tc_flow_cache")
     if "kernel_tc_flow_cache" not in current and isinstance(legacy_flow_cache, bool):
         result["kernel_tc_flow_cache"] = legacy_flow_cache
+
+# xdp_generic left experimental_features too and is now on by default. The old
+# entry is dropped without carrying it over: deploy wrote it as false into
+# every config while generic attachment was off by default, so it records no
+# choice. A top-level value already present is kept.
+if isinstance(experimental_features, dict):
+    experimental_features.pop("xdp_generic", None)
 
 if result["web_token"] == "":
     raise SystemExit("web_token 不能为空")

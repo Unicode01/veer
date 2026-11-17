@@ -197,6 +197,22 @@ def main() -> None:
             others = {k: v for k, v in current["experimental_features"].items() if k != "kernel_tc_flow_cache"}
             assert result["experimental_features"] == others, f"{name}: {result['experimental_features']!r}"
 
+        # xdp_generic left experimental_features and is on by default. The old
+        # entry was written as false into every config, so it is dropped
+        # without being carried over; a top-level value already present wins.
+        for name, current, want in (
+            ("xdp-generic-default", {"experimental_features": {"kernel_tc_diag": True}}, True),
+            ("xdp-generic-legacy-off", {"experimental_features": {"xdp_generic": False, "kernel_tc_diag": True}}, True),
+            ("xdp-generic-legacy-on", {"experimental_features": {"xdp_generic": True}}, True),
+            ("xdp-generic-setting-kept", {"xdp_generic": False, "experimental_features": {"xdp_generic": True}}, False),
+        ):
+            current.update({"web_token": STRONG_WEB_TOKEN, "plugin_admin_token": STRONG_ADMIN_TOKEN})
+            result = run_scenario(script, root, name, current)
+            assert result is not None
+            assert result["xdp_generic"] is want, f"{name}: xdp_generic = {result['xdp_generic']!r}"
+            others = {k: v for k, v in current["experimental_features"].items() if k != "xdp_generic"}
+            assert result["experimental_features"] == others, f"{name}: {result['experimental_features']!r}"
+
     print("deploy config compatibility policy: ok")
 
 

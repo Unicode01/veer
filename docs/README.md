@@ -247,6 +247,7 @@ Authorization: Bearer <web_token>
 - `kernel_nat_ports_map_limit`：内核 NAT 端口 map 容量，`0` 表示自适应
 - `kernel_nat_port_min` / `kernel_nat_port_max`：内核 Full NAT / Egress NAT 的端口池，默认 20000–65535。NAT 地址就是宿主自己的地址，宿主连接用的临时端口（`net.ipv4.ip_local_port_range`，Linux 默认 32768–60999）若也被 NAT 占用，回包会被当作 NAT 回程转给内网主机（Full Cone 的回程不看对端），宿主那条连接只能超时。所以内核 NAT 启动时从端口池里去掉宿主的临时端口范围，取剩下较大的一段，默认配置下实际使用 20000–32767；运行时视图 TC/XDP 引擎的 `nat_port_min` / `nat_port_max` 显示实际范围。端口池整个落在临时端口范围内时按配置使用并记录警告。临时端口范围只在启动时读取，修改后重启 Veer 生效；需要更多 NAT 端口时可以调小宿主的临时端口范围，或把端口池配置到它之外
 - `kernel_tc_flow_cache`：TC 连接缓存，默认开启；只跑大量短连接时可设为 `false`，取舍见下文 Dataplane 一节
+- `xdp_generic`：网卡驱动没有原生 XDP 时，允许 XDP 程序（XDP 转发引擎和 XDP 插件）以 generic 模式挂载，默认开启；设为 `false` 只允许原生模式。旧配置 `experimental_features` 里的同名项不再生效，部署脚本会删除它
 - `experimental_features`：实验特性开关，默认都应保持关闭，按需验证后再开
 
 ## Dataplane
@@ -278,7 +279,7 @@ TC 与 XDP 选择建议：
 
 - `TC` 更适合 bridge、tap、veth、PVE 等宿主机场景
 - `XDP` 可用但应按目标拓扑单独验证
-- `xdp_generic` 默认关闭；veth/tap/netns 测试拓扑通常需要显式启用
+- `xdp_generic` 默认开启：XDP 转发引擎在 veth 和 bridge 成员口上优先用 generic 模式，其他接口先试原生模式；用了 XDP 转发引擎、网卡又没有原生 XDP 时，会以 generic 模式挂载，而不是退回 TC。只想在原生 XDP 网卡上用 XDP 时设为 `false`
 - `bridge_xdp`、`kernel_tc_*` 系列开关都属于实验路径
 
 Egress NAT 只转换发往外部的包。发往本机地址，以及发往本机其他网卡直连网段（例如另一个托管网络里的虚拟机）的包，交给内核按路由表转发，对方看到的是虚拟机自己的地址；TC 和 XDP 路径相同，单独选了 VPN 等出口的子接口也一样。出口网卡（任一 Egress NAT 的 `out_interface`，以及它所在的网桥或父接口）上的直连网段照常转换；同一网段同时出现在出口和其他网卡上时按出口处理，网段嵌套时以最长前缀为准。只认网卡地址对应的直连网段，经静态路由才能到达的内网仍然转换。同一网桥内的虚拟机互访由网桥二层转发，本来就不经过 NAT。出口暂时不可用、Egress NAT 保留匹配条件丢包时，发往本机和这些网段的包照常放行。网段清单和本机地址清单一起在规则同步时更新，最多 1024 个网段，写入失败时清空并记录日志，此时发往这些网段的包恢复为照常转换。这项检查只在连接的首包、FIN/RST 和每秒一次的完整处理时做，一条短连接约 3–4 次；测试机上每次多一次前缀表查询约 22 ns，约占短连接 BPF 时间的 0.5%，长连接每包开销不变。

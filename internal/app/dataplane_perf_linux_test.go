@@ -349,9 +349,6 @@ func TestDataplanePerfMatrix(t *testing.T) {
 			Order:        []string{kernelEngineXDP},
 			Expected:     ruleEngineKernel,
 			ExpectedKern: kernelEngineXDP,
-			Experimental: map[string]bool{
-				experimentalFeatureXDPGeneric: true,
-			},
 		},
 	}
 	modes = selectDataplanePerfModes(t, modes)

@@ -219,7 +219,7 @@ type xdpKernelRuleRuntime struct {
 
 func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 	opts := xdpPrepareOptions{}
-	allowGeneric := false
+	allowGeneric := cfg.XDPGenericEnabled()
 	rulesLimit := 0
 	flowsLimit := 0
 	natLimit := 0
@@ -227,9 +227,6 @@ func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 	tcpIdleTimeoutSeconds := int64(0)
 	if cfg != nil && cfg.ExperimentalFeatureEnabled(experimentalFeatureBridgeXDP) {
 		opts.enableBridge = true
-	}
-	if cfg != nil && cfg.ExperimentalFeatureEnabled(experimentalFeatureXDPGeneric) {
-		allowGeneric = true
 	}
 	if cfg != nil && cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTraffic) {
 		opts.enableTrafficStats = true
@@ -287,10 +284,8 @@ func (rt *xdpKernelRuleRuntime) ensureAvailabilityInitialized() {
 		if rt.prepareOptions.enableBridge {
 			rt.availableReason += "; bridge_xdp experimental path enabled"
 		}
-		if rt.allowGenericAttach {
-			rt.availableReason += "; xdp_generic experimental path enabled"
-		} else {
-			rt.availableReason += fmt.Sprintf("; generic/mixed attachment requires experimental feature %q", experimentalFeatureXDPGeneric)
+		if !rt.allowGenericAttach {
+			rt.availableReason += "; generic/mixed attachment disabled by xdp_generic=false"
 		}
 		if rt.prepareOptions.enableTrafficStats {
 			rt.availableReason += "; kernel_traffic_stats experimental path enabled"
@@ -1565,7 +1560,7 @@ func (rt *xdpKernelRuleRuntime) attachProgramLocked(ifindex int, prog *ebpf.Prog
 		}
 	}
 	if !rt.allowGenericAttach {
-		errs = append(errs, "generic skipped: "+xdpGenericAttachmentExperimentalReason())
+		errs = append(errs, "generic skipped: "+xdpGenericAttachmentDisabledReason())
 	}
 	return xdpAttachment{}, errors.New(strings.Join(errs, "; "))
 }
@@ -2083,8 +2078,8 @@ func collectXDPInterfaces(prepared []preparedXDPKernelRule) []int {
 	return out
 }
 
-func xdpGenericAttachmentExperimentalReason() string {
-	return fmt.Sprintf("xdp dataplane generic/mixed attachment requires experimental feature %q", experimentalFeatureXDPGeneric)
+func xdpGenericAttachmentDisabledReason() string {
+	return "xdp dataplane generic/mixed attachment is disabled by xdp_generic=false"
 }
 
 func xdpAttachOrder(link netlink.Link, oldAttachments []xdpAttachment, allowGeneric bool) []int {

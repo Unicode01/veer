@@ -80,9 +80,6 @@ func TestXDPKernelTransparentRejectsACKOnlyNewSession(t *testing.T) {
 		Order:        []string{kernelEngineXDP},
 		Expected:     ruleEngineKernel,
 		ExpectedKern: kernelEngineXDP,
-		Experimental: map[string]bool{
-			experimentalFeatureXDPGeneric: true,
-		},
 	}
 
 	harness := startTCPSessionGuardHarness(t, baseBinary, "xdp", mode)
