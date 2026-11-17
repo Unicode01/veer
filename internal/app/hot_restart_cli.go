@@ -52,11 +52,15 @@ type hotRestartMapReport struct {
 	// From is the preserved map's own name when it is adopted under another
 	// one: a successor moves active flow banks to the old bank when no
 	// migration is draining.
-	From       string               `json:"from,omitempty"`
-	Compatible bool                 `json:"compatible"`
-	Reason     string               `json:"reason,omitempty"`
-	Preserved  *hotRestartMapLayout `json:"preserved,omitempty"`
-	Current    *hotRestartMapLayout `json:"current,omitempty"`
+	From       string `json:"from,omitempty"`
+	Compatible bool   `json:"compatible"`
+	// Copied is set when the successor copies the preserved map into a map of
+	// the current layout instead of adopting it: the value grew by appended
+	// fields, which start zeroed.
+	Copied    bool                 `json:"copied,omitempty"`
+	Reason    string               `json:"reason,omitempty"`
+	Preserved *hotRestartMapLayout `json:"preserved,omitempty"`
+	Current   *hotRestartMapLayout `json:"current,omitempty"`
 }
 
 type hotRestartMapLayout struct {
@@ -104,13 +108,14 @@ func writeHotRestartCLIUsage(w io.Writer) {
 	fmt.Fprint(w, `Usage:
   veer hot-restart check [--json] [--install-dir DIR] [--config FILE] [--no-inherit-stats]
 
-check tells, before a restart, whether the next hot restart can adopt the
-kernel maps the running daemon preserves (flows, NAT ports, rule stats) or
-falls back to fresh maps, a cold restart that drops kernel NAT connections and
-per-rule counters. It compares those maps with the objects embedded in this
-binary, loaded with the settings in the config, using the rules the new
-process applies. Run it as root with the binary about to be installed. It
-changes nothing. --no-inherit-stats matches deploy.sh --no-inherit-stats.
+check tells, before a restart, whether the next hot restart adopts the kernel
+maps the running daemon preserves (flows, NAT ports, rule stats), copies those
+whose values only grew by appended fields, or falls back to fresh maps, a cold
+restart that drops kernel NAT connections and per-rule counters. It compares
+those maps with the objects embedded in this binary, loaded with the settings
+in the config, using the rules the new process applies. Run it as root with
+the binary about to be installed. It changes nothing. --no-inherit-stats
+matches deploy.sh --no-inherit-stats.
 `)
 }
 
@@ -173,7 +178,7 @@ func hotRestartOverallVerdict(engines []hotRestartEngineReport) string {
 func hotRestartVerdictSummary(verdict string) string {
 	switch verdict {
 	case hotRestartVerdictHot:
-		return "hot - the next hot restart adopts every preserved map"
+		return "hot - the next hot restart adopts or copies every preserved map"
 	case hotRestartVerdictCold:
 		return "cold - the next hot restart falls back to fresh maps (cold restart); kernel NAT connections and per-rule counters are lost"
 	case hotRestartVerdictNone:
@@ -219,8 +224,12 @@ func writeHotRestartCheckReport(w io.Writer, report hotRestartCheckReport) {
 		fmt.Fprintf(w, "%-9s %s\n", engine.Engine+":", source)
 		for _, m := range engine.Maps {
 			status, detail := "ok", m.Preserved.String()
-			if !m.Compatible {
+			switch {
+			case !m.Compatible:
 				status, detail = "INCOMPATIBLE", m.Reason
+			case m.Copied && m.Current != nil:
+				status = "copy"
+				detail = fmt.Sprintf("%s; values grow to %d bytes, appended fields zeroed", m.Preserved.String(), m.Current.ValueSize)
 			}
 			name := m.Name
 			if m.From != "" && m.From != m.Name {

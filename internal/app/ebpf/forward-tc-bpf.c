@@ -106,6 +106,13 @@ struct flow_fast_v4 {
 	__u8 pad[4];
 };
 
+/*
+ * A hot restart from an older daemon copies its flow entries into this
+ * layout when their value is a prefix listed in kernelTCMapLayoutRules, and
+ * zero-fills the rest. Grow this struct only by appending fields that read
+ * zero as unset, and list the previous size there; any other change makes
+ * that hot restart cold.
+ */
 struct flow_value_v4 {
 	__u32 rule_id;
 	__u32 front_addr;

@@ -294,12 +294,19 @@ func (c hotRestartEngineCheck) flexibleCapacityMaps() map[string]bool {
 	return kernelTCHotRestartFlexibleCapacityMaps()
 }
 
-// compareMaps reports every adopted map and returns the ones the successor
-// cannot adopt.
+func (c hotRestartEngineCheck) layoutRules() map[string]kernelMapLayoutRule {
+	if c.engine == kernelEngineTC {
+		return kernelTCMapLayoutRules
+	}
+	return nil
+}
+
+// compareMaps reports every adopted or copied map and returns the ones the
+// successor can neither adopt nor copy.
 func (c hotRestartEngineCheck) compareMaps(report *hotRestartEngineReport, state *kernelHotRestartMapState, origins map[*ebpf.Map]string) ([]string, error) {
 	allowSmaller := c.flexibleCapacityMaps()
 	allowSmaller[kernelStatsMapName] = true
-	comparisons, err := compareKernelHotRestartMapReplacements(c.spec, state.replacements, allowSmaller)
+	comparisons, err := compareKernelHotRestartMapReplacements(c.spec, state.replacements, allowSmaller, c.layoutRules())
 	if err != nil {
 		return nil, err
 	}
@@ -310,12 +317,15 @@ func (c hotRestartEngineCheck) compareMaps(report *hotRestartEngineReport, state
 			Name:      comparison.name,
 			Preserved: hotRestartMapLayoutOf(comparison.actual),
 			Current:   hotRestartMapLayoutOf(comparison.desired),
+			Copied:    comparison.copied,
 		}
 		if from := origins[m]; from != comparison.name {
 			item.From = from
 		}
 		err := comparison.err
-		if err == nil {
+		// The collection load never sees a copied map; the successor creates
+		// its own and fills it.
+		if err == nil && !comparison.copied {
 			err = hotRestartCollectionLoadCompatible(c.spec.Maps[comparison.name], m)
 		}
 		item.Compatible = err == nil

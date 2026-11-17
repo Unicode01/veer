@@ -325,6 +325,91 @@ func TestTCKernelRuleMutationHotRestartAcrossBuildsKeepsEstablishedTCPConnection
 	}
 }
 
+// The build named by FORWARD_TC_RULE_MUTATION_UPGRADE_FROM_BINARY keeps its
+// flows in an older value layout that kernelTCMapLayoutRules lists, such as a
+// build before d9041cb. It starts, and this build takes over once: the hot
+// restart copies the flow entries into the grown layout instead of going
+// cold, so the connection survives.
+func TestTCKernelRuleMutationHotRestartFromOlderFlowLayoutKeepsEstablishedTCPConnection(t *testing.T) {
+	baseBinary := requireTCRuleMutationIntegrationBinary(t)
+	oldBinary := strings.TrimSpace(os.Getenv("FORWARD_TC_RULE_MUTATION_UPGRADE_FROM_BINARY"))
+	if oldBinary == "" {
+		t.Skip("set FORWARD_TC_RULE_MUTATION_UPGRADE_FROM_BINARY to a build with an older flow value layout")
+	}
+	for _, transparent := range []bool{true, false} {
+		name := "fullnat"
+		if transparent {
+			name = "transparent"
+		}
+		t.Run(name, func(t *testing.T) {
+			runTCRuleMutationHotRestartFromOlderFlowLayout(t, oldBinary, baseBinary, name, transparent)
+		})
+	}
+}
+
+func runTCRuleMutationHotRestartFromOlderFlowLayout(t *testing.T, oldBinary, baseBinary, name string, transparent bool) {
+	harness := startTCRuleMutationHarness(t, oldBinary, "hot-restart-from-older-flow-layout-"+name)
+	rule := createTCRuleMutationRule(t, harness.APIBase, harness.Topology, Rule{
+		InInterface:      harness.Topology.ClientHostIF,
+		InIP:             dataplanePerfFrontAddr,
+		InPort:           dataplanePerfFrontPort,
+		OutInterface:     harness.Topology.BackendHostIF,
+		OutIP:            dataplanePerfBackendAddr,
+		OutPort:          dataplanePerfBackendPort,
+		Protocol:         "tcp",
+		Remark:           "tc-rule-mutation-hot-restart-from-older-flow-layout-" + name,
+		Tag:              "tc-rule-mutation",
+		Transparent:      transparent,
+		EnginePreference: ruleEngineKernel,
+	})
+	target := net.JoinHostPort(dataplanePerfFrontAddr, strconv.Itoa(rule.InPort))
+	if err := runTCRuleMutationProbe(harness.Topology.ClientNS, target); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("baseline probe failed: %v", err)
+	}
+
+	client := startTCRuleMutationSteadyClientWithDuration(t, harness.Topology.ClientNS, target, tcRuleMutationRestartSteadyDuration)
+	waitForTCRuleMutationSteadyClientReady(t, client)
+
+	before, err := os.ReadFile(harness.LogPath)
+	if err != nil {
+		stopTCRuleMutationSteadyClient(t, client)
+		t.Fatalf("read forward log: %v", err)
+	}
+	if err := os.WriteFile(harness.HotRestartMarkerPath, []byte("1"), 0o644); err != nil {
+		stopTCRuleMutationSteadyClient(t, client)
+		t.Fatalf("write hot restart marker: %v", err)
+	}
+	harness.ForwardBinary = baseBinary
+	restartTCRuleMutationForward(t, &harness)
+	waitForTCRuleMutationRuleRunning(t, harness.APIBase, rule.ID)
+
+	stdout, stderr, err := waitForTCRuleMutationSteadyClient(client)
+	if err != nil {
+		logKernelRuntimeOnFailure(t, harness.APIBase)
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("steady client failed across the hot restart: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	if err := runTCRuleMutationProbe(harness.Topology.ClientNS, target); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatalf("post-restart probe failed: %v", err)
+	}
+
+	after, err := os.ReadFile(harness.LogPath)
+	if err != nil {
+		t.Fatalf("read forward log: %v", err)
+	}
+	successor := string(after[min(len(before), len(after)):])
+	if strings.Contains(successor, "cold restart") || !strings.Contains(successor, "copied pinned tc maps: "+kernelTCFlowsOldMapNameV4) {
+		t.Fatalf("successor log does not show the flow bank copied without a cold restart:\n%s", successor)
+	}
+	for _, line := range strings.Split(successor, "\n") {
+		if strings.Contains(line, "pinned tc map") || strings.Contains(line, "copied tc maps") {
+			t.Log(strings.TrimSpace(line))
+		}
+	}
+}
+
 func TestTCKernelRuleMutationHotRestartKeepsEstablishedTCPConnectionAcrossBridgePathPromotion(t *testing.T) {
 	baseBinary := requireTCRuleMutationIntegrationBinary(t)
 	if _, err := exec.LookPath("bridge"); err != nil {

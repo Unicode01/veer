@@ -305,7 +305,7 @@ func newHotRestartCheckTestMaps(t *testing.T, flowValueSize uint32) map[string]*
 }
 
 func TestCompareKernelHotRestartMapReplacementsReportsEveryMap(t *testing.T) {
-	maps := newHotRestartCheckTestMaps(t, 64)
+	maps := newHotRestartCheckTestMaps(t, 48)
 	replacements := map[string]*ebpf.Map{
 		kernelFlowsMapName:    maps[kernelFlowsMapName],
 		kernelNatPortsMapName: maps[kernelNatPortsMapName],
@@ -313,7 +313,7 @@ func TestCompareKernelHotRestartMapReplacementsReportsEveryMap(t *testing.T) {
 	}
 	spec := hotRestartCheckTestSpec(104)
 
-	comparisons, err := compareKernelHotRestartMapReplacements(spec, replacements, kernelTCHotRestartFlexibleCapacityMaps())
+	comparisons, err := compareKernelHotRestartMapReplacements(spec, replacements, kernelTCHotRestartFlexibleCapacityMaps(), kernelTCMapLayoutRules)
 	if err != nil {
 		t.Fatalf("compareKernelHotRestartMapReplacements() error = %v", err)
 	}
@@ -321,11 +321,11 @@ func TestCompareKernelHotRestartMapReplacementsReportsEveryMap(t *testing.T) {
 		t.Fatalf("comparisons = %+v, want one per preserved map", comparisons)
 	}
 	flows, nat, stats := comparisons[0], comparisons[1], comparisons[2]
-	if flows.name != kernelFlowsMapName || kernelHotRestartIncompatibilityReason(flows.err) != "value_size=64 but current object expects 104" {
-		t.Fatalf("flows comparison = %+v (%v), want a value_size incompatibility", flows, flows.err)
+	if flows.name != kernelFlowsMapName || flows.copied || kernelHotRestartIncompatibilityReason(flows.err) != "value_size=48 but current object expects 104" {
+		t.Fatalf("flows comparison = %+v (%v), want a value_size incompatibility: 48 bytes is no listed prefix", flows, flows.err)
 	}
-	if flows.actual == nil || flows.actual.ValueSize != 64 || flows.desired == nil || flows.desired.ValueSize != 104 {
-		t.Fatalf("flows layouts = %+v / %+v, want 64 / 104 byte values", flows.actual, flows.desired)
+	if flows.actual == nil || flows.actual.ValueSize != 48 || flows.desired == nil || flows.desired.ValueSize != 104 {
+		t.Fatalf("flows layouts = %+v / %+v, want 48 / 104 byte values", flows.actual, flows.desired)
 	}
 	if nat.name != kernelNatPortsMapName || nat.err != nil {
 		t.Fatalf("nat comparison = %+v, want compatible: a smaller NAT bank is adopted", nat)
@@ -336,8 +336,43 @@ func TestCompareKernelHotRestartMapReplacementsReportsEveryMap(t *testing.T) {
 
 	err = validateKernelHotRestartMapReplacements(spec, replacements, kernelTCHotRestartFlexibleCapacityMaps())
 	assertKernelHotRestartIncompatible(t, err)
-	if got, want := err.Error(), `map "flows_v4" incompatible: value_size=64 but current object expects 104`; got != want {
+	if got, want := err.Error(), `map "flows_v4" incompatible: value_size=48 but current object expects 104`; got != want {
 		t.Fatalf("validateKernelHotRestartMapReplacements() = %q, want the first incompatible map %q", got, want)
+	}
+}
+
+func TestPlanLayoutCopiesMovesListedPrefixesOutOfReplacements(t *testing.T) {
+	maps := newHotRestartCheckTestMaps(t, 64)
+	spec := hotRestartCheckTestSpec(104)
+	state := &kernelHotRestartMapState{replacements: map[string]*ebpf.Map{
+		kernelTCFlowsOldMapNameV4:    maps[kernelFlowsMapName],
+		kernelTCNatPortsOldMapNameV4: maps[kernelNatPortsMapName],
+	}}
+
+	if err := state.planLayoutCopies(spec, kernelTCHotRestartFlexibleCapacityMaps(), kernelTCMapLayoutRules); err != nil {
+		t.Fatalf("planLayoutCopies() error = %v", err)
+	}
+	if state.replacements[kernelTCFlowsOldMapNameV4] != nil || state.replacements[kernelTCNatPortsOldMapNameV4] == nil {
+		t.Fatalf("replacements = %v, want the NAT bank adopted and the flow bank moved out", state.replacements)
+	}
+	if len(state.layoutCopies) != 1 {
+		t.Fatalf("layoutCopies = %+v, want the flow bank", state.layoutCopies)
+	}
+	c := state.layoutCopies[0]
+	if c.name != kernelTCFlowsOldMapNameV4 || c.source != maps[kernelFlowsMapName] || c.fromValueSize != 64 || c.toValueSize != 104 {
+		t.Fatalf("layout copy = %+v, want flows_old_v4 from the 64-byte map into 104-byte values", c)
+	}
+	sources := state.capacitySources(state.replacements)
+	if sources[kernelTCFlowsOldMapNameV4] != maps[kernelFlowsMapName] || sources[kernelTCNatPortsOldMapNameV4] != maps[kernelNatPortsMapName] {
+		t.Fatalf("capacitySources() = %v, want both preserved maps", sources)
+	}
+
+	// Without a rule, the same map set is cold.
+	state = &kernelHotRestartMapState{replacements: map[string]*ebpf.Map{kernelTCFlowsOldMapNameV4: maps[kernelFlowsMapName]}}
+	err := state.planLayoutCopies(spec, kernelTCHotRestartFlexibleCapacityMaps(), nil)
+	assertKernelHotRestartIncompatible(t, err)
+	if len(state.layoutCopies) != 0 || state.replacements[kernelTCFlowsOldMapNameV4] == nil {
+		t.Fatalf("state = %+v after a failed plan, want it unchanged", state)
 	}
 }
 
@@ -418,15 +453,31 @@ func TestHotRestartEngineCheckLiveSameLayoutIsHot(t *testing.T) {
 	}
 }
 
-func TestHotRestartEngineCheckLiveValueGrowthIsCold(t *testing.T) {
+func TestHotRestartEngineCheckLiveListedValueGrowthIsCopied(t *testing.T) {
 	maps := newHotRestartCheckTestMaps(t, 64)
+	report := runLiveHotRestartCheck(t, hotRestartCheckTestSpec(104), maps, kernelTCHotRestartCompatToken(false))
+
+	if report.Verdict != hotRestartVerdictHot {
+		t.Fatalf("report = %+v, want hot: the 64-byte flow values are a listed prefix", report)
+	}
+	flows, ok := hotRestartReportMap(report, kernelTCFlowsOldMapNameV4)
+	if !ok || !flows.Compatible || !flows.Copied || flows.From != kernelFlowsMapName || flows.Preserved.ValueSize != 64 || flows.Current.ValueSize != 104 {
+		t.Fatalf("flows report = %+v, want flows_v4 copied into the 104-byte flows_old_v4", flows)
+	}
+	if nat, ok := hotRestartReportMap(report, kernelTCNatPortsOldMapNameV4); !ok || !nat.Compatible || nat.Copied {
+		t.Fatalf("nat report = %+v, want adopted", nat)
+	}
+}
+
+func TestHotRestartEngineCheckLiveUnlistedValueGrowthIsCold(t *testing.T) {
+	maps := newHotRestartCheckTestMaps(t, 48)
 	report := runLiveHotRestartCheck(t, hotRestartCheckTestSpec(104), maps, "")
 
 	if report.Verdict != hotRestartVerdictCold || !strings.Contains(report.Reason, kernelTCFlowsOldMapNameV4+" cannot be adopted") {
 		t.Fatalf("report = %+v, want cold because the flow bank cannot be adopted", report)
 	}
 	flows, ok := hotRestartReportMap(report, kernelTCFlowsOldMapNameV4)
-	if !ok || flows.Compatible || flows.Reason != "value_size=64 but current object expects 104" {
+	if !ok || flows.Compatible || flows.Copied || flows.Reason != "value_size=48 but current object expects 104" {
 		t.Fatalf("flows report = %+v, want the value_size reason", flows)
 	}
 	if nat, ok := hotRestartReportMap(report, kernelTCNatPortsOldMapNameV4); !ok || !nat.Compatible {
@@ -451,7 +502,7 @@ func TestHotRestartEngineCheckReadsPinnedHandoff(t *testing.T) {
 	bpfRoot := requireKernelHotRestartBPFStateRoot(t)
 	t.Setenv(forwardBPFStateDirEnv, bpfRoot)
 	t.Setenv(forwardRuntimeStateDirEnv, t.TempDir())
-	maps := newHotRestartCheckTestMaps(t, 64)
+	maps := newHotRestartCheckTestMaps(t, 48)
 	if err := pinKernelHotRestartMaps(kernelEngineTC, map[string]*ebpf.Map{
 		kernelFlowsMapName:    maps[kernelFlowsMapName],
 		kernelNatPortsMapName: maps[kernelNatPortsMapName],
@@ -465,7 +516,7 @@ func TestHotRestartEngineCheckReadsPinnedHandoff(t *testing.T) {
 	}
 	check := hotRestartEngineCheck{engine: kernelEngineTC, opts: kernelTCHotRestartValidationOptions("new-object", false)}
 
-	check.spec = hotRestartCheckTestSpec(64)
+	check.spec = hotRestartCheckTestSpec(48)
 	if report := check.run(nil); report.Source != hotRestartSourcePinned || report.Verdict != hotRestartVerdictHot {
 		t.Fatalf("same layout report = %+v, want a hot verdict from the pinned handoff", report)
 	}

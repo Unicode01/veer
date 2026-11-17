@@ -1076,6 +1076,8 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	actualCapacities := desiredCapacities
 	var oldStatsMap *ebpf.Map
 	var hotRestartState *kernelHotRestartMapState
+	// Every way out lets go of the preserved maps the layout copies read.
+	defer func() { hotRestartState.closeLayoutCopies() }()
 	hotRestartStatsCorrection := map[uint32]kernelRuleStats{}
 	tcFlowMigrationFlags := uint32(0)
 	ensureMapReplacements := func() {
@@ -1218,7 +1220,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 			clearKernelHotRestartState(kernelEngineTC)
 		}
 	} else if state != nil {
-		if err := validateKernelHotRestartMapReplacements(spec, state.replacements, kernelTCHotRestartFlexibleCapacityMaps()); err != nil {
+		if err := state.planLayoutCopies(spec, kernelTCHotRestartFlexibleCapacityMaps(), kernelTCMapLayoutRules); err != nil {
 			log.Printf(
 				"kernel dataplane hot restart: preserved tc maps are incompatible, abandoning handoff and falling back to fresh maps (cold restart): %s",
 				kernelHotRestartIncompatibilityReason(err),
@@ -1263,11 +1265,19 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 				strings.Join(state.replacementMapNames(), ","),
 				kernelHotRestartEngineDir(kernelEngineTC),
 			)
+			for _, c := range state.layoutCopies {
+				log.Printf(
+					"kernel dataplane hot restart: copying a pinned tc map into %s instead: its %d-byte values grew to %d, and the appended fields start zeroed",
+					c.name,
+					c.fromValueSize,
+					c.toValueSize,
+				)
+			}
 		}
 	}
 	loadSpec := spec
-	if len(mapReplacements) > 0 {
-		loadSpec, err = kernelCollectionSpecWithReplacementMapCapacities(spec, mapReplacements)
+	if capacitySources := hotRestartState.capacitySources(mapReplacements); len(capacitySources) > 0 {
+		loadSpec, err = kernelCollectionSpecWithReplacementMapCapacities(spec, capacitySources)
 		if err == nil {
 			coll, err = ebpf.NewCollectionWithOptions(loadSpec, kernelCollectionOptions(mapReplacements))
 		} else {
@@ -1275,6 +1285,18 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		}
 	} else {
 		coll, err = ebpf.NewCollectionWithOptions(spec, kernelCollectionOptions(nil))
+	}
+	if err == nil && hotRestartState != nil && len(hotRestartState.layoutCopies) > 0 {
+		// The predecessor's programs still run on the pinned maps; catchUpLayouts
+		// applies what they change until the successor attaches.
+		copied, copyErr := hotRestartState.copyLayouts(coll.Maps)
+		if copyErr != nil {
+			coll.Close()
+			coll = nil
+			err = fmt.Errorf("copy pinned tc maps into the new layout: %w", copyErr)
+		} else {
+			log.Printf("kernel dataplane hot restart: copied pinned tc maps: %s", strings.Join(copied, ", "))
+		}
 	}
 	if err != nil && hotRestartState != nil {
 		log.Printf(
@@ -1560,6 +1582,15 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		coll.Close()
 		rt.cleanupLocked()
 		return results, nil
+	}
+	if hotRestartState != nil && len(hotRestartState.layoutCopies) > 0 {
+		caughtUp, catchUpErr := hotRestartState.catchUpLayouts(coll.Maps)
+		if catchUpErr != nil {
+			log.Printf("kernel dataplane hot restart: bring copied tc maps up to date after attach: %v", catchUpErr)
+		}
+		if len(caughtUp) > 0 {
+			log.Printf("kernel dataplane hot restart: brought copied tc maps up to date after attach: %s", strings.Join(caughtUp, ", "))
+		}
 	}
 	if hotRestartFlowAliases != nil {
 		finalized, finalizeErr := hotRestartFlowAliases.finalize()

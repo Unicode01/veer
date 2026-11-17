@@ -92,7 +92,9 @@ PPPoE 保留 live session 的非秘密准备参数。恢复时若模式变化，
 
 ## 热更新预检
 
-热更新时旧进程把 flow、NAT 和 stats map pin 到 `/sys/fs/bpf/forward/hot-restart/<engine>`，新进程用自己的对象逐个比对。任一 map 的类型、key/value 大小或 flags 与新对象不同（例如 flow value 从 64 字节增加到 104 字节），或兼容 token 不一致（`kernel_traffic_stats` 开关变化），新进程就放弃交接、改用新 map，日志记为 `... (cold restart)`，内核 NAT 连接和规则计数随之丢失。容量不影响结果：flow/NAT bank 按保留时的大小接管，stats 容量不足时复制内容。
+热更新时旧进程把 flow、NAT 和 stats map pin 到 `/sys/fs/bpf/forward/hot-restart/<engine>`，新进程用自己的对象逐个比对。任一 map 的类型、key/value 大小或 flags 与新对象不同，或兼容 token 不一致（`kernel_traffic_stats` 开关变化），新进程就放弃交接、改用新 map，日志记为 `... (cold restart)`，内核 NAT 连接和规则计数随之丢失。容量不影响结果：flow/NAT bank 按保留时的大小接管，stats 容量不足时复制内容。
+
+value 只在末尾追加了字段时例外：旧 value 是新布局的前缀，新进程不接管这个 map，而是建一个新布局的 map，把条目逐个复制过去，追加部分填零，日志记为 `copied pinned tc maps: ...`。目前只有 TC 的 `flow_value_v4`：d9041cb 在 64 字节之后追加了 40 字节的 flow cache 记录，从更早的版本升级时，旧进程的 `flows_v4` 按此复制进新进程的 `flows_old_v4`，连接不断。复制在新集合加载后做一次，此时旧程序仍在旧 map 上处理包；新程序挂载后再对一遍，补上这段时间旧程序新建、更新和关闭的条目，新程序已经改过的条目不覆盖。允许复制的 map 和旧 value 大小列在 `kernelTCMapLayoutRules`（`internal/app/kernel_runtime_map_layout_copy_linux.go`）。以后再扩展保留 map 的 value，只能在末尾追加、零值表示“未设置”的字段，并把原大小加入该表；其他改动仍然冷重启。
 
 重启前用即将安装的二进制预检：
 
@@ -101,7 +103,7 @@ PPPoE 保留 live session 的非秘密准备参数。恢复时若模式变化，
 /opt/veer/veer hot-restart check     # 检查已安装的版本
 ```
 
-预检需要 root，只读：按 `<install-dir>/config.json` 的设置加载本二进制内嵌的 TC/XDP 对象；daemon 运行时从它持有的 BPF 程序找出停止时会 pin 的 map，daemon 已停止而交接尚未被接管时读取 pin；再用新进程的接管规则逐个比对，列出每个 map 是否兼容及原因，最后给出 `hot`、`cold` 或 `nothing pinned`（没有需要保留的状态）。`--json` 输出同样内容，`verdict` 为 `hot`、`cold`、`none` 或 `unknown`；`--no-inherit-stats` 对应 deploy.sh 的同名参数。bootstrap.sh 在执行部署前运行预检并打印结论，不改变部署流程。
+预检需要 root，只读：按 `<install-dir>/config.json` 的设置加载本二进制内嵌的 TC/XDP 对象；daemon 运行时从它持有的 BPF 程序找出停止时会 pin 的 map，daemon 已停止而交接尚未被接管时读取 pin；再用新进程的接管规则逐个比对，列出每个 map 是接管（`ok`）、复制（`copy`，JSON 中 `copied: true`）还是不兼容及原因，最后给出 `hot`、`cold` 或 `nothing pinned`（没有需要保留的状态）。`--json` 输出同样内容，`verdict` 为 `hot`、`cold`、`none` 或 `unknown`；`--no-inherit-stats` 对应 deploy.sh 的同名参数。bootstrap.sh 在执行部署前运行预检并打印结论，不改变部署流程。
 
 预检不加载程序，verifier 拒绝新对象这类加载阶段的失败仍会在重启时回退。daemon 自本版本起在运行时元数据中记录兼容 token；更早的 daemon 没有记录，预检假定其 `kernel_traffic_stats` 与配置一致并给出提示。XDP 插件 dispatcher 的交接不在预检范围内。
 
