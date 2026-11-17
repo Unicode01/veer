@@ -90,6 +90,21 @@ PPPoE 保留 live session 的非秘密准备参数。恢复时若模式变化，
 
 模块带 `MODULE_VERSION`，modpost 因此记录 `srcversion`（按模块源码算出的哈希），加载后同一个值出现在 `/sys/module/veer_kfuncs/srcversion`。`veer kfuncs status` 比对已加载模块和当前内核的模块文件，显示两者的版本、srcversion 和 `same sources`；不一致时给出加载新文件的办法。`veer kfuncs build` 安装后也做同样比对：源码相同时不需要重启，模块未加载时任何启动（包括热更新）都会加载它，已加载的是其他源码时需要完整重启。完整重启指不带热更新标记的 `systemctl restart veer`，它会清空内核 NAT 与流表状态并重启插件进程；也可以重启主机。完整重启后模块仍未卸载（不是 Veer 加载的，或仍有引用）时，停止 Veer 后执行 `rmmod veer_kfuncs`。daemon 启动时沿用的模块与文件不一致会记录一行日志，`GET /api/kernel/runtime` 的 `kernel_helper_module` 也给出这两个 srcversion 和 `reload_hint`。
 
+## 热更新预检
+
+热更新时旧进程把 flow、NAT 和 stats map pin 到 `/sys/fs/bpf/forward/hot-restart/<engine>`，新进程用自己的对象逐个比对。任一 map 的类型、key/value 大小或 flags 与新对象不同（例如 flow value 从 64 字节增加到 104 字节），或兼容 token 不一致（`kernel_traffic_stats` 开关变化），新进程就放弃交接、改用新 map，日志记为 `... (cold restart)`，内核 NAT 连接和规则计数随之丢失。容量不影响结果：flow/NAT bank 按保留时的大小接管，stats 容量不足时复制内容。
+
+重启前用即将安装的二进制预检：
+
+```sh
+./veer-linux-amd64 hot-restart check --install-dir /opt/veer
+/opt/veer/veer hot-restart check     # 检查已安装的版本
+```
+
+预检需要 root，只读：按 `<install-dir>/config.json` 的设置加载本二进制内嵌的 TC/XDP 对象；daemon 运行时从它持有的 BPF 程序找出停止时会 pin 的 map，daemon 已停止而交接尚未被接管时读取 pin；再用新进程的接管规则逐个比对，列出每个 map 是否兼容及原因，最后给出 `hot`、`cold` 或 `nothing pinned`（没有需要保留的状态）。`--json` 输出同样内容，`verdict` 为 `hot`、`cold`、`none` 或 `unknown`；`--no-inherit-stats` 对应 deploy.sh 的同名参数。bootstrap.sh 在执行部署前运行预检并打印结论，不改变部署流程。
+
+预检不加载程序，verifier 拒绝新对象这类加载阶段的失败仍会在重启时回退。daemon 自本版本起在运行时元数据中记录兼容 token；更早的 daemon 没有记录，预检假定其 `kernel_traffic_stats` 与配置一致并给出提示。XDP 插件 dispatcher 的交接不在预检范围内。
+
 ## kfunc 开发边界
 
 公共声明在 [plugins/include/veer_kfuncs.h](../plugins/include/veer_kfuncs.h)：`veer_kfuncs_abi_v1()`、`veer_skb_handoff_v1()`，以及可选的 `veer_skb_handoff_ingress_v1()`。后者仅接受 `VEER_L3_TO_ETH`，补 Ethernet 后送入目标设备接收路径，执行目标 TC ingress；原函数发送语义与 ABI 保持不变。handoff 配置为 28 字节，仅含标量，当前只注册给 `BPF_PROG_TYPE_SCHED_CLS`。

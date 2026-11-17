@@ -652,16 +652,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 			clearKernelHotRestartState(kernelEngineXDP)
 		}
 	} else if state != nil {
-		if err := validateKernelHotRestartMapReplacements(spec, state.replacements, map[string]bool{
-			kernelFlowsMapName:           true,
-			kernelFlowsMapNameV6:         true,
-			kernelXDPFlowsOldMapNameV4:   true,
-			kernelXDPFlowsOldMapNameV6:   true,
-			kernelNatPortsMapName:        true,
-			kernelNatPortsMapNameV6:      true,
-			kernelTCNatPortsOldMapNameV4: true,
-			kernelTCNatPortsOldMapNameV6: true,
-		}); err != nil {
+		if err := validateKernelHotRestartMapReplacements(spec, state.replacements, kernelXDPHotRestartFlexibleCapacityMaps()); err != nil {
 			log.Printf(
 				"xdp dataplane hot restart: preserved xdp maps are incompatible, abandoning handoff and falling back to fresh maps (cold restart): %s",
 				kernelHotRestartIncompatibilityReason(err),
@@ -997,7 +988,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		mergeKernelStatsCorrections(rt.statsCorrection, purgeCorrections)
 		log.Printf("xdp dataplane reconcile: purged %d stale xdp flow entry(s) for %d changed rule revision(s)", purgedFlows, len(flowPurgeAttempt))
 	}
-	if err := writeKernelRuntimeMetadata(kernelEngineXDP, kernelHotRestartXDPMetadata(rt.attachments, "")); err != nil {
+	if err := writeKernelRuntimeMetadata(kernelEngineXDP, rt.runtimeMetadata()); err != nil {
 		log.Printf("xdp dataplane runtime metadata: write xdp runtime metadata failed: %v", err)
 	}
 	if hotRestartState != nil {
@@ -1257,36 +1248,14 @@ func (rt *xdpKernelRuleRuntime) prepareHotRestartLocked() bool {
 		currentCounts.natEntries,
 		"xdp dataplane hot restart",
 	)
-	maps := map[string]*ebpf.Map{
-		kernelFlowsMapName: rt.coll.Maps[kernelFlowsMapName],
-	}
-	if rt.coll.Maps[kernelFlowsMapNameV6] != nil {
-		maps[kernelFlowsMapNameV6] = rt.coll.Maps[kernelFlowsMapNameV6]
-	}
-	if currentNATEntries > 0 {
-		maps[kernelNatPortsMapName] = rt.coll.Maps[kernelNatPortsMapName]
-		if rt.coll.Maps[kernelNatPortsMapNameV6] != nil {
-			maps[kernelNatPortsMapNameV6] = rt.coll.Maps[kernelNatPortsMapNameV6]
-		}
-	}
-	if existingMigrationFlags&xdpFlowMigrationFlagV4Old != 0 {
-		maps[kernelXDPFlowsOldMapNameV4] = rt.coll.Maps[kernelXDPFlowsOldMapNameV4]
-		if currentNATEntries > 0 {
-			maps[kernelTCNatPortsOldMapNameV4] = rt.coll.Maps[kernelTCNatPortsOldMapNameV4]
-		}
-	}
-	if existingMigrationFlags&xdpFlowMigrationFlagV6Old != 0 {
-		maps[kernelXDPFlowsOldMapNameV6] = rt.coll.Maps[kernelXDPFlowsOldMapNameV6]
-		if currentNATEntries > 0 {
-			if m := rt.coll.Maps[kernelTCNatPortsOldMapNameV6]; m != nil {
-				maps[kernelTCNatPortsOldMapNameV6] = m
-			}
-		}
-	}
-	if kernelHotRestartSkipStatsRequested() {
+	skipStats := kernelHotRestartSkipStatsRequested()
+	if skipStats {
 		log.Printf("xdp dataplane hot restart: preserving flow map without %s as requested", kernelStatsMapName)
-	} else {
-		maps[kernelStatsMapName] = rt.coll.Maps[kernelStatsMapName]
+	}
+	present := func(name string) bool { return rt.coll.Maps[name] != nil }
+	maps := make(map[string]*ebpf.Map, 9)
+	for _, name := range kernelXDPHotRestartPreservedMapNames(present, existingMigrationFlags, currentNATEntries > 0, skipStats) {
+		maps[name] = rt.coll.Maps[name]
 	}
 	if err := pinKernelHotRestartMaps(kernelEngineXDP, maps); err != nil {
 		log.Printf("xdp dataplane hot restart: preserve xdp maps failed, falling back to full cleanup: %v", err)
@@ -1470,7 +1439,7 @@ func (rt *xdpKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
 	if len(rt.attachments) > 0 {
-		if err := writeKernelRuntimeMetadata(kernelEngineXDP, kernelHotRestartXDPMetadata(rt.attachments, "")); err != nil {
+		if err := writeKernelRuntimeMetadata(kernelEngineXDP, rt.runtimeMetadata()); err != nil {
 			log.Printf("xdp dataplane runtime metadata: refresh xdp runtime metadata failed after rule drain: %v", err)
 		}
 	}
