@@ -436,14 +436,11 @@ static __always_inline void drop_rule_datagram_nat(__u32 rule_id, __u8 proto)
 
 static __always_inline void add_rule_traffic_bytes(__u32 rule_id, __u64 bytes_in, __u64 bytes_out)
 {
-#if !FORWARD_ENABLE_TRAFFIC_STATS
-	(void)rule_id;
-	(void)bytes_in;
-	(void)bytes_out;
-	return;
-#else
 	struct rule_stats_value_v4 *stats;
 
+	/* A load-time setting (FORWARD_TRAFFIC_STATS_ON) defined by each program. */
+	if (!FORWARD_TRAFFIC_STATS_ON)
+		return;
 	if (bytes_in == 0 && bytes_out == 0)
 		return;
 
@@ -454,7 +451,6 @@ static __always_inline void add_rule_traffic_bytes(__u32 rule_id, __u64 bytes_in
 		stats->bytes_in += bytes_in;
 	if (bytes_out != 0)
 		stats->bytes_out += bytes_out;
-#endif
 }
 
 static __always_inline struct kernel_occupancy_value_v4 *lookup_kernel_occupancy(void)

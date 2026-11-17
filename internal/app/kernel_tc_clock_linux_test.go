@@ -44,23 +44,21 @@ func TestUseKernelCoarseClockSwitchesOnlyClockCalls(t *testing.T) {
 }
 
 func TestEmbeddedTCObjectsReadTheClockThroughSwitchableCalls(t *testing.T) {
-	for _, enableTrafficStats := range []bool{false, true} {
-		objectBytes, objectName := kernelTCObjectBytes(enableTrafficStats)
-		if len(objectBytes) == 0 {
-			t.Skipf("%s is not built", objectName)
-		}
-		spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(objectBytes))
-		if err != nil {
-			t.Fatalf("load %s: %v", objectName, err)
-		}
-		if got := useKernelCoarseClock(spec); got == 0 {
-			t.Fatalf("%s: no bpf_ktime_get_ns call was switched", objectName)
-		}
-		for name, prog := range spec.Programs {
-			for _, ins := range prog.Instructions {
-				if ins.IsBuiltinCall() && asm.BuiltinFunc(ins.Constant) == asm.FnKtimeGetNs {
-					t.Fatalf("%s: program %s still calls bpf_ktime_get_ns", objectName, name)
-				}
+	objectName := kernelTCObjectName
+	if len(embeddedForwardTCObject) == 0 {
+		t.Skipf("%s is not built", objectName)
+	}
+	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(embeddedForwardTCObject))
+	if err != nil {
+		t.Fatalf("load %s: %v", objectName, err)
+	}
+	if got := useKernelCoarseClock(spec); got == 0 {
+		t.Fatalf("%s: no bpf_ktime_get_ns call was switched", objectName)
+	}
+	for name, prog := range spec.Programs {
+		for _, ins := range prog.Instructions {
+			if ins.IsBuiltinCall() && asm.BuiltinFunc(ins.Constant) == asm.FnKtimeGetNs {
+				t.Fatalf("%s: program %s still calls bpf_ktime_get_ns", objectName, name)
 			}
 		}
 	}

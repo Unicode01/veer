@@ -25,10 +25,17 @@ const (
 // with only the maps they use, hash maps cut down to test size.
 func loadTCProgramsForTest(t *testing.T, names ...string) *ebpf.Collection {
 	t.Helper()
+	return loadTCProgramsWithStatsForTest(t, false, names...)
+}
+
+// loadTCProgramsWithStatsForTest is loadTCProgramsForTest with traffic stats
+// set at load time, as veer sets them.
+func loadTCProgramsWithStatsForTest(t *testing.T, trafficStats bool, names ...string) *ebpf.Collection {
+	t.Helper()
 	if os.Geteuid() != 0 {
 		t.Skip("root privileges are required")
 	}
-	spec, err := loadEmbeddedKernelCollectionSpec(false)
+	spec, err := loadEmbeddedKernelCollectionSpec(trafficStats)
 	if err != nil {
 		t.Skipf("embedded tc object is unavailable: %v", err)
 	}

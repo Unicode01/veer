@@ -178,9 +178,6 @@ const (
 //go:embed ebpf/forward-tc-bpf.o
 var embeddedForwardTCObject []byte
 
-//go:embed ebpf/forward-tc-bpf-stats.o
-var embeddedForwardTCStatsObject []byte
-
 type tcRuleKeyV4 struct {
 	IfIndex uint32
 	DstAddr uint32
@@ -3501,18 +3498,15 @@ func ensureClsactQdisc(ifindex int) error {
 }
 
 func loadEmbeddedKernelCollectionSpec(enableTrafficStats bool) (*ebpf.CollectionSpec, error) {
-	objectBytes := embeddedForwardTCObject
-	objectName := "internal/app/ebpf/forward-tc-bpf.o"
-	if enableTrafficStats {
-		objectBytes = embeddedForwardTCStatsObject
-		objectName = "internal/app/ebpf/forward-tc-bpf-stats.o"
+	if len(embeddedForwardTCObject) == 0 {
+		return nil, fmt.Errorf("embedded tc eBPF object is empty; build %s before compiling", kernelTCObjectName)
 	}
-	if len(objectBytes) == 0 {
-		return nil, fmt.Errorf("embedded tc eBPF object is empty; build %s before compiling", objectName)
-	}
-	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(objectBytes))
+	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(embeddedForwardTCObject))
 	if err != nil {
 		return nil, fmt.Errorf("load embedded tc eBPF object: %w", err)
+	}
+	if err := setKernelLoadSettings(spec, enableTrafficStats); err != nil {
+		return nil, fmt.Errorf("embedded tc eBPF object: %w", err)
 	}
 	if kernelCoarseClockSupported() {
 		useKernelCoarseClock(spec)

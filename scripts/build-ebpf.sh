@@ -73,7 +73,5 @@ build_core() {
 
 EBPF_DIR="$ROOT_DIR/internal/app/ebpf"
 build_core "$EBPF_DIR/forward-tc-bpf.c" "$EBPF_DIR/forward-tc-bpf.o"
-build_core "$EBPF_DIR/forward-tc-bpf.c" "$EBPF_DIR/forward-tc-bpf-stats.o" -DFORWARD_ENABLE_TRAFFIC_STATS=1
 build_core "$EBPF_DIR/forward-xdp-bpf.c" "$EBPF_DIR/forward-xdp-bpf.o"
-build_core "$EBPF_DIR/forward-xdp-bpf.c" "$EBPF_DIR/forward-xdp-bpf-stats.o" -DFORWARD_ENABLE_TRAFFIC_STATS=1
 build_core "$EBPF_DIR/plugin-xdp-dispatcher-bpf.c" "$EBPF_DIR/plugin-xdp-dispatcher-bpf.o"

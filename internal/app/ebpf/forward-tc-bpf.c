@@ -325,9 +325,17 @@ struct forward_vlan_hdr {
 	__be16 h_vlan_encapsulated_proto;
 };
 
-#ifndef FORWARD_ENABLE_TRAFFIC_STATS
-#define FORWARD_ENABLE_TRAFFIC_STATS 0
-#endif
+/*
+ * Settings veer fixes when it loads the programs. They live in .rodata: veer
+ * writes them before loading (CollectionSpec.Variables) and the loader then
+ * freezes the map read-only, so the verifier reads each one as a constant. It
+ * walks only the branches a setting selects and removes the others before the
+ * program is JIT-compiled, so a feature that is off costs what leaving it out
+ * of the build did, and one object serves every combination. The reads must
+ * stay volatile, or clang folds in the default.
+ */
+volatile const __u32 forward_load_traffic_stats = 0;
+#define FORWARD_TRAFFIC_STATS_ON (forward_load_traffic_stats != 0)
 
 #ifndef FORWARD_TC_PREFER_REDIRECT_NEIGH
 #define FORWARD_TC_PREFER_REDIRECT_NEIGH 0
@@ -357,9 +365,8 @@ struct packet_ctx {
 	int l4_dst_off;
 	__u64 l4_addr_csum_flags;
 	__u64 l4_port_csum_flags;
-#if FORWARD_ENABLE_TRAFFIC_STATS
+	/* Set only while traffic stats are on. */
 	__u16 payload_len;
-#endif
 };
 
 struct packet_ctx_v6 {
@@ -380,9 +387,8 @@ struct packet_ctx_v6 {
 	int l4_dst_off;
 	__u64 l4_addr_csum_flags;
 	__u64 l4_port_csum_flags;
-#if FORWARD_ENABLE_TRAFFIC_STATS
+	/* Set only while traffic stats are on. */
 	__u16 payload_len;
-#endif
 };
 
 struct tc_dispatch_ctx_v4 {
@@ -636,21 +642,29 @@ static __always_inline int transparent_flow_matches_rule_v4(const struct flow_va
 #error FORWARD_NAT_PORT_PROBE_ROUNDS above 3 requires extending reserve_nat_port()
 #endif
 
-#if FORWARD_ENABLE_TRAFFIC_STATS
+/*
+ * veer sets the rule flag only while traffic stats are on. Every test starts
+ * with the load-time setting so that, when it is off, the verifier drops the
+ * counting code behind it.
+ */
 #define FORWARD_FLOW_FLAG_TRAFFIC_STATS 0x40
 #define FORWARD_RULE_FLAG_TRAFFIC_STATS 0x4
-#define FORWARD_RULE_TRAFFIC_ENABLED(rule) (((rule)->flags & FORWARD_RULE_FLAG_TRAFFIC_STATS) != 0)
-#define FORWARD_FLOW_TRAFFIC_ENABLED(flow) (((flow)->flags & FORWARD_FLOW_FLAG_TRAFFIC_STATS) != 0)
-#define FORWARD_SET_PAYLOAD_LEN(ctx, value) ((ctx)->payload_len = (__u16)(value))
+#define FORWARD_RULE_TRAFFIC_ENABLED(rule) \
+	(FORWARD_TRAFFIC_STATS_ON && ((rule)->flags & FORWARD_RULE_FLAG_TRAFFIC_STATS) != 0)
+#define FORWARD_FLOW_TRAFFIC_ENABLED(flow) \
+	(FORWARD_TRAFFIC_STATS_ON && ((flow)->flags & FORWARD_FLOW_FLAG_TRAFFIC_STATS) != 0)
+#define FORWARD_SET_PAYLOAD_LEN(ctx, value) \
+	do { \
+		if (FORWARD_TRAFFIC_STATS_ON) \
+			(ctx)->payload_len = (__u16)(value); \
+	} while (0)
+/* The payload after hdr bytes of a packet of total bytes, or 0. */
+#define FORWARD_SET_PAYLOAD_AFTER(ctx, total, hdr) \
+	do { \
+		if (FORWARD_TRAFFIC_STATS_ON) \
+			(ctx)->payload_len = (total) > (hdr) ? (__u16)((total) - (hdr)) : 0; \
+	} while (0)
 #define FORWARD_GET_PAYLOAD_LEN(ctx) ((__u64)(ctx)->payload_len)
-#else
-#define FORWARD_FLOW_FLAG_TRAFFIC_STATS 0
-#define FORWARD_RULE_FLAG_TRAFFIC_STATS 0
-#define FORWARD_RULE_TRAFFIC_ENABLED(rule) 0
-#define FORWARD_FLOW_TRAFFIC_ENABLED(flow) 0
-#define FORWARD_SET_PAYLOAD_LEN(ctx, value) do { (void)(ctx); (void)(value); } while (0)
-#define FORWARD_GET_PAYLOAD_LEN(ctx) 0ULL
-#endif
 
 struct bpf_map_def SEC("maps") rules_v4 = {
 	.type = BPF_MAP_TYPE_HASH,
@@ -2193,9 +2207,7 @@ static __always_inline int parse_ipv4_l4(struct __sk_buff *skb, struct packet_ct
 			(tcph->rst ? FORWARD_TCP_FLAG_RST : 0) |
 			(tcph->ack ? FORWARD_TCP_FLAG_ACK : 0);
 		ctx->closing = tcph->fin || tcph->rst;
-		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
-		if (ctx->tot_len > (sizeof(*iph) + (((__u16)tcph->doff) << 2)))
-			FORWARD_SET_PAYLOAD_LEN(ctx, ctx->tot_len - (sizeof(*iph) + (((__u16)tcph->doff) << 2)));
+		FORWARD_SET_PAYLOAD_AFTER(ctx, ctx->tot_len, (sizeof(*iph) + (((__u16)tcph->doff) << 2)));
 		ctx->l4_addr_csum_flags = BPF_F_PSEUDO_HDR | sizeof(__be32);
 		ctx->l4_port_csum_flags = sizeof(__be16);
 		ctx->l4_check_off = (int)(l4_off + offsetof(struct tcphdr, check));
@@ -2235,9 +2247,7 @@ static __always_inline int parse_ipv4_l4(struct __sk_buff *skb, struct packet_ct
 		ctx->has_l4_checksum = 1;
 		ctx->l4_hdr_len = sizeof(*icmph);
 		ctx->closing = 0;
-		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
-		if (ctx->tot_len > (sizeof(*iph) + sizeof(*icmph)))
-			FORWARD_SET_PAYLOAD_LEN(ctx, ctx->tot_len - (sizeof(*iph) + sizeof(*icmph)));
+		FORWARD_SET_PAYLOAD_AFTER(ctx, ctx->tot_len, (sizeof(*iph) + sizeof(*icmph)));
 		ctx->l4_addr_csum_flags = 0;
 		ctx->l4_port_csum_flags = sizeof(__be16);
 		ctx->l4_check_off = (int)(l4_off + offsetof(struct icmphdr, checksum));
@@ -2311,9 +2321,7 @@ static __always_inline int parse_ipv4_l4_raw(struct __sk_buff *skb, struct packe
 			(tcph->rst ? FORWARD_TCP_FLAG_RST : 0) |
 			(tcph->ack ? FORWARD_TCP_FLAG_ACK : 0);
 		ctx->closing = tcph->fin || tcph->rst;
-		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
-		if (ctx->tot_len > (sizeof(*iph) + (((__u16)tcph->doff) << 2)))
-			FORWARD_SET_PAYLOAD_LEN(ctx, ctx->tot_len - (sizeof(*iph) + (((__u16)tcph->doff) << 2)));
+		FORWARD_SET_PAYLOAD_AFTER(ctx, ctx->tot_len, (sizeof(*iph) + (((__u16)tcph->doff) << 2)));
 		ctx->l4_addr_csum_flags = BPF_F_PSEUDO_HDR | sizeof(__be32);
 		ctx->l4_port_csum_flags = sizeof(__be16);
 		ctx->l4_check_off = (int)(l4_off + offsetof(struct tcphdr, check));
@@ -2353,9 +2361,7 @@ static __always_inline int parse_ipv4_l4_raw(struct __sk_buff *skb, struct packe
 		ctx->has_l4_checksum = 1;
 		ctx->l4_hdr_len = sizeof(*icmph);
 		ctx->closing = 0;
-		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
-		if (ctx->tot_len > (sizeof(*iph) + sizeof(*icmph)))
-			FORWARD_SET_PAYLOAD_LEN(ctx, ctx->tot_len - (sizeof(*iph) + sizeof(*icmph)));
+		FORWARD_SET_PAYLOAD_AFTER(ctx, ctx->tot_len, (sizeof(*iph) + sizeof(*icmph)));
 		ctx->l4_addr_csum_flags = 0;
 		ctx->l4_port_csum_flags = sizeof(__be16);
 		ctx->l4_check_off = (int)(l4_off + offsetof(struct icmphdr, checksum));
@@ -2422,9 +2428,7 @@ static __always_inline int parse_ipv6_l4(struct __sk_buff *skb, struct packet_ct
 			(tcph->rst ? FORWARD_TCP_FLAG_RST : 0) |
 			(tcph->ack ? FORWARD_TCP_FLAG_ACK : 0);
 		ctx->closing = tcph->fin || tcph->rst;
-		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
-		if (ctx->tot_len > (sizeof(*ip6h) + (((__u16)tcph->doff) << 2)))
-			FORWARD_SET_PAYLOAD_LEN(ctx, ctx->tot_len - (sizeof(*ip6h) + (((__u16)tcph->doff) << 2)));
+		FORWARD_SET_PAYLOAD_AFTER(ctx, ctx->tot_len, (sizeof(*ip6h) + (((__u16)tcph->doff) << 2)));
 		ctx->l4_addr_csum_flags = BPF_F_PSEUDO_HDR;
 		ctx->l4_port_csum_flags = sizeof(__be16);
 		ctx->l4_check_off = (int)(l4_off + offsetof(struct tcphdr, check));
@@ -5360,7 +5364,7 @@ static __always_inline int handle_fullnat_forward_v6(struct __sk_buff *skb, cons
 			return TC_ACT_SHOT;
 
 		init_fullnat_front_value_v6(front_value, rule, ctx, (__u32)skb->ifindex, nat_port, session_id);
-		if ((rule->flags & FORWARD_RULE_FLAG_TRAFFIC_STATS) != 0)
+		if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
 			front_value->flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
 		if (ctx->closing) {
 			front_value->flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
@@ -5468,7 +5472,7 @@ static __always_inline int handle_fullnat_forward_v6(struct __sk_buff *skb, cons
 		bump_rule_total_conns(rule->rule_id);
 	if (count_udp_now)
 		bump_rule_datagram_nat(rule->rule_id, ctx->proto);
-	if ((rule->flags & FORWARD_RULE_FLAG_TRAFFIC_STATS) != 0)
+	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
 		add_rule_traffic_bytes(rule->rule_id, FORWARD_GET_PAYLOAD_LEN(ctx), 0);
 
 	if (rewrite_l4_snat_v6(skb, ctx, front_value->nat_addr, front_value->nat_port) < 0)
@@ -5606,7 +5610,7 @@ static __always_inline int handle_fullnat_reply_v6(struct __sk_buff *skb, const 
 	}
 	if (count_tcp_now)
 		bump_rule_tcp_active(reply_value->rule_id);
-	if ((reply_value->flags & FORWARD_FLOW_FLAG_TRAFFIC_STATS) != 0)
+	if (FORWARD_FLOW_TRAFFIC_ENABLED(reply_value))
 		add_rule_traffic_bytes(reply_value->rule_id, 0, FORWARD_GET_PAYLOAD_LEN(ctx));
 
 	if (rewrite_l4_snat_v6(skb, ctx, reply_value->front_addr, reply_value->front_port) < 0)

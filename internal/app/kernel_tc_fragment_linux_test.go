@@ -5,6 +5,8 @@ package app
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"net"
 	"syscall"
 	"testing"
@@ -173,4 +175,105 @@ func TestTCLaterFragmentsFollowTheirFirstFragment(t *testing.T) {
 				int32(ret), !bytes.Equal(out, later), recorded.ExpiresNS, current)
 		}
 	})
+}
+
+// tcFlowFlagTrafficStatsForTest is FORWARD_FLOW_FLAG_TRAFFIC_STATS, which the
+// datapath sets on the flows of a rule that counts traffic.
+const tcFlowFlagTrafficStatsForTest = 0x40
+
+// With traffic stats on, a reply counts its UDP payload into its rule, from
+// the length in its UDP header. The later fragments of a datagram are not
+// counted, so its first fragment counts the whole datagram rather than the
+// part it carries. With stats off nothing counts.
+func TestTCTrafficStatsCountAUDPFirstFragmentsWholeDatagram(t *testing.T) {
+	for _, trafficStats := range []bool{true, false} {
+		t.Run(fmt.Sprintf("traffic stats %t", trafficStats), func(t *testing.T) {
+			coll := loadTCProgramsWithStatsForTest(t, trafficStats, kernelReplyDispatchProgramName)
+			dispatch := coll.Programs[kernelReplyDispatchProgramName]
+			flows := coll.Maps[kernelFlowsMapName]
+			stats := coll.Maps[kernelStatsMapName]
+			if flows == nil || stats == nil {
+				t.Fatalf("missing maps: %s=%v %s=%v", kernelFlowsMapName, flows, kernelStatsMapName, stats)
+			}
+			now, ok := kernelMonotonicNowNS()
+			if !ok {
+				t.Skip("CLOCK_MONOTONIC is unavailable")
+			}
+			// BPF_PROG_TEST_RUN runs on the loopback device unless told otherwise.
+			const arrival = 1
+			const ruleID = 9
+			routerMAC := net.HardwareAddr{0x02, 0, 0, 0, 0, 0xaa}
+			client := net.IPv4(192, 168, 10, 2)
+			remote := net.IPv4(198, 51, 100, 7)
+			natAddr := net.IPv4(203, 0, 113, 1)
+			if err := flows.Put(tcFlowKeyV4{
+				IfIndex: arrival,
+				SrcAddr: ipv4ToHostOrderForTest(remote),
+				DstAddr: ipv4ToHostOrderForTest(natAddr),
+				SrcPort: 443,
+				DstPort: 40000,
+				Proto:   syscall.IPPROTO_UDP,
+			}, tcFlowValueV4{
+				RuleID:       ruleID,
+				FrontAddr:    ipv4ToHostOrderForTest(remote),
+				ClientAddr:   ipv4ToHostOrderForTest(client),
+				NATAddr:      ipv4ToHostOrderForTest(natAddr),
+				InIfIndex:    arrival,
+				FrontPort:    443,
+				ClientPort:   51000,
+				NATPort:      40000,
+				Flags:        kernelFlowFlagFullNAT | kernelFlowFlagEgressNAT | kernelFlowFlagReplySeen | tcFlowFlagTrafficStatsForTest,
+				LastSeenNS:   now - 2_000_000_000,
+				RuleRevision: 1,
+				SessionID:    0x5eed,
+			}); err != nil {
+				t.Fatalf("write reply entry: %v", err)
+			}
+
+			bytesOut := func() uint64 {
+				t.Helper()
+				var perCPU []kernelStatsValueV4
+				if err := stats.Lookup(uint32(ruleID), &perCPU); err != nil {
+					if errors.Is(err, ebpf.ErrKeyNotExist) {
+						return 0
+					}
+					t.Fatalf("read rule stats: %v", err)
+				}
+				var sum uint64
+				for _, v := range perCPU {
+					sum += v.BytesOut
+				}
+				return sum
+			}
+			run := func(frame []byte) {
+				t.Helper()
+				out := make([]byte, len(frame)+64)
+				if _, err := dispatch.Run(&ebpf.RunOptions{Data: frame, DataOut: out}); err != nil {
+					t.Fatalf("run: %v", err)
+				}
+				if got := net.IP(out[30:34]); !got.Equal(client) {
+					t.Fatalf("destination = %v, want the client %v", got, client)
+				}
+			}
+
+			whole := flowCacheTestFrame(routerMAC, remote, natAddr, 443, 40000)
+			run(whole)
+			want := uint64(0)
+			if trafficStats {
+				want = uint64(binary.BigEndian.Uint16(whole[38:40])) - 8
+			}
+			if got := bytesOut(); got != want {
+				t.Fatalf("after a whole datagram the rule counted %d bytes out, want %d", got, want)
+			}
+
+			first, _ := fragmentTestFrames(routerMAC, remote, natAddr, 443, 40000, 0x4343)
+			run(first)
+			if trafficStats {
+				want += uint64(binary.BigEndian.Uint16(first[38:40])) - 8
+			}
+			if got := bytesOut(); got != want {
+				t.Fatalf("after a first fragment the rule counted %d bytes out, want %d (the whole datagram)", got, want)
+			}
+		})
+	}
 }

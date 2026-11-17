@@ -429,10 +429,10 @@ go build -o veer .
 `release.sh` 会先编译并嵌入 core eBPF 对象，同时生成可选的 `veer-plugins.tar.gz` 和独立开发者产物 `veer-plugin-sdk.tar.gz`：
 
 - `internal/app/ebpf/forward-tc-bpf.o`
-- `internal/app/ebpf/forward-tc-bpf-stats.o`
 - `internal/app/ebpf/forward-xdp-bpf.o`
-- `internal/app/ebpf/forward-xdp-bpf-stats.o`
 - `internal/app/ebpf/plugin-xdp-dispatcher-bpf.o`
+
+TC 和 XDP 各只有一个对象，开关不再各编一份。`kernel_traffic_stats` 这类设置是对象 `.rodata` 里的 `const volatile` 全局变量（如 `forward_load_traffic_stats`）：veer 加载前写入，并把每处读取直接换成这个值；加载器随后把 `.rodata` 冻结为只读，验证器就把它当常量，只走设置选中的分支，并在 JIT 之前删掉其余代码。测试机上（clang 14/18/21，内核 5.10、5.15、6.12），删完以后的代码比按设置单独编译的对象只多约 0.3%（clang 编译时不知道哪些代码会被删，寄存器分配略有不同）。四轮出口 NAT A/B 测下来，统计开、关时的每包 BPF 开销都和单独编译的对象分不出差别：同一轮内成对比较的差值在 −6 到 +7 ns（约 ±2%）之间，正负不固定，同一个二进制在不同轮次之间也相差约 9 ns。veer 二进制因此小了约 8.5 MB。
 
 TC 与 XDP 源码完全相同的辅助函数放在 `internal/app/ebpf/include/forward_common.h`，两个 dataplane 都在各自的 map 与前置声明之后包含它；修改其中任一函数会同时影响两个对象。只在一侧需要或两侧实现不同的函数仍留在各自的 `.c` 文件中。
 

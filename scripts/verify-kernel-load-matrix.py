@@ -256,7 +256,7 @@ def main():
         parser.error("busybox is unavailable (install busybox-static)")
     if not args.test_binary.is_file():
         parser.error(f"missing test binary: {args.test_binary}")
-    for name in ("forward-tc-bpf.o", "forward-tc-bpf-stats.o", "forward-xdp-bpf.o", "forward-xdp-bpf-stats.o"):
+    for name in ("forward-tc-bpf.o", "forward-xdp-bpf.o"):
         if not (ROOT / "internal/app/ebpf" / name).is_file():
             parser.error(f"missing eBPF object {name}; run sh scripts/build-ebpf.sh first")
     args.output.mkdir(parents=True, exist_ok=True)

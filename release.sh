@@ -100,10 +100,8 @@ EBPF_DIR="${PROJECT_DIR}/internal/app/ebpf"
 EBPF_INC="${EBPF_DIR}/include"
 EBPF_TC_SRC="${EBPF_DIR}/forward-tc-bpf.c"
 EBPF_TC_OBJ="${EBPF_DIR}/forward-tc-bpf.o"
-EBPF_TC_STATS_OBJ="${EBPF_DIR}/forward-tc-bpf-stats.o"
 EBPF_XDP_SRC="${EBPF_DIR}/forward-xdp-bpf.c"
 EBPF_XDP_OBJ="${EBPF_DIR}/forward-xdp-bpf.o"
-EBPF_XDP_STATS_OBJ="${EBPF_DIR}/forward-xdp-bpf-stats.o"
 EBPF_PLUGIN_XDP_SRC="${EBPF_DIR}/plugin-xdp-dispatcher-bpf.c"
 EBPF_PLUGIN_XDP_OBJ="${EBPF_DIR}/plugin-xdp-dispatcher-bpf.o"
 BPF_CLANG="${BPF_CLANG:-clang}"
@@ -265,9 +263,7 @@ compile_bpf_object() {
 }
 
 compile_bpf_object "${EBPF_TC_SRC}" "${EBPF_TC_OBJ}" "tc"
-compile_bpf_object "${EBPF_TC_SRC}" "${EBPF_TC_STATS_OBJ}" "tc-stats" -DFORWARD_ENABLE_TRAFFIC_STATS=1
 compile_bpf_object "${EBPF_XDP_SRC}" "${EBPF_XDP_OBJ}" "xdp"
-compile_bpf_object "${EBPF_XDP_SRC}" "${EBPF_XDP_STATS_OBJ}" "xdp-stats" -DFORWARD_ENABLE_TRAFFIC_STATS=1
 compile_bpf_object "${EBPF_PLUGIN_XDP_SRC}" "${EBPF_PLUGIN_XDP_OBJ}" "plugin-xdp-dispatcher"
 
 info "校验 eBPF map ABI..."

@@ -173,9 +173,6 @@ type preparedXDPKernelRuleBatches struct {
 //go:embed ebpf/forward-xdp-bpf.o
 var embeddedForwardXDPObject []byte
 
-//go:embed ebpf/forward-xdp-bpf-stats.o
-var embeddedForwardXDPStatsObject []byte
-
 type xdpAttachment struct {
 	ifindex int
 	flags   int
@@ -1652,18 +1649,15 @@ func (rt *xdpKernelRuleRuntime) deleteStaleAttachmentsLocked(oldAttachments, new
 }
 
 func loadEmbeddedXDPCollectionSpec(enableTrafficStats bool) (*ebpf.CollectionSpec, error) {
-	objectBytes := embeddedForwardXDPObject
-	objectName := "internal/app/ebpf/forward-xdp-bpf.o"
-	if enableTrafficStats {
-		objectBytes = embeddedForwardXDPStatsObject
-		objectName = "internal/app/ebpf/forward-xdp-bpf-stats.o"
+	if len(embeddedForwardXDPObject) == 0 {
+		return nil, fmt.Errorf("embedded xdp eBPF object is empty; build %s before compiling", kernelXDPObjectName)
 	}
-	if len(objectBytes) == 0 {
-		return nil, fmt.Errorf("embedded xdp eBPF object is empty; build %s before compiling", objectName)
-	}
-	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(objectBytes))
+	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(embeddedForwardXDPObject))
 	if err != nil {
 		return nil, fmt.Errorf("load embedded xdp eBPF object: %w", err)
+	}
+	if err := setKernelLoadSettings(spec, enableTrafficStats); err != nil {
+		return nil, fmt.Errorf("embedded xdp eBPF object: %w", err)
 	}
 	return spec, nil
 }

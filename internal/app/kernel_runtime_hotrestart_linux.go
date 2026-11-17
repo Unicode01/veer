@@ -372,42 +372,30 @@ func kernelHotRestartMarkerPath() string {
 	return preferredEnvironmentValue(veerHotRestartMarkerEnv, forwardHotRestartMarkerEnv)
 }
 
-func kernelTCObjectBytes(enableTrafficStats bool) ([]byte, string) {
-	objectBytes := embeddedForwardTCObject
-	objectName := "internal/app/ebpf/forward-tc-bpf.o"
-	if enableTrafficStats {
-		objectBytes = embeddedForwardTCStatsObject
-		objectName = "internal/app/ebpf/forward-tc-bpf-stats.o"
-	}
-	return objectBytes, objectName
-}
+const (
+	kernelTCObjectName  = "internal/app/ebpf/forward-tc-bpf.o"
+	kernelXDPObjectName = "internal/app/ebpf/forward-xdp-bpf.o"
+)
 
-func kernelXDPObjectBytes(enableTrafficStats bool) ([]byte, string) {
-	objectBytes := embeddedForwardXDPObject
-	objectName := "internal/app/ebpf/forward-xdp-bpf.o"
-	if enableTrafficStats {
-		objectBytes = embeddedForwardXDPStatsObject
-		objectName = "internal/app/ebpf/forward-xdp-bpf-stats.o"
-	}
-	return objectBytes, objectName
-}
-
-func kernelHotRestartObjectHash(objectBytes []byte, objectName string) (string, error) {
+// kernelHotRestartObjectHash identifies the programs an object gives with the
+// given load-time settings.
+func kernelHotRestartObjectHash(objectBytes []byte, objectName string, settingsTag string) (string, error) {
 	if len(objectBytes) == 0 {
 		return "", fmt.Errorf("embedded eBPF object %s is empty", strings.TrimSpace(objectName))
 	}
-	sum := sha256.Sum256(objectBytes)
-	return hex.EncodeToString(sum[:]), nil
+	hash := sha256.New()
+	hash.Write(objectBytes)
+	hash.Write([]byte{0})
+	hash.Write([]byte(settingsTag))
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func kernelTCHotRestartObjectHash(enableTrafficStats bool) (string, error) {
-	objectBytes, objectName := kernelTCObjectBytes(enableTrafficStats)
-	return kernelHotRestartObjectHash(objectBytes, objectName)
+	return kernelHotRestartObjectHash(embeddedForwardTCObject, kernelTCObjectName, kernelLoadSettingsTag(enableTrafficStats))
 }
 
 func kernelXDPHotRestartObjectHash(enableTrafficStats bool) (string, error) {
-	objectBytes, objectName := kernelXDPObjectBytes(enableTrafficStats)
-	return kernelHotRestartObjectHash(objectBytes, objectName)
+	return kernelHotRestartObjectHash(embeddedForwardXDPObject, kernelXDPObjectName, kernelLoadSettingsTag(enableTrafficStats))
 }
 
 func validateKernelHotRestartMetadata(meta kernelHotRestartMetadata, engine string, objectHash string) error {

@@ -271,9 +271,17 @@ struct forward_vlan_hdr {
 	__be16 h_vlan_encapsulated_proto;
 };
 
-#ifndef FORWARD_ENABLE_TRAFFIC_STATS
-#define FORWARD_ENABLE_TRAFFIC_STATS 0
-#endif
+/*
+ * Settings veer fixes when it loads the programs. They live in .rodata: veer
+ * writes them before loading (CollectionSpec.Variables) and the loader then
+ * freezes the map read-only, so the verifier reads each one as a constant. It
+ * walks only the branches a setting selects and removes the others before the
+ * program is JIT-compiled, so a feature that is off costs what leaving it out
+ * of the build did, and one object serves every combination. The reads must
+ * stay volatile, or clang folds in the default.
+ */
+volatile const __u32 forward_load_traffic_stats = 0;
+#define FORWARD_TRAFFIC_STATS_ON (forward_load_traffic_stats != 0)
 
 struct packet_ctx {
 	__u32 src_addr;
@@ -289,9 +297,8 @@ struct packet_ctx {
 	__u16 tot_len;
 	__u16 l3_off;
 	__u16 l4_off;
-#if FORWARD_ENABLE_TRAFFIC_STATS
+	/* Set only while traffic stats are on. */
 	__u16 payload_len;
-#endif
 };
 
 struct packet_ctx_v6 {
@@ -307,9 +314,8 @@ struct packet_ctx_v6 {
 	__u16 tot_len;
 	__u16 l3_off;
 	__u16 l4_off;
-#if FORWARD_ENABLE_TRAFFIC_STATS
+	/* Set only while traffic stats are on. */
 	__u16 payload_len;
-#endif
 };
 
 struct xdp_dispatch_ctx_v4 {
@@ -386,17 +392,27 @@ struct xdp_dispatch_ctx_v6 {
 #define FORWARD_XDP_FLOW_MIGRATION_V4_OLD 0x1
 #define FORWARD_XDP_FLOW_MIGRATION_V6_OLD 0x2
 
-#if FORWARD_ENABLE_TRAFFIC_STATS
-#define FORWARD_RULE_TRAFFIC_ENABLED(rule) (((rule)->flags & FORWARD_RULE_FLAG_TRAFFIC_STATS) != 0)
-#define FORWARD_FLOW_TRAFFIC_ENABLED(flow) (((flow)->flags & FORWARD_FLOW_FLAG_TRAFFIC_STATS) != 0)
-#define FORWARD_SET_PAYLOAD_LEN(ctx, value) ((ctx)->payload_len = (__u16)(value))
+/*
+ * veer sets the rule flag only while traffic stats are on. Every test starts
+ * with the load-time setting so that, when it is off, the verifier drops the
+ * counting code behind it.
+ */
+#define FORWARD_RULE_TRAFFIC_ENABLED(rule) \
+	(FORWARD_TRAFFIC_STATS_ON && ((rule)->flags & FORWARD_RULE_FLAG_TRAFFIC_STATS) != 0)
+#define FORWARD_FLOW_TRAFFIC_ENABLED(flow) \
+	(FORWARD_TRAFFIC_STATS_ON && ((flow)->flags & FORWARD_FLOW_FLAG_TRAFFIC_STATS) != 0)
+#define FORWARD_SET_PAYLOAD_LEN(ctx, value) \
+	do { \
+		if (FORWARD_TRAFFIC_STATS_ON) \
+			(ctx)->payload_len = (__u16)(value); \
+	} while (0)
+/* The payload after hdr bytes of a packet of total bytes, or 0. */
+#define FORWARD_SET_PAYLOAD_AFTER(ctx, total, hdr) \
+	do { \
+		if (FORWARD_TRAFFIC_STATS_ON) \
+			(ctx)->payload_len = (total) > (hdr) ? (__u16)((total) - (hdr)) : 0; \
+	} while (0)
 #define FORWARD_GET_PAYLOAD_LEN(ctx) ((__u64)(ctx)->payload_len)
-#else
-#define FORWARD_RULE_TRAFFIC_ENABLED(rule) 0
-#define FORWARD_FLOW_TRAFFIC_ENABLED(flow) 0
-#define FORWARD_SET_PAYLOAD_LEN(ctx, value) do { (void)(ctx); (void)(value); } while (0)
-#define FORWARD_GET_PAYLOAD_LEN(ctx) 0ULL
-#endif
 
 struct bpf_map_def SEC("maps") rules_v4 = {
 	.type = BPF_MAP_TYPE_HASH,
@@ -1129,9 +1145,7 @@ static __always_inline int parse_ipv4_l4(struct xdp_md *xdp, struct packet_ctx *
 			(tcph->rst ? FORWARD_TCP_FLAG_RST : 0) |
 			(tcph->ack ? FORWARD_TCP_FLAG_ACK : 0);
 		ctx->closing = tcph->fin || tcph->rst;
-		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
-		if (ctx->tot_len > (sizeof(*iph) + (((__u16)tcph->doff) << 2)))
-			FORWARD_SET_PAYLOAD_LEN(ctx, ctx->tot_len - (sizeof(*iph) + (((__u16)tcph->doff) << 2)));
+		FORWARD_SET_PAYLOAD_AFTER(ctx, ctx->tot_len, (sizeof(*iph) + (((__u16)tcph->doff) << 2)));
 		return 0;
 	}
 
@@ -1165,9 +1179,7 @@ static __always_inline int parse_ipv4_l4(struct xdp_md *xdp, struct packet_ctx *
 	ctx->has_l4_checksum = 1;
 	ctx->tcp_flags = 0;
 	ctx->closing = 0;
-	FORWARD_SET_PAYLOAD_LEN(ctx, 0);
-	if (ctx->tot_len > (sizeof(*iph) + sizeof(*icmph)))
-		FORWARD_SET_PAYLOAD_LEN(ctx, ctx->tot_len - (sizeof(*iph) + sizeof(*icmph)));
+	FORWARD_SET_PAYLOAD_AFTER(ctx, ctx->tot_len, (sizeof(*iph) + sizeof(*icmph)));
 	return 0;
 }
 
@@ -1235,9 +1247,7 @@ static __always_inline int parse_ipv6_l4(struct xdp_md *xdp, struct packet_ctx_v
 			(tcph->rst ? FORWARD_TCP_FLAG_RST : 0) |
 			(tcph->ack ? FORWARD_TCP_FLAG_ACK : 0);
 		ctx->closing = tcph->fin || tcph->rst;
-		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
-		if (ctx->tot_len > (sizeof(*ip6h) + (((__u16)tcph->doff) << 2)))
-			FORWARD_SET_PAYLOAD_LEN(ctx, ctx->tot_len - (sizeof(*ip6h) + (((__u16)tcph->doff) << 2)));
+		FORWARD_SET_PAYLOAD_AFTER(ctx, ctx->tot_len, (sizeof(*ip6h) + (((__u16)tcph->doff) << 2)));
 		return 0;
 	}
 
