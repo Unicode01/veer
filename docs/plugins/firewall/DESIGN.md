@@ -98,7 +98,7 @@ hooks.attach({
 - `binding_required: true` 配合 `hook_bindings` 资源（与 pppoe_client、vpn_core 相同的模式）：接口完全由用户选择，记录缺失时不挂载，不会退化成全局 Hook。
 - priority 10，排在未来其他 XDP 插件之前；需要先解封装（例如 VXLAN）再过滤的插件用 `before/after` 明确顺序。
 - 每个接口占用 1 个 XDP Hook，接口上限是 14 个，整机上限 32 个。
-- 所有规则表、限速、封禁与计数 map 都声明 `preserve`（ring buffer 不能声明）。注意它的作用范围：`preserve` 只在同一个 Veer 进程内生效，插件对象更新时复用旧 map（`pluginPipelineMapReplacements` 依赖同进程里上一次加载的对象）。Veer 热重启后，新进程会为插件建一套全新的 map，规则要由控制面在 reconcile 时重新写入，封禁和计数会清零。对策见第 6.2 节和第 9 节。
+- 所有规则表、限速、封禁与计数 map 都声明 `preserve`（ring buffer 不能声明）。插件对象更新时复用旧 map；Veer 热重启时，宿主把这些 map pin 下来交给新进程（`plugin_map_handoff_linux.go`），新的 Dispatcher 接管时规则已经在 map 里，计数和封禁继续累计。宿主不能接管时（旧版本宿主、map 布局变化），map 从空开始，控制面按快照重写，见第 6.2 节。
 
 ### 4.2 包解析
 
@@ -267,7 +267,7 @@ P1 的抽样日志需要额外声明 `ebpf.ring_push.v1`。
 | 用户态引擎、共享站点（80/443） | 覆盖：XDP 在协议栈之前 |
 | Egress NAT | 回包落在 NAT 端口窗口，不要用拒绝默认动作覆盖这些端口（第 5.4 节） |
 | 透明转发与 Full NAT | XDP 看到的是原始包：来源是真实客户端，目标是入口地址和端口，与规则类型无关 |
-| Veer 热重启 | 旧进程不卸载 Dispatcher，旧链（连同旧 map）一直运行到新进程用 `XDP_FLAGS_REPLACE` 原子替换（需要 Linux 5.7+，Veer 最低 5.10）。但新链的 map 是新建的（见 4.1）：如果替换发生在控制面写完规则之前，会有一段不过滤的窗口，封禁和计数也会清零。顺序需要实测；在宿主补上第 9 节第 1 项之前，插件每 60 秒把封禁列表快照到 KV，reconcile 时先恢复规则和封禁 |
+| Veer 热重启 | 旧进程不卸载 Dispatcher，旧链一直运行到新进程用 `XDP_FLAGS_REPLACE` 原子替换（需要 Linux 5.7+，Veer 最低 5.10）。新链用的是旧进程交来的同一份 map，所以没有不过滤的窗口，计数和封禁也不清零。集成测试在热重启期间从被拒来源持续发起连接：宿主不交接 map 时漏过 13 个，交接后为 0。等待确认中的规则集照常等待，控制面按剩余时间重新设置截止定时器（插件定时器不跨进程）。宿主不能接管 map 时，控制面按快照重写，等待确认的规则集回滚到上一次已确认的 |
 | `veer hot-restart check` | 只检查核心的 TC map；插件 map 的保留由插件 `state_maps` 契约负责 |
 | 管理面 | 防火墙可以挡住管理端口，靠第 5.3 节防锁死 |
 
@@ -317,7 +317,7 @@ XDP 在 nftables、iptables 和 pve-firewall 之前执行，只会丢弃、不�
 | 规则事务失败 | 不提交 selector，旧代继续生效 |
 | 应用后未确认 | 计时器到期后回滚到上一次已确认的规则集 |
 | 插件停用或卸载 | Dispatcher 卸载（可能引发驱动重建队列，见 6.3） |
-| Veer 热重启 | Dispatcher 交接期间旧链生效；新链接管到规则写完之间可能短暂不过滤（见 6.2） |
+| Veer 热重启 | Dispatcher 交接期间旧链生效，新链沿用同一份 map；宿主不能接管 map 时，新链接管到规则写完之间可能短暂不过滤（见 6.2） |
 | ring 满 / worker 慢 | 只丢日志，不影响过滤 |
 
 ## 8. 测试计划
@@ -339,9 +339,9 @@ XDP 在 nftables、iptables 和 pve-firewall 之前执行，只会丢弃、不�
 
 ## 9. 需要宿主补充的能力
 
-第 1 项影响防火墙在 Veer 升级时的行为，建议和 P1 一起做；第 6 项已完成；其余不阻塞：
+第 1、6 项已完成；其余不阻塞：
 
-1. **插件 map 跨 Veer 热重启保留，并在 map 写好之后再替换 Dispatcher**：目前 TC 和 XDP 插件声明的 `preserve` 都只在同一进程内有效。可以参照核心 TC map 的做法，把声明 `preserve` 的插件 map pin 到热重启交接目录，由新进程接管；或者让新进程在插件 reconcile 写完 map 之后再执行 `XDP_FLAGS_REPLACE`。这对 vpn_core 的 `tunnel_links` 这类 map 同样有益。
+1. ~~插件 map 跨 Veer 热重启保留~~：已实现。声明 `preserve` 的 TC pipeline、XDP、Netfilter 插件 map 由旧进程 pin 到热重启目录，新进程按 `state_maps` 契约接管，启动 reconcile 后释放。vpn_core 的 `tunnel_links` 没有声明 `state_maps`，仍由控制面重写。
 2. **只读获取核心转发规则**：插件目前只能写 `forward_rule_plans`，读不到用户在核心里配的规则。P2 的"从 Veer 规则导入"需要一个只读资源或宿主 API。
 3. **获取 NAT 端口窗口和 `ip_local_port_range`**：用于第 5.4 节的精确校验，替代按默认值警告。
 4. **动作处理函数拿到调用者地址**：可以在应用前就判断新规则会不会挡住当前管理员。

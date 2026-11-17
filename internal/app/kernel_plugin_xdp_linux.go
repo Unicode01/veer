@@ -976,7 +976,9 @@ func (rt *kernelXDPPluginPipelineRuntime) loadProgramsLocked(desired []kernelXDP
 		if object == nil {
 			previous, unchanged := previousKernelXDPPluginObject(rt.loaded, plan)
 			var err error
-			object, err = loadKernelXDPPluginObject(plan, pieces, previous, unchanged)
+			object, err = loadPluginObjectWithHandoff(plan.PluginID, plan.ObjectID, previous, unchanged, func(previous *loadedPluginObjectRef, unchanged bool) (*loadedPluginObject, error) {
+				return loadKernelXDPPluginObject(plan, pieces, previous, unchanged)
+			})
 			if err != nil {
 				cleanupLoadedPluginObjectCache(cache)
 				return nil, nil, states, fmt.Errorf("load plugin %s object %s: %w", plan.PluginID, plan.ObjectID, err)

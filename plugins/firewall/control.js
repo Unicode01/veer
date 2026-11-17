@@ -7,9 +7,12 @@
  * the maps the packets do not read, switches fw_cfg to it, and starts a
  * confirmation deadline. The page confirms once it can still reach the API
  * under the new rules; if it cannot, the deadline restores the last confirmed
- * rule set. Snapshots of the applied and confirmed rule sets let the plugin
- * rebuild its maps after Veer restarts, since a new Veer process starts the
- * plugin with empty maps.
+ * rule set.
+ *
+ * Every map is declared preserve, so a Veer hot restart hands them to the
+ * successor and filtering goes on without a gap. Snapshots of the applied
+ * and confirmed rule sets rebuild the maps when they start empty: a cold
+ * start, an older host, or a map layout that changed.
  */
 var compile = require('./lib/compile');
 
@@ -470,13 +473,21 @@ function sync() {
     restoreConfirmed('deadline');
     return;
   }
+  if (st.pending) {
+    // Timers do not outlive the Veer process; a new one arms the deadline
+    // again for the time that is left.
+    timer.setTimeout(CONFIRM_TIMER, Math.max(1000, st.pending.deadline_ms - now()), {});
+  }
   var cfg;
   try { cfg = readConfig(); } catch (e) { cfg = null; }
   var fresh = !cfg || !(cfg.flags & CFG_LOADED);
   if (fresh && st.pending && !st.dirty) {
-    // Maps written once and now empty: a new Veer process. The unconfirmed
-    // rule set is not restored, the confirmed one is. (Dirty maps were never
-    // written, as right after the first apply binds an interface.)
+    // Maps written once and now empty: a new Veer process that could not
+    // keep them (an older host, or a map layout that changed). The
+    // unconfirmed rule set is not restored, the confirmed one is. Maps the
+    // host kept keep the pending rule set and its re-armed deadline. (Dirty
+    // maps were never written, as right after the first apply binds an
+    // interface.)
     restoreConfirmed('restart');
     return;
   }

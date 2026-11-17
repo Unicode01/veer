@@ -181,6 +181,9 @@ func Main(buildNonce string) {
 	phaseStartedAt = time.Now()
 	pm.reconcilePluginsForRuntime()
 	logStartupPhase("plugin runtime reconcile", phaseStartedAt, startupStartedAt)
+	// Every plugin object has loaded and taken what it could of the state
+	// maps a predecessor handed off; drop the rest.
+	releasePluginMapHandoff()
 	pm.startAccepting()
 
 	phaseStartedAt = time.Now()

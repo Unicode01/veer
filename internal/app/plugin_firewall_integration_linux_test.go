@@ -131,32 +131,49 @@ func TestFirewallPluginLinuxIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer logFile.Close()
-	cmd := exec.Command(buildDataplanePerfBinary(t, root), "--config", configPath)
-	cmd.Dir = work
-	cmd.Stdout, cmd.Stderr = logFile, logFile
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
+	binary := buildDataplanePerfBinary(t, root)
+	marker := filepath.Join(work, "hot-restart")
+	env := append(os.Environ(),
+		veerHotRestartMarkerEnv+"="+marker,
+		veerBPFStateDirEnv+"="+requireKernelHotRestartBPFStateRoot(t),
+		veerRuntimeStateDirEnv+"="+filepath.Join(work, "state"))
+	base := fmt.Sprintf("http://127.0.0.1:%d", cfg.WebPort)
+	var cmd *exec.Cmd
+	stop := func() {
+		if cmd == nil || cmd.Process == nil {
+			return
+		}
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 		done := make(chan struct{})
 		go func() { _ = cmd.Wait(); close(done) }()
 		select {
 		case <-done:
-		case <-time.After(8 * time.Second):
+		case <-time.After(15 * time.Second):
 			_ = cmd.Process.Kill()
 			<-done
 		}
-	})
+		cmd = nil
+	}
+	start := func() {
+		t.Helper()
+		cmd = exec.Command(binary, "--config", configPath)
+		cmd.Dir = work
+		cmd.Env = env
+		cmd.Stdout, cmd.Stderr = logFile, logFile
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		waitForEgressNATIntegrationAPIWithTimeout(t, base, cmd, logPath, 45*time.Second)
+		waitForEgressNATIntegrationPluginAction(t, base, cmd, logPath, "firewall", "apply")
+	}
+	t.Cleanup(stop)
 	t.Cleanup(func() {
 		if t.Failed() {
 			b, _ := os.ReadFile(logPath)
 			t.Logf("daemon log:\n%s", b)
 		}
 	})
-	base := fmt.Sprintf("http://127.0.0.1:%d", cfg.WebPort)
-	waitForEgressNATIntegrationAPIWithTimeout(t, base, cmd, logPath, 45*time.Second)
-	waitForEgressNATIntegrationPluginAction(t, base, cmd, logPath, "firewall", "apply")
+	start()
 
 	api := func(method, path string, payload any) []byte {
 		t.Helper()
@@ -225,6 +242,66 @@ func TestFirewallPluginLinuxIntegration(t *testing.T) {
 	action("apply")
 	action("confirm")
 	expect("allow one source", map[string]bool{"direct": true, "direct v6": false, "bridged": false})
+
+	// A Veer hot restart: the successor takes over the plugin's maps, so the
+	// blocked client never gets through, not even while the new dispatcher
+	// replaces the old one, and the counters go on.
+	policyDrops := func() float64 {
+		t.Helper()
+		policies, _ := action("status")["policies"].([]any)
+		if len(policies) != 1 {
+			t.Fatalf("status policies = %v", policies)
+		}
+		counters, _ := policies[0].(map[string]any)["counters"].(map[string]any)
+		if counters == nil {
+			t.Fatalf("no counters: %v", policies[0])
+		}
+		return counters["drop"].(float64)
+	}
+	dropsBefore := policyDrops()
+	leaks, tries := filepath.Join(work, "leaks"), filepath.Join(work, "tries")
+	probe := fmt.Sprintf("while :; do echo t >> %s; if timeout 0.2 bash -c 'exec 3<>/dev/tcp/10.198.0.1/%d' 2>/dev/null; then echo ok >> %s; fi; sleep 0.02; done", tries, port, leaks)
+	var probers []*exec.Cmd
+	for i := 0; i < 6; i++ {
+		prober := exec.Command("ip", "netns", "exec", nsBridged, "bash", "-c", probe)
+		if err := prober.Start(); err != nil {
+			t.Fatal(err)
+		}
+		probers = append(probers, prober)
+	}
+	stopProbers := func() {
+		for _, prober := range probers {
+			_ = prober.Process.Kill()
+			_ = prober.Wait()
+		}
+		probers = nil
+	}
+	t.Cleanup(stopProbers)
+	time.Sleep(time.Second)
+	if err := os.WriteFile(marker, []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stop()
+	start()
+	time.Sleep(3 * time.Second)
+	stopProbers()
+	countLines := func(path string) int {
+		data, _ := os.ReadFile(path)
+		return strings.Count(string(data), "\n")
+	}
+	if n := countLines(tries); n < 50 {
+		t.Fatalf("the probes ran only %d attempts across the hot restart", n)
+	}
+	if n := countLines(leaks); n != 0 {
+		t.Fatalf("%d connections from a blocked source got through during the hot restart", n)
+	}
+	expect("after hot restart", map[string]bool{"direct": true, "direct v6": false, "bridged": false})
+	if dropsAfter := policyDrops(); dropsAfter < dropsBefore {
+		t.Fatalf("drop counter went from %v to %v across the hot restart", dropsBefore, dropsAfter)
+	}
+	if logged, _ := os.ReadFile(logPath); !strings.Contains(string(logged), "firewall/firewall kept state maps") {
+		t.Fatal("the successor did not report keeping the firewall's state maps")
+	}
 
 	// An unconfirmed rule set that blocks it too is undone by rollback.
 	putPolicy(nil)

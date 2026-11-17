@@ -154,6 +154,26 @@ test('after a restart the applied rule set returns, an unconfirmed one does not'
   assert.equal(keysOf(host, 'fw_ports', cfg(host).generation).length, 1);
 });
 
+test('a hot restart that kept the maps keeps a pending apply and arms its deadline again', () => {
+  const host = makeHost({policies: {ssh: SSH}, settings: {default: SETTINGS}});
+  host.action('apply', {});
+  host.action('confirm', {});
+  setPolicy(host, 'web', {name: 'web', ports: ['8443']});
+  host.action('apply', {});
+  const before = JSON.stringify([...host.state.maps.entries()].map(([k, v]) => [k, [...v.entries()]]));
+  // The new process has the maps (the host handed them over) but no timers.
+  host.state.timers.clear();
+  host.reconcile();
+  const st = state(host);
+  assert.ok(st.pending, 'the pending apply is still pending');
+  const deadline = host.snapshot().timers.find((t) => t.name === 'confirm_deadline');
+  assert.ok(deadline && deadline.delay_ms > 0 && deadline.delay_ms <= 60000, JSON.stringify(deadline));
+  assert.equal(JSON.stringify([...host.state.maps.entries()].map(([k, v]) => [k, [...v.entries()]])), before, 'kept maps are not rewritten');
+  host.fireTimer('confirm_deadline');
+  assert.equal(state(host).rollback_reason, 'deadline');
+  assert.equal(keysOf(host, 'fw_ports', cfg(host).generation).length, 1);
+});
+
 test('status reports counters from where a policy started', () => {
   let packets = 5;
   const host = makeHost({policies: {ssh: SSH}, settings: {default: SETTINGS}}, {

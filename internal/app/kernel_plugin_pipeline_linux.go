@@ -1282,7 +1282,9 @@ func (rt *linuxKernelRuleRuntime) loadKernelPluginPipelinePrograms(desired []ker
 			needsPluginCtx := objectNeedsContext[plan.ObjectPath]
 			metadataBindings := objectMetadata[kernelPluginObjectMetadataKey(plan.PluginID, plan.ObjectID, plan.ObjectPath)]
 			previous, unchanged := previousKernelPluginPipelineObject(rt.pluginPipelineLoaded, plan)
-			object, err := loadPluginObjectForPipeline(objectCache, plan.PluginID, plan.ObjectID, plan.ObjectPath, plan.ObjectSHA256, pieces, needsPluginCtx, metadataBindings, plan.ObjectStateMaps, previous, unchanged)
+			object, err := loadPluginObjectWithHandoff(plan.PluginID, plan.ObjectID, previous, unchanged, func(previous *loadedPluginObjectRef, unchanged bool) (*loadedPluginObject, error) {
+				return loadPluginObjectForPipeline(objectCache, plan.PluginID, plan.ObjectID, plan.ObjectPath, plan.ObjectSHA256, pieces, needsPluginCtx, metadataBindings, plan.ObjectStateMaps, previous, unchanged)
+			})
 			if err != nil {
 				failedPlugins[plan.PluginID] = err.Error()
 				break

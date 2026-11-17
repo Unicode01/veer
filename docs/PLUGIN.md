@@ -777,6 +777,8 @@ ebpf.loadObject({
 
 相同 object 定义的普通 reconcile 会继续持有现有 map。object 内容变化时，只有旧、新版本都声明 `preserve`、`schema_version` 相同且内核 map spec 兼容的 Hash/Array、per-CPU、LRU 或 LPM Trie 私有 map 才会复用原 FD；复用在新程序装入和双 bank 切链前完成，不复制条目，也不会产生半迁移状态。已声明保留的 map 被移除、改版本或变得不兼容时，候选更新失败并保留旧链。确实需要丢弃旧状态时，新版本必须显式声明 `{name: "sessions", policy: "reset"}`；该变更会进入包 runtime surface/权限摘要，不能静默发生。prog-array、ring buffer、map-of-maps 和 socket/device 引用类 map 不允许声明 `preserve`。
 
+声明 `preserve`（或 `migrate`）的 map 也会跨 Veer 热重启保留：旧进程在关闭任何运行时之前，把这些 map pin 到热重启目录（`<bpf state>/hot-restart/plugin-maps/`），并记录对象的 `state_maps` 契约；新进程加载同一插件的同一 object 时，把它们当作上一个 object，按上面同样的契约、schema 版本和 map spec 检查决定复用哪些。检查不通过时只记录日志，object 用空 map 加载，不会因此加载失败。启动阶段的插件 reconcile 完成后，宿主释放这些 pin，没有被任何 object 接管的状态随之丢弃。TC pipeline、XDP 和 Netfilter 插件都适用；直接挂载的 TC `observe` 插件不支持 `state_maps`。旧进程的插件链在交接期间读的就是这些 map，新链接管后继续读同一份，过滤和计数没有空档。没有声明 `preserve` 的 map 仍从空开始，需要控制面在 reconcile 时重新写入。插件定时器只存在于进程内存中，热重启后需要在 reconcile 时按剩余时间重新设置。
+
 map schema 变化使用显式、可回滚的双 map 迁移，不能在旧 map 仍被数据面并发写入时做一次不受协调的原地复制：
 
 ```js
@@ -851,7 +853,7 @@ Veer 使用独立最小 Dispatcher，不改写实验性的 Forward XDP NAT objec
 
 没有 XDP Hook、插件被禁用或插件系统关闭时，Dispatcher 会从接口完全卸载，不给无插件热路径增加 lookup；上一个进程留下的 Dispatcher 也会在这时卸载。接口删除后，同名接口重建会按新 ifindex 重新挂载；崩溃恢复同时核对原进程 start-time 和 XDP program ID，绝不根据旧 ifindex 盲目删除其他程序。
 
-热更新（`deploy.sh` 热重启）时，旧进程不卸载 Dispatcher，而是 pin 住 `xdp_prog_chain` 并记录挂载点，旧插件链在进程交接期间继续处理每个包。新进程先在新 Dispatcher 中装好完整插件链，再用 `XDP_FLAGS_REPLACE` 按 program ID 原子替换旧 Dispatcher，最后释放 pin；替换中途失败会把已替换的接口恢复成旧 Dispatcher。原子替换需要 Linux 5.7+，更旧的内核仍在退出时卸载 Dispatcher，交接期间 XDP 插件不生效。对象内容更新可继承兼容的 `state_maps`；Hook、模式、优先级或接口范围变化失败时不会隐形保留旧链。
+热更新（`deploy.sh` 热重启）时，旧进程不卸载 Dispatcher，而是 pin 住 `xdp_prog_chain` 并记录挂载点，旧插件链在进程交接期间继续处理每个包。新进程先在新 Dispatcher 中装好完整插件链，再用 `XDP_FLAGS_REPLACE` 按 program ID 原子替换旧 Dispatcher，最后释放 pin；替换中途失败会把已替换的接口恢复成旧 Dispatcher。原子替换需要 Linux 5.7+，更旧的内核仍在退出时卸载 Dispatcher，交接期间 XDP 插件不生效。对象内容更新可继承兼容的 `state_maps`，声明 `preserve` 的 map 也随热重启交给新进程（见上文 `state_maps`），新 Dispatcher 替换旧的那一刻规则已经在 map 里；Hook、模式、优先级或接口范围变化失败时不会隐形保留旧链。
 
 同一个 eBPF object 不能同时承载 TC、XDP 或 Netfilter 中的多个数据面引擎。跨引擎插件应按引擎拆分 object，使私有 map 的 ownership 和 Goja map API 目标保持唯一；需要同步配置时由控制面使用 map transaction 分别更新。
 

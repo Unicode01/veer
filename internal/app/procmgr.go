@@ -4773,6 +4773,11 @@ func (pm *ProcessManager) stopAll() {
 	if pm.managedNetworkRuntime != nil {
 		logShutdownStep("stop managed network runtime", pm.managedNetworkRuntime.Close)
 	}
+	// Before any runtime closes its plugin objects: a hot restart keeps their
+	// preserved state maps for the successor.
+	logShutdownStep("hand off plugin state maps", func() error {
+		return handOffPluginStateMapsForHotRestart(pm.kernelRuntime, pm.pluginRuntime)
+	})
 	if pm.pluginRuntime != nil {
 		logShutdownStep("stop plugin runtime", pm.pluginRuntime.Close)
 	}
