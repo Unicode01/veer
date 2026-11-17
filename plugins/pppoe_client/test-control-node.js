@@ -76,6 +76,7 @@ function main() {
   testQueuedRedialCannotRunAfterDisconnect();
   testDisconnectClearsTunnelAndWANState();
   testTunnelConfigRuntimeApplyReplaysAndClearsMap();
+  testStaleTunnelConfigSnapshotsFollowStoredRecord();
   testTunnelRepairFollowsCurrentInterfaces();
   testTunnelDataplaneSwitchPreservesSession();
   testTrafficProbeTimeoutFailsClosed();
@@ -1510,6 +1511,7 @@ function testTunnelConfigRuntimeApplyReplaysAndClearsMap() {
   assert.strictEqual(migrated.value, legacy.value_hex + '00'.repeat(4), 'legacy tunnel config should gain a zero LCP magic');
 
   h.state.mapPuts.length = 0;
+  h.state.records.delete('tunnel_configs/active');
   h.context.exports.onResourceApply({
     resource: {id: 'tunnel_configs', runtime_update: 'runtime_apply'},
     records: []
@@ -1517,6 +1519,61 @@ function testTunnelConfigRuntimeApplyReplaysAndClearsMap() {
   const clear = h.state.mapPuts.find((item) => item.object === 'pppoe_tunnel' && item.map === 'pppoe_tunnel_config');
   assert(clear, 'empty tunnel config apply should clear eBPF map');
   assert.strictEqual(clear.value, '00'.repeat(52), 'empty tunnel config apply should write zero ABI value');
+}
+
+// The host reads a resource_apply snapshot before the event waits for the
+// plugin's queue, so a disconnect or a dial can run in between.
+function testStaleTunnelConfigSnapshotsFollowStoredRecord() {
+  const h = createHarness({auth: 'pap', echoReplies: true});
+  const mapKey = 'pppoe_tunnel/pppoe_tunnel_config/00000000';
+  const zero = '00'.repeat(52);
+  const applyStale = (records) => h.context.exports.onResourceApply({
+    resource: {id: 'tunnel_configs', runtime_update: 'runtime_apply'},
+    records
+  });
+  const empty = resourceRecords(h.state, 'tunnel_configs');
+  runAction(h, 'traffic_probe', {
+    interface: 'eth0',
+    username: 'user',
+    password: 'pass',
+    auth: 'pap',
+    timeout_ms: 50,
+    control_ack_timeout_ms: 10,
+    control_idle_timeout_ms: 1,
+    max_frames: 4,
+    negotiate_ipv4: true,
+    negotiate_ipv6: false,
+    send_padt: false,
+    post_session_control_ms: 0,
+    local_interface: 'veerlocal0',
+    pipeline_interface: PIPELINE_INTERFACE,
+    wan_core_sync: false
+  });
+  const live = resourceRecords(h.state, 'tunnel_configs');
+  assert.strictEqual(live.length, 1, 'traffic_probe should store the tunnel config');
+  assert(live[0].revision > 0, 'stored tunnel config should carry a revision');
+  const tunnel = h.state.mapValues.get(mapKey);
+  assert(tunnel && tunnel !== zero, 'traffic_probe should write the tunnel config');
+
+  // An empty snapshot taken before the session came up must not clear it.
+  h.state.mapPuts.length = 0;
+  applyStale(empty);
+  assert.strictEqual(h.state.mapValues.get(mapKey), tunnel, 'stale empty snapshot must not clear a live tunnel');
+  assert(h.state.timers.has('tunnel_repair'), 'live tunnel should keep its repair timer');
+
+  runAction(h, 'disconnect', {interface: 'eth0', profile_key: 'default'});
+  assert(!h.state.records.has('tunnel_configs/active'), 'disconnect should delete the tunnel config');
+  assert.strictEqual(h.state.mapValues.get(mapKey), zero, 'disconnect should clear the tunnel map');
+  assert(!h.state.timers.has('tunnel_repair'), 'disconnect should clear the repair timer');
+
+  // A snapshot taken before the disconnect must not write the session back.
+  h.state.mapPuts.length = 0;
+  applyStale(live);
+  assert.strictEqual(h.state.mapValues.get(mapKey), zero, 'stale live snapshot must not revive a disconnected tunnel');
+  assert(!h.state.mapPuts.some((item) => item.map === 'pppoe_tunnel_config' && item.value !== zero),
+    'stale live snapshot must not write a tunnel config');
+  assert(!h.state.timers.has('tunnel_repair'), 'stale live snapshot must not arm the repair timer');
+  assert(!h.state.records.has('tunnel_configs/active'), 'stale live snapshot must not recreate the record');
 }
 
 function testTunnelRepairFollowsCurrentInterfaces() {
@@ -1728,6 +1785,8 @@ function createHarness(options) {
     services: [],
     ui: null,
     records: new Map(),
+    // Stored records carry a revision, as the host's do.
+    revision: 0,
     links: new Map(),
     pluginRecords: new Map(),
     pluginActionCalls: [],
@@ -1811,7 +1870,7 @@ function createHarness(options) {
       },
       set(resource, key, data, enabled, apply) {
         if (options && options.resourceSetError === resource) throw new Error('resource set failed: ' + resource);
-        state.records.set(`${resource}/${key}`, {data: clone(data), enabled: enabled !== false});
+        state.records.set(`${resource}/${key}`, {data: clone(data), enabled: enabled !== false, revision: ++state.revision});
         if (apply === true && typeof context.exports.onResourceApply === 'function') {
           context.exports.onResourceApply({
             resource: {id: resource, runtime_update: 'runtime_apply'},
@@ -2030,7 +2089,7 @@ function createHarness(options) {
       return clone(record);
     },
     setResource(resource, key, data, enabled) {
-      state.records.set(`${resource}/${key}`, {data: clone(data), enabled: enabled !== false});
+      state.records.set(`${resource}/${key}`, {data: clone(data), enabled: enabled !== false, revision: ++state.revision});
     },
     pluginResource(plugin, resource, key) {
       const record = state.pluginRecords.get(`${plugin}/${resource}/${key}`);
@@ -2058,7 +2117,7 @@ function resourceRecords(state, resource) {
   for (const [id, record] of state.records.entries()) {
     const slash = id.indexOf('/');
     if (slash < 0 || id.slice(0, slash) !== resource) continue;
-    out.push({key: id.slice(slash + 1), data: clone(record.data), enabled: record.enabled !== false});
+    out.push({key: id.slice(slash + 1), data: clone(record.data), enabled: record.enabled !== false, revision: record.revision});
   }
   return out;
 }

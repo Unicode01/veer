@@ -20,7 +20,7 @@
   ],
   "control": {
     "main": "control.js",
-    "sha256": "ec39401411da2302680a89b6eeeeba4c9a7d0d5c00aae949c66a238da97d3a43",
+    "sha256": "ce066f812f0f8a56a7f77831069023832b25ceb4c619660801d192e206d54466",
     "permissions": ["crypto", "ebpf.load", "ebpf.map_read", "ebpf.map_write", "hook.attach", "net.admin", "net.l2", "plugin.action", "plugin.register", "plugin.resource", "resource", "secret", "timer", "ui"],
     "net_access": [
       {

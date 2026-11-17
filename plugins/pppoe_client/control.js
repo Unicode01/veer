@@ -315,7 +315,7 @@ exports.onDeactivate = function () {
 
 exports.onResourceApply = function (ctx) {
   if (!ctx.resource || ctx.resource.id !== TUNNEL_CONFIG_RESOURCE) return;
-  applyTunnelConfigRecords(ctx.records || [], true);
+  applyTunnelConfigRecords(currentTunnelConfigRecords(ctx.records || []), true);
   armTunnelRepair();
 };
 
@@ -1242,6 +1242,20 @@ function clearTunnelMap(reportErrors) {
 function applyStoredTunnelConfig(reportErrors) {
   var records = resources.list(TUNNEL_CONFIG_RESOURCE) || [];
   applyTunnelConfigRecords(records, reportErrors);
+}
+
+// The host reads ctx.records before the event waits for this plugin's queue,
+// so a disconnect or a dial may have run in between. A snapshot from before a
+// disconnect would write the dead session back into the tunnel map, and
+// armTunnelRepair, finding no record, would then stop the repair timer and
+// leave it there; an empty snapshot from before a dial would clear a live
+// tunnel. Stored records carry a revision: apply the tunnel config as it is
+// stored now. Records without a revision were supplied by the caller as is.
+function currentTunnelConfigRecords(records) {
+  for (var i = 0; i < records.length; i++) {
+    if (records[i] && !(records[i].revision > 0)) return records;
+  }
+  return resources.list(TUNNEL_CONFIG_RESOURCE) || [];
 }
 
 function applyTunnelConfigRecords(records, reportErrors) {
