@@ -73,6 +73,7 @@ func TestEgressNATPerfMatrix(t *testing.T) {
 	modes := []dataplanePerfMode{
 		{Name: "iptables", Expected: "iptables"},
 		{Name: "nftables", Expected: "nftables"},
+		{Name: "nftables-flowtable", Expected: "nftables"},
 		{Name: "tc", Default: ruleEngineKernel, Order: []string{kernelEngineTC}, Expected: ruleEngineKernel, ExpectedKern: egressNATExpectedKernelEngine},
 	}
 	modes = selectEgressNATPerfModes(t, modes)
@@ -115,8 +116,8 @@ func runEgressNATPerfMode(t *testing.T, baseBinary string, mode dataplanePerfMod
 	if mode.Name == "iptables" {
 		return runEgressNATPerfIptablesMode(t, scenario)
 	}
-	if mode.Name == "nftables" {
-		return runEgressNATPerfNFTablesMode(t, scenario)
+	if mode.Name == "nftables" || mode.Name == "nftables-flowtable" {
+		return runEgressNATPerfNFTablesMode(t, scenario, mode.Name)
 	}
 
 	topology := setupEgressNATIntegrationTopology(t)
@@ -230,7 +231,7 @@ func runEgressNATPerfIptablesMode(t *testing.T, scenario dataplanePerfScenario) 
 	return result
 }
 
-func runEgressNATPerfNFTablesMode(t *testing.T, scenario dataplanePerfScenario) dataplanePerfResult {
+func runEgressNATPerfNFTablesMode(t *testing.T, scenario dataplanePerfScenario, modeName string) dataplanePerfResult {
 	t.Helper()
 
 	topology := setupEgressNATIntegrationTopology(t)
@@ -240,6 +241,9 @@ func runEgressNATPerfNFTablesMode(t *testing.T, scenario dataplanePerfScenario) 
 
 	backend := setupEgressNATPerfNFTablesSNAT(t, topology)
 	defer cleanupEgressNATPerfNFTablesSNAT(topology)
+	if modeName == "nftables-flowtable" {
+		addDataplanePerfNFTablesFlowtable(t, "forward_egress_perf_filter_nft", topology.BridgeIF, topology.UplinkHostIF)
+	}
 
 	targetAddr := net.JoinHostPort(egressNATBackendAddr, strconv.Itoa(dataplanePerfBackendPort))
 	if _, err := runDataplanePerfClientBenchmarkRawToTarget(topology.ClientNS, targetAddr, scenario.WarmupConnections, minInt(scenario.Concurrency, maxInt(1, scenario.WarmupConnections)), scenario.WarmupBytesPerConn, scenario.IOChunkBytes, 0); err != nil {
@@ -257,7 +261,7 @@ func runEgressNATPerfNFTablesMode(t *testing.T, scenario dataplanePerfScenario) 
 	}
 	hostCPUEnd := readDataplanePerfCPUStat(t)
 
-	result := dataplanePerfBuildResult("nftables", scenario, clientResult, 0, "nftables", backend)
+	result := dataplanePerfBuildResult(modeName, scenario, clientResult, 0, "nftables", backend)
 	result.HostBusyCores = dataplanePerfBusyCores(hostCPUStart, hostCPUEnd, hz, clientResult.Elapsed)
 	return result
 }
