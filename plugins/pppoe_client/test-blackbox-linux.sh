@@ -150,13 +150,13 @@ lan_peer=$(printf '%.15s' "$lan_peer")
 lan_bridge="brbb${suffix}"
 lan_bridge=$(printf '%.15s' "$lan_bridge")
 client_ns="fwpppcli$suffix"
-bpf_stats_restore=
 ip_forward_restore=
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/veer-pppoe-blackbox.XXXXXX")
 veer_pid=
 veer_unit=
 pppoe_pid=
 iperf_pid=
+sampler_pid=
 capture_pid=
 capture_local_pid=
 capture_pipeline_pid=
@@ -166,6 +166,7 @@ capture_file=
 cleanup() {
 	set +e
 	if [ -n "$iperf_pid" ]; then kill "$iperf_pid" 2>/dev/null || true; fi
+	if [ -n "$sampler_pid" ]; then kill "$sampler_pid" 2>/dev/null || true; fi
 	if [ -n "$capture_pid" ]; then kill "$capture_pid" 2>/dev/null || true; fi
 	if [ -n "$capture_local_pid" ]; then kill "$capture_local_pid" 2>/dev/null || true; fi
 	if [ -n "$capture_pipeline_pid" ]; then kill "$capture_pipeline_pid" 2>/dev/null || true; fi
@@ -183,7 +184,6 @@ cleanup() {
 	ip netns del "$server_ns" 2>/dev/null || true
 	ip netns pids "$client_ns" 2>/dev/null | xargs -r kill 2>/dev/null || true
 	ip netns del "$client_ns" 2>/dev/null || true
-	if [ -n "$bpf_stats_restore" ]; then sysctl -qw "kernel.bpf_stats_enabled=$bpf_stats_restore" 2>/dev/null || true; fi
 	if [ -n "$ip_forward_restore" ]; then sysctl -qw "net.ipv4.ip_forward=$ip_forward_restore" 2>/dev/null || true; fi
 	ip link del "$local_if" 2>/dev/null || true
 	ip link del "$pipeline_if" 2>/dev/null || true
@@ -670,15 +670,22 @@ lan_iperf() {
 	fi
 }
 
-# Sums the run counts of the BPF programs whose names start with $1.
-bpf_prog_runs() {
-	bpftool -j prog show | python3 -c '
-import json, sys
-print(sum(p.get("run_cnt", 0) for p in json.load(sys.stdin) if p.get("name", "").startswith(sys.argv[1])))
-' "$1"
+# Prints the packets the TC core has sent from fast-path records so far.
+flow_cache_hits() {
+	fetch_kernel_runtime "$work_dir/kernel-runtime-hits.json"
+	hits=$(sed -n 's/.*"diag_flow_cache_hit":\([0-9]*\).*/\1/p' "$work_dir/kernel-runtime-hits.json")
+	echo "${hits:-0}"
 }
 
-# Prints the most flow cache entries seen per key ifindex in the samples.
+# Prints the packets received so far on interface $1.
+rx_packets() {
+	cat "/sys/class/net/$1/statistics/rx_packets"
+}
+
+# Prints, per key ifindex, the most IPv4 TCP flow entries seen holding a
+# fast-path record in the samples, which are bpftool dumps of flows_v4. The
+# record is the last 40 bytes of the 104-byte struct flow_value_v4 and is in
+# use while its stamp, its first 4 bytes, is nonzero.
 flow_cache_sample_summary() {
 	python3 -c '
 import json, sys
@@ -690,6 +697,11 @@ for line in open(sys.argv[1]):
     counts = {}
     for item in json.loads(line):
         key = [int(b, 16) for b in item["key"]]
+        value = [int(b, 16) for b in item["value"]]
+        if len(key) != 20 or len(value) != 104:
+            sys.exit("flows_v4 entry has a %d-byte key and a %d-byte value, want 20 and 104" % (len(key), len(value)))
+        if key[16] != 6 or not any(value[64:68]):
+            continue
         ifindex = key[0] | key[1] << 8 | key[2] << 16 | key[3] << 24
         counts[ifindex] = counts.get(ifindex, 0) + 1
     for ifindex, count in counts.items():
@@ -700,8 +712,9 @@ for ifindex in sorted(peak):
 }
 
 # Forwards LAN traffic through egress NAT over the PPPoE session. With the
-# flow cache on, it must stay off the interfaces the PPPoE hooks see, record
-# entries for the replies entering the local WAN boundary, and carry them.
+# flow cache on, the core must record fast paths in the flow entries of the
+# replies entering the local WAN boundary and of the LAN's packets, none for
+# the interfaces the PPPoE hooks see, and send the download from them.
 run_lan_traffic() {
 	# A router forwards IPv4. Without it bpf_fib_lookup reports forwarding
 	# disabled, and the dataplane falls back to redirect_neigh for every
@@ -717,20 +730,14 @@ run_lan_traffic() {
 	ip netns exec "$client_ns" ip link set "$lan_peer" up
 	ip netns exec "$client_ns" ip route replace default via 192.0.2.1 dev "$lan_peer"
 	if [ "$VEER_PPPOE_BLACKBOX_FLOW_CACHE" = "1" ]; then
+		# The records live in the core's flow entries; the TC engine reports
+		# whether the core writes and uses them.
 		fetch_kernel_runtime "$work_dir/kernel-runtime-flow-cache.json"
-		if ! grep -Eq "$local_if\\([0-9]+\\)/flow_cache" "$work_dir/kernel-runtime-flow-cache.json"; then
+		if ! grep -q '"flow_cache":true' "$work_dir/kernel-runtime-flow-cache.json"; then
 			cat "$work_dir/kernel-runtime-flow-cache.json" >&2
-			echo "flow cache is not attached to $local_if, where replies enter" >&2
+			echo "the TC engine does not use the flow cache" >&2
 			exit 1
 		fi
-		for hooked in "$wan_host" "$pipeline_if"; do
-			if grep -Eq "$hooked\\([0-9]+\\)/flow_cache" "$work_dir/kernel-runtime-flow-cache.json"; then
-				cat "$work_dir/kernel-runtime-flow-cache.json" >&2
-				echo "flow cache is attached to $hooked, where a PPPoE hook runs" >&2
-				exit 1
-			fi
-		done
-		sed -n 's/.*"attachment_summary":"\([^"]*\)".*/flow cache attachments: \1/p' "$work_dir/kernel-runtime-flow-cache.json"
 	fi
 	# Echo through egress NAT, which this LAN profile covers along with TCP
 	# and UDP.
@@ -746,34 +753,47 @@ run_lan_traffic() {
 		lan_iperf download
 		return
 	fi
-	if ! command -v bpftool >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
-		lan_iperf download
-		echo "bpftool or python3 missing: skipping the flow cache entry and hit checks" >&2
-		return
-	fi
-	bpf_stats_restore=$(sysctl -n kernel.bpf_stats_enabled)
-	sysctl -qw kernel.bpf_stats_enabled=1
-	cache_before=$(bpf_prog_runs tc_flow_cache)
-	reply_before=$(bpf_prog_runs reply_ingress)
-	(
-		while :; do
-			bpftool -j map dump name tc_flow_cache_v 2>/dev/null || true
-			echo
-			sleep 0.5
-		done
-	) >"$work_dir/flow-cache-samples.txt" &
-	sampler_pid=$!
-	lan_iperf download
-	kill "$sampler_pid" 2>/dev/null || true
-	wait "$sampler_pid" 2>/dev/null || true
-	cache_runs=$(($(bpf_prog_runs tc_flow_cache) - cache_before))
-	reply_runs=$(($(bpf_prog_runs reply_ingress) - reply_before))
-	sysctl -qw "kernel.bpf_stats_enabled=$bpf_stats_restore"
-	bpf_stats_restore=
 	local_index=$(cat "/sys/class/net/$local_if/ifindex")
 	lan_index=$(cat "/sys/class/net/$lan_host/ifindex")
-	samples=$(flow_cache_sample_summary "$work_dir/flow-cache-samples.txt" | tr '\n' ' ')
-	echo "flow cache during the LAN download: tc_flow_cache ran $cache_runs times, the reply core $reply_runs times; peak entries per key ifindex: ${samples:-none}($local_if=$local_index, $lan_host=$lan_index)"
+	hits_before=$(flow_cache_hits)
+	local_before=$(rx_packets "$local_if")
+	lan_before=$(rx_packets "$lan_host")
+	sampler_pid=
+	if command -v bpftool >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+		(
+			while :; do
+				bpftool -j map dump name flows_v4 2>/dev/null || true
+				echo
+				sleep 0.5
+			done
+		) >"$work_dir/flow-cache-samples.txt" &
+		sampler_pid=$!
+	fi
+	lan_iperf download
+	if [ -n "$sampler_pid" ]; then
+		kill "$sampler_pid" 2>/dev/null || true
+		wait "$sampler_pid" 2>/dev/null || true
+		sampler_pid=
+	fi
+	hits=$(($(flow_cache_hits) - hits_before))
+	packets=$(($(rx_packets "$local_if") - local_before + $(rx_packets "$lan_host") - lan_before))
+	# The interface counters count before GRO and the hits after it, so the
+	# two are reported side by side rather than compared.
+	echo "flow cache during the LAN download: $hits packets left from fast-path records; $local_if and $lan_host received $packets packets"
+	if [ "$hits" -lt 1000 ]; then
+		dump_dataplane_state
+		echo "flow cache did not carry the LAN download" >&2
+		exit 1
+	fi
+	if [ ! -s "$work_dir/flow-cache-samples.txt" ]; then
+		echo "bpftool or python3 missing: skipping the per-interface record checks" >&2
+		return
+	fi
+	if ! samples=$(flow_cache_sample_summary "$work_dir/flow-cache-samples.txt"); then
+		exit 1
+	fi
+	samples=$(printf '%s\n' "$samples" | tr '\n' ' ')
+	echo "peak TCP flow entries with a fast-path record per key ifindex: ${samples:-none}($local_if=$local_index, $lan_host=$lan_index)"
 	# Replies are recorded under the local WAN boundary, the LAN's packets
 	# under the port they enter.
 	for expected in "$local_index:$local_if" "$lan_index:$lan_host"; do
@@ -785,12 +805,17 @@ run_lan_traffic() {
 				;;
 		esac
 	done
-	# The core still takes each flow's slow path once per window; the cache
-	# must carry the rest of the replies entering the WAN boundary.
-	if [ "$cache_runs" -lt 1000 ] || [ "$((reply_runs * 5))" -gt "$cache_runs" ]; then
-		echo "flow cache did not carry the LAN download replies" >&2
-		exit 1
-	fi
+	# A PPPoE hook must see every packet entering its interface.
+	for hooked in "$wan_host" "$pipeline_if"; do
+		[ -e "/sys/class/net/$hooked/ifindex" ] || continue
+		hooked_index=$(cat "/sys/class/net/$hooked/ifindex")
+		case " $samples" in
+			*" $hooked_index="*)
+				echo "flow cache recorded entries under $hooked, where a PPPoE hook runs" >&2
+				exit 1
+				;;
+		esac
+	done
 }
 
 run_blackbox() {
