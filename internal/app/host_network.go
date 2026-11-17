@@ -45,6 +45,7 @@ func loadInterfaceInfos() ([]InterfaceInfo, error) {
 	out := append([]InterfaceInfo(nil), items...)
 	for i := range out {
 		out[i].Addrs = append([]string(nil), out[i].Addrs...)
+		out[i].IPv4Networks = append([]string(nil), out[i].IPv4Networks...)
 	}
 	return out, nil
 }

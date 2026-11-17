@@ -34,6 +34,12 @@ type kernelRuleRuntime interface {
 	Close() error
 }
 
+// kernelPathHoldReleaser reports that a rule kept on an out path by its live
+// sessions may now move; the caller should reconcile again.
+type kernelPathHoldReleaser interface {
+	takeKernelPathHoldRelease() bool
+}
+
 type kernelRuleRuntimeWithPluginCatalog interface {
 	ReconcileWithPluginCatalog(rules []Rule, catalog PluginCatalog) (map[int64]kernelRuleApplyResult, error)
 }

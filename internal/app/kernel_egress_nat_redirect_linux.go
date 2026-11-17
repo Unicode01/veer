@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 func resolveKernelEgressNATPreparedL2Redirect(outLink netlink.Link) ([6]byte, [6]byte, error) {
@@ -44,6 +45,30 @@ func resolveKernelEgressNATPreparedL2Redirect(outLink netlink.Link) ([6]byte, [6
 		return srcMAC, dstMAC, fmt.Errorf("veth peer ifindex %d for %q has no usable MAC", peerIndex, attrs.Name)
 	}
 	return hardwareAddrToArray(attrs.HardwareAddr), hardwareAddrToArray(peer.Attrs().HardwareAddr), nil
+}
+
+// kernelEgressNATExitWithoutARP returns the MAC address of an Ethernet egress
+// NAT exit that does not use ARP, such as the boundaries plugins consume on
+// TC egress: a VPN core's veervpn*/veerwg* dummy or ARP-less veth, or a
+// veerwan device. The kernel's neighbour entries on such a device all hold
+// the device's own address, so every frame it sends is addressed from and to
+// that address. The FIB usually has no route by such a boundary to the NAT's
+// destinations either, so resolving the next hop per packet fails over to
+// bpf_redirect_neigh, which builds that very frame. A rule without a
+// redirect_mode sends by this address as prepared_l2 instead, with no lookup.
+func kernelEgressNATExitWithoutARP(outLink netlink.Link) ([6]byte, bool) {
+	var mac [6]byte
+	if outLink == nil || outLink.Attrs() == nil {
+		return mac, false
+	}
+	attrs := outLink.Attrs()
+	if encap := strings.ToLower(strings.TrimSpace(attrs.EncapType)); encap != "" && encap != "ether" {
+		return mac, false
+	}
+	if attrs.RawFlags&unix.IFF_NOARP == 0 || len(attrs.HardwareAddr) != 6 || !isValidHardwareAddr(attrs.HardwareAddr) {
+		return mac, false
+	}
+	return hardwareAddrToArray(attrs.HardwareAddr), true
 }
 
 func readLinuxInterfacePeerIndex(name string, selfIndex int) (int, error) {

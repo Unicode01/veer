@@ -11929,8 +11929,8 @@ func TestLANCoreActionRedistributesPluginEgressNATPlanToKernelRuntime(t *testing
 	if err := applyPluginActionRuntimeUpdate(db, pm, plugin, action, payload); err != nil {
 		t.Fatalf("applyPluginActionRuntimeUpdate(lan_core apply_network) error = %v", err)
 	}
-	if len(kernelRuntime.lastRules) != 4 {
-		t.Fatalf("kernel runtime rules = %+v, want 4 egress nat synthetic rules", kernelRuntime.lastRules)
+	if len(kernelRuntime.lastRules) != 6 {
+		t.Fatalf("kernel runtime rules = %+v, want 6 egress nat synthetic rules (tcp, udp and icmp per port)", kernelRuntime.lastRules)
 	}
 	for _, rule := range kernelRuntime.lastRules {
 		if !isKernelEgressNATRule(rule) {
@@ -12036,8 +12036,8 @@ func TestPluginReconcileRedistributesGeneratedEgressNATPlans(t *testing.T) {
 	if !planRecord.Enabled || !strings.Contains(planRecord.DataJSON, `"out_interface":"veerwan0"`) {
 		t.Fatalf("lan_core egress_nat_plans/default = %+v, want enabled veerwan0 plan", planRecord)
 	}
-	if len(kernelRuntime.lastRules) != 2 {
-		t.Fatalf("kernel runtime rules = %+v, want 2 egress nat synthetic rules from reconcile", kernelRuntime.lastRules)
+	if len(kernelRuntime.lastRules) != 3 {
+		t.Fatalf("kernel runtime rules = %+v, want 3 egress nat synthetic rules (tcp, udp and icmp) from reconcile", kernelRuntime.lastRules)
 	}
 	for _, rule := range kernelRuntime.lastRules {
 		if !isKernelEgressNATRule(rule) || rule.OutInterface != "veerwan0" {
@@ -12141,8 +12141,8 @@ func TestLANCoreRepairTimerRedistributesWANCoreStatusChanges(t *testing.T) {
 	t.Cleanup(func() { _ = controlRuntime.Close() })
 
 	pm.reconcilePluginsForRuntime()
-	if len(kernelRuntime.lastRules) != 2 {
-		t.Fatalf("kernel runtime rules after initial reconcile = %+v, want 2 synthetic egress nat rules", kernelRuntime.lastRules)
+	if len(kernelRuntime.lastRules) != 3 {
+		t.Fatalf("kernel runtime rules after initial reconcile = %+v, want 3 synthetic egress nat rules", kernelRuntime.lastRules)
 	}
 	if len(managedRuntime.lastItems) != 1 || managedRuntime.lastItems[0].Bridge != "brlan0" || managedRuntime.lastItems[0].IPv4DNSServers != "223.5.5.5" || !managedRuntime.lastItems[0].skipIPv4AddressManagement {
 		t.Fatalf("managed runtime items = %+v, want one DHCP-only brlan0 plan", managedRuntime.lastItems)
@@ -12236,8 +12236,8 @@ func TestLANCoreRepairTimerRedistributesWANCoreStatusChanges(t *testing.T) {
 	if !planRecord.Enabled || !strings.Contains(planRecord.DataJSON, `"out_interface":"veerwan0"`) {
 		t.Fatalf("lan_core egress_nat_plans/default after WAN restore = %+v, want enabled veerwan0 plan", planRecord)
 	}
-	if len(kernelRuntime.lastRules) != 2 {
-		t.Fatalf("kernel runtime rules after WAN status restore = %+v, want 2 synthetic egress nat rules", kernelRuntime.lastRules)
+	if len(kernelRuntime.lastRules) != 3 {
+		t.Fatalf("kernel runtime rules after WAN status restore = %+v, want 3 synthetic egress nat rules", kernelRuntime.lastRules)
 	}
 	if len(ipv6Runtime.lastItems) != 1 || ipv6Runtime.lastItems[0].AssignedPrefix != "2001:db8:120:5::/64" {
 		t.Fatalf("ipv6 runtime after WAN restore = %+v, want restored /64", ipv6Runtime.lastItems)

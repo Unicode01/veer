@@ -411,7 +411,7 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - core 后插件如需读取规则匹配上下文，必须在对象里同时声明共享 `tc_plugin_ctx_v4` 和 `tc_plugin_ctx_v6` per-CPU array map；服务会替换为内置稳定 map，并只让插件读取当前包地址族对应的上下文
 - 当前限制：同一接口和挂载方向上，每个 concrete stage 最多 8 个外部 Hook，forward 三阶段合计最多 14 个，reply 三阶段也合计最多 14 个，以避免触发内核 tail-call 深度上限；整机每个 stage 最多 32 个。超限只拒绝放不下的插件，已运行的插件优先保留
 - `forward_rule_plans`: 约定资源名。活跃的 `lab` / `preview` / `stable` 插件声明并写入 enabled plan 后，控制面会按普通 `Rule` 字段编译成 synthetic forward rule，参与 `/api/rules` effective 视图、规则统计元数据、Worker 分发和 TC/XDP 内核候选规划，但不会写入真实 `rules` 表。支持字段为 `in_interface/in_ip/in_port/out_interface/out_ip/out_source_ip/out_port/protocol/remark/tag/enabled/transparent/engine_preference`；校验、端口冲突检测和接口/source IP 检查与手工规则一致。显式核心规则、站点和端口范围优先，listener 冲突的插件 plan 会被跳过。插件 forward rule 使用当前分发周期内的正数 synthetic rule id 以兼容内核 map；该 id 是运行时视图，不应被插件持久引用。
-- `egress_nat_plans`: 约定资源名。活跃的 `lab` / `preview` / `stable` 插件声明并写入 enabled plan 后，控制面会编译成负数 ID 的 synthetic Egress NAT runtime item，参与 Worker、统计元数据、内核重试和托管网络局部 reload，但不会写入真实 `egress_nats` 表。显式核心 Egress NAT 和托管网络自动 NAT 优先，scope/protocol 重叠的插件 plan 会被跳过。`deprecated` 插件不会影响核心转发。`redirect_mode=prepared_l2` 是显式高级模式，只适用于 TC veth handoff 且 peer 能在 host namespace 解析的场景；XDP、普通物理出口和 peer 位于 netns 的 veth 会拒绝该模式
+- `egress_nat_plans`: 约定资源名。活跃的 `lab` / `preview` / `stable` 插件声明并写入 enabled plan 后，控制面会编译成负数 ID 的 synthetic Egress NAT runtime item，参与 Worker、统计元数据、内核重试和托管网络局部 reload，但不会写入真实 `egress_nats` 表。显式核心 Egress NAT 和托管网络自动 NAT 优先，scope/protocol 重叠的插件 plan 会被跳过。`deprecated` 插件不会影响核心转发。`redirect_mode=prepared_l2` 是显式高级模式，只适用于 TC veth handoff 且 peer 能在 host namespace 解析的场景；XDP、普通物理出口和 peer 位于 netns 的 veth 会拒绝该模式。未设置 `redirect_mode` 而出口是不做 ARP 的以太网设备时，TC 路径自动用出口自己的 MAC 按 `prepared_l2` 发送（见 5.2）
 - `dhcpv4_plans`: 约定资源名。活跃插件写入 enabled plan 后，控制面会把它编译成负数 ID 的 synthetic managed-network DHCPv4 listener，复用现有 DHCP Discover/Offer/Request/Ack 服务，但只服务已存在的 LAN bridge，不创建 bridge、不管理网关地址，也不自动创建 Egress NAT。支持字段为 `bridge/ipv4_cidr/gateway/pool_start/pool_end/dns_servers/reservations/remark/enabled`；`dns_servers` 只接受 IPv4 地址，去重后最多 8 条，并作为 DHCPv4 Option 6 下发。`reservations` 每项包含 `mac_address/ipv4_address/remark`，MAC 与 IP 在同一 plan 内必须唯一，地址必须位于子网且不能占用网关、网络地址或广播地址。显式托管网络优先，同一 bridge 已被显式托管网络或其他插件 plan 服务时，后续 plan 会被跳过
 - `ipv6_assignment_plans`: 约定资源名。活跃插件写入 enabled plan 后，控制面会把它编译成负数 ID 的 synthetic IPv6 assignment，复用现有 IPv6 路由、网关地址、RA 和 DHCPv6 runtime，但不会写入真实 `ipv6_assignments` 表。支持字段为 `parent_interface/target_interface/parent_prefix/assigned_prefix/assigned_prefix_length/subnet_index/upstream_routed/configure_gateway/reject_unassigned/dns_servers/remark/enabled`；可直接指定 `assigned_prefix`，也可由 `parent_prefix`、`assigned_prefix_length` 和 `subnet_index` 选择子网。`dns_servers` 只接受可下发的全局 IPv6 单播地址，去重后最多 8 条，并通过 RA RDNSS 与 DHCPv6 Recursive DNS 下发。显式 IPv6 assignment 优先，前缀与现有 assignment 或先编译的插件 plan 重叠时，后续 plan 会被跳过
 
@@ -768,6 +768,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
   "configured_order": ["tc", "xdp"],
   "traffic_stats": true,
   "tc_diagnostics": false,
+  "kernel_tc_flow_cache": true,
   "kernel_tcp_established_idle_timeout_seconds": 0,
   "kernel_tcp_established_idle_timeout_mode": "auto",
   "active_rule_count": 12,
@@ -783,6 +784,10 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
       "active_entries": 128,
       "attachments": 6,
       "attachment_summary": "eno1(3)/forward, eno1(3)/reply",
+      "attachment_api": "tcx",
+      "flow_cache": true,
+      "nat_port_min": 20000,
+      "nat_port_max": 32767,
       "tcp_established_idle_timeout_mode": "auto",
       "tcp_established_idle_timeout_seconds": 3600,
       "tcp_established_idle_timeout_auto_tier": "high"
@@ -791,6 +796,10 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 }
 ```
 
+`nat_port_min` / `nat_port_max` 是内核 NAT 实际分配端口的范围：配置的 `kernel_nat_port_min` / `kernel_nat_port_max` 去掉宿主临时端口范围后剩下的较大一段（上例是 Linux 默认临时端口 32768–60999 下的默认值），避免 NAT 映射收走宿主自己连接的回包。
+
+TC 连接缓存的字段同样分两层：顶层 `kernel_tc_flow_cache` 是配置值（未配置时默认 `true`）；TC 引擎的 `flow_cache` 为 `true` 表示核心程序正在写入并使用连接表项里的快路径记录（`diag_flow_cache_hit` 是直接从记录发出的包数），配置开启却未生效时 `flow_cache_disabled_by` 给出原因所在的实验特性（`kernel_tc_reply_l2_cache` 或 `kernel_tc_redirect_neigh_fast`）。流量统计不影响缓存：上例同时开启了两者，从记录发出的包也计入规则流量。
+
 已建立 TCP idle timeout 的字段分两层理解：
 
 - 顶层 `kernel_tcp_established_idle_timeout_seconds` 是配置值；`0` 表示 `auto`，正数表示固定的空闲秒数
@@ -798,7 +807,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 - auto 的 `low/moderate/high/critical` 档位分别使用 24 小时、6 小时、1 小时和 10 分钟
 - 占用率达到 50%、70%、85% 时依次进入 `moderate/high/critical`；回落到 45%、65%、80% 以下才退出对应档位，避免阈值附近抖动
 
-`kernel_helper_module` 描述可选的 `veer_kfuncs` 模块：`compiled`、`loaded`、`available`、`reason`，以及安装状态 `kernel_release`（运行中内核）、`module_path`（该内核的模块路径）、`module_installed`、`other_module_releases`（已有模块但未运行的内核，通常是升级前的版本）。二进制带模块支持、模块未加载且当前内核没有模块文件时：若已为其他内核安装过模块（通常是内核升级后），`reason` 说明缺少哪个版本，`rebuild_command` 给出主机上的 `veer kfuncs build` 命令，WebUI 内核运行时页显示可关闭的提示；从未安装过模块时 `reason` 为 `not installed`，不给重建命令也不提示。两种情况数据面都使用基础路径。
+`kernel_helper_module` 描述可选的 `veer_kfuncs` 模块：`compiled`、`loaded`、`available`、`reason`，以及安装状态 `kernel_release`（运行中内核）、`module_path`（该内核的模块路径）、`module_installed`、`other_module_releases`（已有模块但未运行的内核，通常是升级前的版本）。二进制带模块支持、模块未加载且当前内核没有模块文件时：若已为其他内核安装过模块（通常是内核升级后），`reason` 说明缺少哪个版本，`rebuild_command` 给出主机上的 `veer kfuncs build` 命令，WebUI 内核运行时页显示可关闭的提示；从未安装过模块时 `reason` 为 `not installed`，不给重建命令也不提示。两种情况数据面都使用基础路径。模块已加载且当前内核有模块文件时，`loaded_srcversion` 与 `installed_srcversion` 是两者的 srcversion，`loaded_matches_installed` 表示是否同一份源码（任一方缺少 srcversion 时省略）；不一致时 `reload_hint` 说明热更新会保留已加载模块，需要完整重启才加载新文件。
 
 它还会包含大量调试字段，例如：
 
@@ -917,6 +926,7 @@ curl -fsS -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8080/debug/pprof/g
 
 - 给规则、范围、站点、Egress NAT 表单做接口下拉
 - 返回每个接口的 IP 字符串列表
+- 默认省略插件标记为内部管道、且仍由该插件持有的接口（例如 WAN 边界的 pipeline 端）；`?include_internal=true` 返回全部接口
 
 ### 1.2 获取宿主机网络拓扑
 
@@ -926,6 +936,7 @@ curl -fsS -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8080/debug/pprof/g
 
 - 给托管网络和 IPv6 Assignment 表单提供更完整的宿主机网络视图
 - 返回按地址族拆开的 `addresses`
+- 与 `GET /api/interfaces` 相同，默认省略插件内部管道接口，`?include_internal=true` 返回全部接口
 
 ### 1.3 获取标签列表
 
@@ -1256,6 +1267,7 @@ curl -fsS -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8080/debug/pprof/g
 - `nat_type` 允许：`symmetric`、`full_cone`
 - 省略 `nat_type` 时默认 `symmetric`
 - `out_source_ip` 可选，但必须是 `out_interface` 上的本地 IPv4
+- 核心 Egress NAT 不保存 `redirect_mode`。`out_interface` 是不做 ARP 的以太网设备时（VPN 插件的 `veervpn*`/`veerwg*` 边界、`veerwan`、关闭 ARP 的 veth），TC 路径自动用该设备自己的 MAC 作为源和目的 MAC 直接重定向（等同 `prepared_l2`），这与内核邻居解析对这类设备给出的结果相同，但省去逐包 FIB 查找和 `bpf_redirect_neigh`
 - `parent_interface` / `child_interface` / `out_interface` 之间不能形成非法重叠
 - 启用的子接口规则按协议覆盖父接口默认规则；其余子接口和协议继续继承默认出口，创建顺序不影响优先级
 - 相同接口范围上不能重复配置相交协议；不同子接口或不相交协议可以共存

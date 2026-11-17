@@ -27,10 +27,19 @@ parser.add_argument("--performance", action="store_true")
 parser.add_argument("--direct", action="store_true", help="Test the helper-owned single WAN boundary")
 parser.add_argument("--mode", choices=["all", "bpf", "kfuncs"], default="all")
 parser.add_argument("--veer", type=pathlib.Path, help="Also verify real TC NAT through the selected boundary")
+parser.add_argument("--tcx", action="store_true", help="Attach the plugin programs through tcx, as the Veer core does on Linux 6.6+")
 parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
+# The topology, plugin loaders and iperf3 server always come up; "setup" alone
+# runs nothing else. CI runs one check per step to see which one a runner that
+# stops responding was in.
+CHECKS = ["setup", "ping", "udp", "malformed", "nonlinear", "nonlinear-attached", "nonlinear-tailcalled", "gro", "throughput"]
+parser.add_argument("--checks", default="all", help="comma-separated subset of " + ",".join(CHECKS) + ", or all")
 args = parser.parse_args()
 if args.direct and args.mode == "bpf":
     parser.error("--direct requires the kfuncs dataplane")
+checks = set(CHECKS) if args.checks == "all" else set(args.checks.split(","))
+if checks - set(CHECKS):
+    parser.error("unknown checks: " + ",".join(sorted(checks - set(CHECKS))))
 ROOT = args.root.resolve()
 LOADER = args.loader.resolve()
 if not args.child:
@@ -181,16 +190,31 @@ def malformed_frames(mode):
     )
 
 
-def nonlinear_frames(mode, clamp=True, linear=False):
+def nonlinear_frames(mode, clamp=True, linear=False, entry="wrapped"):
     # NAPI_FRAGS preserves writev's first iovec as the skb's linear head.
     # Short first iovecs force the real plugin to parse headers in skb frags.
     # Echo the source skb after handoff to verify the kfunc's clone contract.
-    label = mode + ("-linear" if linear else "-frags") + ("" if clamp else "-unclamped")
+    # entry is how tc_tunnel is reached: "wrapped", test_frags calls it as a
+    # function to guard the linear length and echo the source skb;
+    # "attached", tc_tunnel is the TC program; "tailcalled", test_tail
+    # tail-calls it, as the Veer core reaches plugins.
+    wrapped = entry == "wrapped"
+    label = mode + ("-linear" if linear else "-frags") + ("" if clamp else "-unclamped") + ("" if wrapped else "-" + entry)
     source = BASE / (label + ".c")
     obj = BASE / (label + ".o")
     guard = "!= skb->len" if linear else ">= 22"
+    # Called as a function, tc_tunnel's continue tail call would run in a
+    # subprogram, and the x86 JIT of 7.0.0-1019-azure oopses on that (a
+    # garbage tail-call counter pointer). Veer only tail-calls from programs,
+    # so there it becomes a no-op; the other two entries keep the real one.
+    no_continue = (
+        '#include "' + str(ROOT / "plugins/include/veer_plugin_helpers.h") + '"\n'
+        '#undef veer_continue_pre_forward\n'
+        '#define veer_continue_pre_forward(skb) ((void)(skb))\n'
+    ) if wrapped else ""
     source.write_text(
-        '#include "' + str(ROOT / "plugins/pppoe_client/pppoe_tunnel.bpf.c") + '"\n'
+        no_continue
+        + '#include "' + str(ROOT / "plugins/pppoe_client/pppoe_tunnel.bpf.c") + '"\n'
         'static long (*source_echo)(struct __sk_buff *, __u32, __u64) = (void *)13;\n'
         'SEC("tc/test_frags") int test_frags(struct __sk_buff *skb) {\n'
         '  if (skb->data_end - skb->data ' + guard + ') return TC_ACT_SHOT;\n'
@@ -199,6 +223,11 @@ def nonlinear_frames(mode, clamp=True, linear=False):
         '  source_echo(skb, skb->ifindex, 0);\n'
         '#endif\n'
         '  return result;\n}\n'
+        'struct bpf_map_def SEC("maps") test_chain = {\n'
+        '  .type = BPF_MAP_TYPE_PROG_ARRAY, .key_size = 4, .value_size = 4, .max_entries = 1 };\n'
+        'SEC("tc/test_tail") int test_tail(struct __sk_buff *skb) {\n'
+        '  veer_bpf_tail_call(skb, &test_chain, 0);\n'
+        '  return TC_ACT_SHOT;\n}\n'
         # Match the next TC NAT parser's direct-access requirements. Capture
         # only packets that actually pass this classifier, after handoff.
         'SEC("tc/test_headers") int test_headers(struct __sk_buff *skb) {\n'
@@ -225,7 +254,8 @@ def nonlinear_frames(mode, clamp=True, linear=False):
         '  return bpf_redirect(cfg->pipeline_ifindex, 0);\n}\n'
     )
     run(
-        ["clang", "-O2", "-g", "-target", "bpf"]
+        # BPF v1, as the shipped objects are built (scripts/build-ebpf.sh).
+        ["clang", "-O2", "-g", "-target", "bpf", "-mcpu=" + os.environ.get("BPF_CPU", "v1")]
         + (["-DVEER_KFUNCS=1"] if mode == "kfuncs" else [])
         + ["-c", str(source), "-o", str(obj)]
     )
@@ -245,12 +275,15 @@ def nonlinear_frames(mode, clamp=True, linear=False):
         struct.pack_into("<I", value, 8, idx("fragcap0")["ifindex"])
         if not clamp:
             struct.pack_into("<HH", value, 20, 0, 0)
-        for program, interface in [("test_frags", "fragwan"), ("test_headers", "local0")]:
+        entry_program = {"wrapped": "test_frags", "attached": "tc_tunnel", "tailcalled": "test_tail"}[entry]
+        for program, interface in [(entry_program, "fragwan"), ("test_headers", "local0")]:
             config = BASE / (label + "-" + program + ".json")
             config.write_text(json.dumps({
                 "Object": str(obj), "Program": program, "Map": "pppoe_tunnel_config",
                 "Interfaces": [interface],
                 "Entries": [{"Key": "00000000", "Value": value.hex()}],
+                "TailCalls": [{"Map": "test_chain", "Index": 0, "Program": "tc_tunnel"}] if program == "test_tail" else [],
+                "TCX": args.tcx,
             }))
             loaders.append(proc([str(LOADER), str(config)], label + "-" + program))
         time.sleep(0.3)
@@ -272,7 +305,7 @@ def nonlinear_frames(mode, clamp=True, linear=False):
             while select.select([tap], [], [], 0)[0]:
                 os.read(tap, 65536)
             os.writev(tap, [part for part in [frame[:linear], frame[linear:]] if part])
-            if mode == "kfuncs":
+            if mode == "kfuncs" and wrapped:
                 if not select.select([tap], [], [], 1)[0]:
                     raise RuntimeError("source skb echo missing after kfunc handoff")
                 if os.read(tap, 65536) != frame:
@@ -411,7 +444,9 @@ def nat_path():
                 raise RuntimeError("TC NAT did not become ready: " + str(entries))
             time.sleep(0.1)
         for reverse in [False, True]:
-            result = json.loads(run(["ip", "netns", "exec", client_ns, "iperf3", "-c", "10.90.0.2", "-n", "8M", "-J"] + (["-R"] if reverse else [])))
+            # Timed, not "-n 8M": with -n iperf3 reports what the server had
+            # read when the client finished writing, which can be half of it.
+            result = json.loads(run(["ip", "netns", "exec", client_ns, "iperf3", "-c", "10.90.0.2", "-t", "1", "-J"] + (["-R"] if reverse else [])))
             assert "error" not in result and result["end"]["sum_received"]["bytes"] >= 8 * 1024 * 1024, result
         echo_code = "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(('10.90.0.2',39989));\nwhile True:\n d,a=s.recvfrom(65536);s.sendto(a[0].encode()+b':'+d,a)"
         echo = proc(["ip", "netns", "exec", remote, "python3", "-u", "-c", echo_code], "nat-udp")
@@ -653,6 +688,7 @@ try:
                 "Interfaces": ["wan" + side] + ([] if args.direct else ["pipe" + side]),
                 "EgressInterfaces": ["local" + side] if args.direct else [],
                 "Entries": [{"Key": "00000000", "Value": cfg(ns, side).hex()}],
+                "TCX": args.tcx,
             }
             file = BASE / (mode + side + ".json")
             file.write_text(json.dumps(config))
@@ -662,15 +698,17 @@ try:
         for p in loaders:
             if p.poll() is not None:
                 raise RuntimeError("loader exited")
-        print(mode, run(["ping", "-n", "-c", "3", "-W", "2", "10.90.0.2"]), flush=True)
-        print(
-            mode, run(["ping", "-6", "-n", "-c", "2", "-W", "2", "fd90::2"]), flush=True
-        )
+        print(mode, "plugin loaders attached; checks:", ",".join(c for c in CHECKS if c in checks), flush=True)
+        if "ping" in checks:
+            print(mode, run(["ping", "-n", "-c", "3", "-W", "2", "10.90.0.2"]), flush=True)
+            print(
+                mode, run(["ping", "-6", "-n", "-c", "2", "-W", "2", "fd90::2"]), flush=True
+            )
         if mode == "kfuncs":
             r = subprocess.run(["rmmod", "veer_kfuncs"], capture_output=True, text=True)
             if r.returncode == 0:
                 raise RuntimeError("unloaded module while BPF programs referenced it")
-        for destination in ["10.90.0.2", "fd90::2"]:
+        for destination in ["10.90.0.2", "fd90::2"] if "udp" in checks else []:
             # UDP echo verifies exact boundaries/checksums, including UDP segmentation.
             echo_code = (
                 "import socket; s=socket.socket(socket.AF_INET6 if ':' in '"
@@ -708,18 +746,25 @@ try:
             )
             if "error" in transfer or transfer["end"]["sum_received"]["bytes"] <= 0:
                 raise RuntimeError("TCP transfer failed")
-        malformed_frames(mode)
-        nonlinear_frames(mode)
-        if mode == "kfuncs":
-            nonlinear_frames(mode, clamp=False)
-            nonlinear_frames(mode, linear=True)
+        if "malformed" in checks:
+            malformed_frames(mode)
+        if "nonlinear" in checks:
+            nonlinear_frames(mode)
+            if mode == "kfuncs":
+                nonlinear_frames(mode, clamp=False)
+                nonlinear_frames(mode, linear=True)
+        for entry in ["attached", "tailcalled"]:
+            if "nonlinear-" + entry in checks:
+                nonlinear_frames(mode, entry=entry)
+        if "gro" in checks and mode == "kfuncs":
             gro_paths()
-        print(
-            mode,
-            "IPv4/IPv6 TCP, UDP, UDP GSO and live-reference checks passed",
-            flush=True,
-        )
-        for reverse in [False, True]:
+        if "udp" in checks:
+            print(
+                mode,
+                "IPv4/IPv6 TCP, UDP, UDP GSO and live-reference checks passed",
+                flush=True,
+            )
+        for reverse in [False, True] if "throughput" in checks else []:
             for round in range(3 if args.performance else 1):
                 stat = lambda: list(
                     map(

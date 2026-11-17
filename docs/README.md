@@ -1,6 +1,6 @@
 # Veer 使用指南
 
-Veer 是一个面向虚拟机宿主机和二级路由场景的可编程 Linux 网络转发服务。它用 Go 编写，内置 Web UI、管理 API、SQLite 持久化和 Linux 内核 dataplane，可把端口转发、共享建站、端口范围、Egress NAT、托管网络、IPv6 分发和运行时诊断统一收敛到一个进程里管理。
+Veer 是一个面向虚拟机宿主机和二级路由场景的可编程 Linux 网络转发服务。它用 Go 编写，内置 Web UI、管理 API、SQLite 持久化和 Linux 内核 dataplane，可把端口转发、共享建站、端口范围、Egress NAT、托管网络、IPv6 分发和运行时诊断统一收敛到一个服务里管理；可选的沙箱插件在此之上提供 PPPoE 拨号、VPN 出口与 LAN/WAN 编排。
 
 开发者 API 见 [API.md](API.md)，安全边界见[安全建议](#安全建议)。下列源码构建、脚本与测试命令均在仓库根目录执行。
 
@@ -75,7 +75,7 @@ ssh root@server 'cd /tmp && chmod +x deploy.sh && ./deploy.sh'
 
 需要插件时额外上传 `veer-plugins.tar.gz`，并以 `VEER_INSTALL_PLUGINS=1 ./deploy.sh` 部署。安装插件文件与启用插件相互独立，升级时未请求安装不会删除或覆盖现有插件目录。
 
-部署默认把 `/opt/veer/veer` 链接为 `/usr/local/bin/veer`，之后可直接运行 `veer help`、`veer version`、`veer kfuncs status` 和 `veer plugin ...`。已有同名普通文件时不会覆盖，只给出警告；`VEER_LINK_CLI=0` 不创建链接，并移除此前为本安装创建的链接；`VEER_CLI_LINK_DIR` 可改为其他绝对路径目录。RHEL 系列 sudo 的 `secure_path` 默认不含 `/usr/local/bin`，可在 root shell 中运行或写完整路径。`plugin backup/restore/migrate-vpn` 在当前目录没有 `forward.db` 时，自动使用可执行文件所在安装目录的数据库和配置里的 `plugins_dir`。未知子命令会直接报错退出，不会误启动第二个 daemon。
+部署默认把 `/opt/veer/veer` 链接为 `/usr/local/bin/veer`，之后可直接运行 `veer help`、`veer version`、`veer kfuncs status` 和 `veer plugin ...`。已有同名普通文件时不会覆盖，只给出警告；`VEER_LINK_CLI=0` 不创建链接，并移除此前为本安装创建的链接；`VEER_CLI_LINK_DIR` 可改为其他绝对路径目录。RHEL 系列 sudo 的 `secure_path` 默认不含 `/usr/local/bin`，可在 root shell 中运行或写完整路径。`plugin backup/restore` 在当前目录没有 `forward.db` 时，自动使用可执行文件所在安装目录的数据库和配置里的 `plugins_dir`。未知子命令会直接报错退出，不会误启动第二个 daemon。
 
 部署后默认访问：
 
@@ -101,6 +101,7 @@ Veer 适合把 Linux 宿主机作为 VM/容器的默认转发器或二级路由�
 - 多台 VM 共享宿主机 TCP `80/443`，并可选共享 UDP `443` 的 QUIC/HTTP/3，按域名回源
 - 下联 bridge 的 IPv4 DHCP、静态保留、IPv6 分发和 Egress NAT
 - `userspace / TC / XDP` 多 dataplane 转发与自动回退
+- 二级路由：经可选插件进行 PPPoE 拨号、WireGuard / Mihomo / sing-box 出口及 LAN/WAN 编排
 
 ## 功能概览
 
@@ -120,7 +121,7 @@ Veer 适合把 Linux 宿主机作为 VM/容器的默认转发器或二级路由�
 - SQLite 配置与状态持久化
 - Worker 热重载和 draining
 - TC/XDP 内核态热更新、状态观测和异常恢复
-- Goja 控制面与 TC eBPF pipeline 插件系统
+- 插件系统：Goja 控制面在独立沙箱子进程中运行，数据面支持 TC pipeline、XDP Dispatcher 与原生 Netfilter Hook；插件包签名、TUF 仓库、原子安装与回滚
 - WHMCS addon 插件
 
 共享站点的 QUIC 开关默认关闭。启用后，Veer 会监听同一入口 IP 的 UDP `443`，从 QUIC v1/v2 Initial 中解析 TLS SNI，再把原始数据报转发到 `backend_https_port`；Veer 不终止 TLS，也不替后端校验证书。`deploy.sh` 不会为这个可选功能自动开放 UDP `443`；启用前需确认防火墙允许该端口、后端在同一端口提供 QUIC/HTTP/3，且没有普通 UDP 规则或端口范围占用该监听地址。使用 UFW 时可执行：
@@ -231,20 +232,21 @@ Authorization: Bearer <web_token>
 - `kernel_engine_order`：Linux 内核引擎尝试顺序；省略时默认 `["tc"]`
 - `managed_network_auto_repair`：托管网络链路变化后的自动修复
 - `plugins_enabled`：是否扫描并运行外部插件；默认关闭，必须手动设为 `true` 才会启动外部插件控制面；内置 `veer_core` 始终可见
-- `plugins_dataplane_enabled`：是否允许外部插件进入 TC 数据面；默认关闭，当前支持按 priority 围绕 `Veer Core` 排序的 forward/reply TC 链
+- `plugins_dataplane_enabled`：是否允许外部插件进入数据面；默认关闭。开启后可使用按 priority 围绕 `Veer Core` 排序的 forward/reply TC 链、XDP Dispatcher 和原生 Netfilter Hook
 - `plugins_isolation`：是否让每个插件控制 VM 和命名 Worker 运行在独立子进程；默认开启，仅受信任的本地调试才应关闭
 - `plugins_min_sandbox_level`：插件 Host 最低隔离等级，允许 `none`、`minimal`、`partial`、`full`；默认 `full`，达不到时在执行插件 JavaScript 前拒绝启动
 - `plugins_remote_install_enabled`：是否开放远程插件安装、更新、回滚、卸载、仓库/信任管理和代码重载；默认关闭，WebUI 同步隐藏入口。关闭时可向本地受信任插件授予 `exec` 权限；开启后禁止 exec。只能在本机修改配置并重启生效，插件页面和资源/动作访问不受该开关影响
 - `plugins_require_signed_packages`：是否要求插件包带可独立验证的 Ed25519 签名；默认开启。首次出现的发布者可直接在安装审核中确认，无需预先维护信任列表；开发环境可显式关闭后审批未签名包
 - `plugin_admin_token`：插件安装、信任、启停和热加载使用的独立高权限令牌；留空时相关写 API 禁用，非空时必须不同于 `web_token`
 - `plugins_max_installed` / `plugins_max_staged` / `plugins_storage_limit_mb`：插件安装数、暂存数和插件持久状态总量上限；`plugins_repository_refresh_minutes` 控制同时启用插件和远程安装后 TUF 元数据的后台刷新周期
-- `plugins_enabled=true` 时，`lab` / `preview` / `stable` 插件可执行控制脚本；进入外部 TC 数据面仍需同时开启 `plugins_dataplane_enabled`；`deprecated` 插件始终禁用
+- `plugins_enabled=true` 时，`lab` / `preview` / `stable` 插件可执行控制脚本；进入外部数据面（TC/XDP/Netfilter）仍需同时开启 `plugins_dataplane_enabled`；`deprecated` 插件始终禁用
 - `plugins_dir`：运行时插件目录，默认 `plugins`
 - `kernel_rules_map_limit`：内核规则 map 容量，`0` 表示自适应
 - `kernel_flows_map_limit`：内核 flow map 容量，`0` 表示自适应
 - `kernel_tcp_established_idle_timeout_seconds`：内核已建立 TCP flow 的空闲超时；`0` 表示按 IPv4/IPv6 flow map 的最高利用率自动选择，正数表示固定秒数。auto 在利用率达到 50% / 70% / 85% 时依次采用 6 小时 / 1 小时 / 10 分钟，低负载采用 24 小时；回落阈值分别为 45% / 65% / 80%，避免临界点抖动
 - `kernel_nat_ports_map_limit`：内核 NAT 端口 map 容量，`0` 表示自适应
-- `kernel_nat_port_min` / `kernel_nat_port_max`：内核 Full NAT 临时端口池
+- `kernel_nat_port_min` / `kernel_nat_port_max`：内核 Full NAT / Egress NAT 的端口池，默认 20000–65535。NAT 地址就是宿主自己的地址，宿主连接用的临时端口（`net.ipv4.ip_local_port_range`，Linux 默认 32768–60999）若也被 NAT 占用，回包会被当作 NAT 回程转给内网主机（Full Cone 的回程不看对端），宿主那条连接只能超时。所以内核 NAT 启动时从端口池里去掉宿主的临时端口范围，取剩下较大的一段，默认配置下实际使用 20000–32767；运行时视图 TC/XDP 引擎的 `nat_port_min` / `nat_port_max` 显示实际范围。端口池整个落在临时端口范围内时按配置使用并记录警告。临时端口范围只在启动时读取，修改后重启 Veer 生效；需要更多 NAT 端口时可以调小宿主的临时端口范围，或把端口池配置到它之外
+- `kernel_tc_flow_cache`：TC 连接缓存，默认开启；只跑大量短连接时可设为 `false`，取舍见下文 Dataplane 一节
 - `experimental_features`：实验特性开关，默认都应保持关闭，按需验证后再开
 
 ## Dataplane
@@ -279,6 +281,29 @@ TC 与 XDP 选择建议：
 - `xdp_generic` 默认关闭；veth/tap/netns 测试拓扑通常需要显式启用
 - `bridge_xdp`、`kernel_tc_*` 系列开关都属于实验路径
 
+Egress NAT 只转换发往外部的包。发往本机地址，以及发往本机其他网卡直连网段（例如另一个托管网络里的虚拟机）的包，交给内核按路由表转发，对方看到的是虚拟机自己的地址；TC 和 XDP 路径相同，单独选了 VPN 等出口的子接口也一样。出口网卡（任一 Egress NAT 的 `out_interface`，以及它所在的网桥或父接口）上的直连网段照常转换；同一网段同时出现在出口和其他网卡上时按出口处理，网段嵌套时以最长前缀为准。只认网卡地址对应的直连网段，经静态路由才能到达的内网仍然转换。同一网桥内的虚拟机互访由网桥二层转发，本来就不经过 NAT。出口暂时不可用、Egress NAT 保留匹配条件丢包时，发往本机和这些网段的包照常放行。网段清单和本机地址清单一起在规则同步时更新，最多 1024 个网段，写入失败时清空并记录日志，此时发往这些网段的包恢复为照常转换。这项检查只在连接的首包、FIN/RST 和每秒一次的完整处理时做，一条短连接约 3–4 次；测试机上每次多一次前缀表查询约 22 ns，约占短连接 BPF 时间的 0.5%，长连接每包开销不变。
+
+TC 路径中，Egress NAT（对称和 Full Cone 两种类型）已建立连接的去程，以及 Egress NAT / Full NAT 的回程，在本方向 1 秒内完整处理过一次后，后续普通包（不含 SYN、FIN、RST）只做地址转换，并按本方向上次路由查找得到的下一跳直接发出，不再逐包查询反向会话和路由表。每条活动连接每秒至少完整处理一次，并重新确认下一跳和目标是否已成为本机地址，因此路由、邻居或本机地址变化最多约 1 秒后生效。
+
+Egress NAT 的出口是不做 ARP 的以太网设备时（VPN 插件的 `veervpn*`/`veerwg*` 边界、`veerwan`、关掉 ARP 的 veth），TC 路径不再逐包查路由：这类设备发出的帧，源和目的 MAC 都是设备自己的地址，路由表里通常也没有经它通往目的地的路由。没有设置 `redirect_mode` 的规则对这类出口自动按 `prepared_l2` 发送，即用出口自己的 MAC 改写后直接重定向，与内核邻居解析的结果相同。两种 NAT 类型都适用，连接缓存也因此能记录这类出口的去程。以前这类出口的每个去程包都要做两次必然失败的 FIB 查找，再回退到 `bpf_redirect_neigh`，由内核逐包重新查路由；Full Cone 规则连显式的 `prepared_l2` 也不生效。上行长度检查也查不到经出口的路由，这一结果和下一跳一样记在 L2 缓存里，每条连接每秒完整处理时重新确认；这类出口的包照旧不按长度拦截。测试机上（MTU 1500、关闭 GRO，dummy 出口经 tc mirred 模拟隧道）长连接上传：去程每包 BPF 时间约 1320 ns → 约 300 ns，与普通 veth 出口相当；路由器每包总开销约 2710 ns → 约 1120 ns（其中约 150 ns 是模拟隧道本身），单流吞吐约 2.2 → 3.5 Gbit/s；约 8 个包的短连接 BPF 时间约 25.6 → 17.5 µs。关闭连接缓存时每包约 1360 ns → 约 490 ns（同一轮测量中普通 veth 出口约 440 ns）。普通出口的开销不变。
+
+Egress NAT 的 `protocol` 含 `icmp` 时，ICMP 回显请求和应答以标识符代替端口做转换，30 秒没有流量即回收。不论 `protocol` 是否含 `icmp`，TC 路径都会双向转换关于已有 Egress NAT 连接的 ICMP 差错（目标不可达，含需要分片；超时；参数问题）：上游发往 NAT 地址的差错改回内网主机，包括外层目的地址、差错里引用的原始包的源地址和端口，以及各层校验和，使路径 MTU 发现、traceroute 和 UDP 端口不可达对内网主机生效；内网主机发出的差错改成 NAT 地址后从规则的出口发出。只处理不带 VLAN 标签的以太网帧；经 L3 出口（如 WireGuard）的差错和 Full NAT 端口转发的差错仍交给内核。
+
+出口 MTU 小于 LAN（PPPoE、隧道）时，TC 路径的 Egress NAT 去程在转换之前检查包能否不分片地发出，GSO 包按分段长度算。带 DF 的包原样交还内核协议栈，由协议栈像普通路由器一样回复 ICMP“需要分片”，客户端的路径 MTU 发现因此生效，TCP 不会卡死；不带 DF 的包直接丢弃，因为 TC 无法在 NAT 之后分片，交给协议栈又会不经 NAT 发出。IPv4 数据报分片后只有首片带端口：Egress NAT 双向和 Full NAT 经 FIB 转发的包，首片照常转换并记下去向，同一数据报的后续分片（地址、协议和 IP ID 相同）5 秒内按同样的地址转换发出；首片被丢弃时，后续分片一并丢弃，不会以内网地址出现在外网。后续分片先于首片到达时仍交给协议栈。运行时视图 TC 引擎的 `diag_pmtu_to_stack`、`diag_oversize_drop`、`diag_fragment_forwarded` 分别统计这三种情况。
+
+在 Linux 5.11 及以上内核中，TC 程序用粗粒度单调时钟记录连接时间，精度为一个时钟节拍（通常 1–10 毫秒），省去了虚拟机中每包读取时钟源的开销；更老的内核仍使用精确时钟。
+
+在 Linux 6.6 及以上内核中，TC 核心程序（包括插件 pipeline）通过 tcx 挂载，不再经过 clsact 下的 cls_bpf 过滤器链，每个包少一次分类器遍历。tcx 程序先于网卡上所有 cls_bpf 过滤器执行；插件直接挂载的 TC 过滤器仍是 cls_bpf，执行顺序和以前一样排在核心程序之后。tcx 不支持 `TC_ACT_STOLEN`，插件接管数据包后应返回 `veer_tc_consumed()`，见 [PLUGIN.md](PLUGIN.md)。`experimental_features` 中的 `kernel_tc_legacy_attach` 可强制使用 cls_bpf。运行时视图中 TC 引擎的 `attachment_api` 字段显示当前挂载方式（`tcx` 或 `cls_bpf`）。热重启时新进程接管已挂载的 tcx 程序并原子替换；在两种挂载方式之间切换时，先挂上新程序，再移除旧的挂载。
+
+顶层配置 `kernel_tc_flow_cache` 控制 TC 连接缓存，默认开启，设为 `false` 关闭：核心程序在快路径上把已建立的 Egress NAT 连接（对称和 Full Cone，去程和回程）怎样发出（下一跳的网卡和 MAC、可直接发出的最大长度）记在这个方向的连接表项里；之后这个方向的普通包在 TC 分派程序入口查到连接表项，就直接改写并转发，跳过规则查找、FIB 和其余处理。缓存不单独挂程序，也不另建一张表，还没有记录的包只多查一次连接表。记录和该连接的 1 秒快路径窗口一起过期，所以每条连接每秒仍至少由核心程序完整处理一次，路由、邻居和本机地址变化的生效时间不变。旧配置写在 `experimental_features` 里的同名开关仍然有效（顶层配置优先），`deploy.sh` 升级配置时会把它移到顶层；两处都没有写的配置按默认开启。
+
+- **取舍**：分派程序先为每个可缓存的包查一次连接表，还没有记录的包随后照常走完整路径。测试机上（MTU 1500、关闭 GRO），长连接每个包在路由器上的 BPF 时间从约 400 ns 降到约 260 ns；一条约 8 个包的短连接多花约 2–4% 的 BPF 时间，路由器每包的总开销和每个忙碌核心的建连速率相差都在 3% 以内，处于测量误差范围。关闭时除了连接表项多占的内存（见下）没有可测到的开销。下载、代理、视频等长连接大流量收益明显；只跑大量短连接时收益很小，可以关闭省下这部分开销。
+- **只缓存**：不带 VLAN 标签的 IPv4 TCP/UDP 包；SYN、FIN、RST 总是交给核心程序，FIN/RST 同时作废这条连接两个方向的记录。记录只用于和写入时从同一个网卡进来、目的 MAC 也相同、长度不超过下一跳已验证长度的包，Full Cone 的去程还要求目的地址相同；其他包交给核心程序检查，下一跳接受更长的包后记录的长度上限随之放宽。运行时视图 TC 引擎的 `diag_flow_cache_hit` 统计直接从记录发出的包数。
+- **流量统计**：开启 `kernel_traffic_stats` 时缓存照常使用，从记录发出的包和核心程序处理的包一样，把 TCP/UDP 负载字节计入规则的入、出流量；新建和关闭连接的计数本来就由核心程序完成。测试机上开着流量统计时，长连接每个包在路由器上的总开销约从 790 ns 降到 630 ns，计数和线上实际的负载字节完全一致。
+- **不使用缓存**：入口挂了插件钩子的网卡（进来的包不写记录，插件钩子看到每个包）。开启了 `kernel_tc_reply_l2_cache` 或 `kernel_tc_redirect_neigh_fast` 时核心程序不写记录：两者让核心程序不经 FIB 解析下一跳，记不下下一跳。运行时视图顶层的 `kernel_tc_flow_cache` 是配置值，TC 引擎的 `flow_cache` 表示缓存是否生效，`flow_cache_disabled_by` 给出让它不生效的选项。
+- **失效**：规则或插件钩子变化、用户态清理连接时，所有记录立即作废（递增代数即可，不遍历连接表），变化过程中正在处理的包写下的记录在 25 ms 后再作废一次。规则不变时的本机地址变化和核心程序的快路径一样，在 1 秒窗口内生效。热重启后新程序从新的代数开始，迁移过来的连接表项带的旧记录不再使用。
+- **内存**：每个 IPv4 连接表项多 40 字节（64 → 104 字节），按默认容量（两组各 131072 项）约多 10 MB，不开启缓存也一样。
+
 ## 托管网络
 
 托管网络有两种模式：
@@ -291,7 +316,7 @@ TC 与 XDP 选择建议：
 - IPv4 DHCP
 - IPv4 静态保留
 - IPv6 `/128` 或 `/64` 分发
-- 自动 Egress NAT
+- 自动 Egress NAT；不同托管网络的虚拟机经网关互访时由内核路由，不做 NAT（见 [Dataplane](#dataplane)）
 - 链路变更自动修复
 - PVE `qemu-server` / `lxc` 配置识别
 - PVE guest 链路识别与修复，覆盖 `fwpr*`、`tap*`、`veth*`
@@ -331,6 +356,7 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 - `deploy.sh` 热更新时会尝试交接活动的 userspace rule/range/shared-proxy worker；无法交接的 worker 会由新进程重建
 - shared-proxy 二进制更新会关闭旧 QUIC/UDP 监听和中继会话，QUIC 客户端可能需要重连；TCP 已建立连接可以排空，不能据此推断 QUIC 同样无损交接
 - TC/XDP 路径会尽量继承内核 flow / NAT / stats 状态；使用 `--no-inherit-stats` 时 stats 会重新累计
+- 保留的 map 布局变化时热更新会回退为冷启动；部署前可用 `veer hot-restart check` 预检，见 [KERNEL.md](KERNEL.md#热更新预检)
 - 交接期间旧进程的 tail-call 链会被 pin 住，Full NAT、Egress NAT 和插件阶段在新进程接管前继续生效；XDP 插件 Dispatcher 在 Linux 5.7+ 上由新进程原子替换
 - 新版本启动、重启或 `/readyz` 检查失败时，已有安装会自动回滚二进制、配置、服务定义和本次部署替换的 bundled plugins
 - 自动回滚不恢复 SQLite 数据库，也不恢复任意外部插件产生的状态；部署前服务原本未运行时只回滚文件，不会自动启动旧版本
@@ -340,7 +366,7 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 
 ## 插件层
 
-`release.sh` 会把 `wan_core`、`lan_core`、`vtolocal` 和 `pppoe_client` 四个 stable 插件打成可选包；部署默认不安装插件，设置 `VEER_INSTALL_PLUGINS=1` 才会安装。安装后仍需手动设置 `plugins_enabled=true` 才会运行插件控制面，进入 TC 数据面还需设置 `plugins_dataplane_enabled=true`。`packet_observer`、`router_wizard` 与 [vpn_core](plugins/vpn_core/README.md) 仍是源码内的 lab 插件，不进入默认发布包。VPN 示例支持内核 WireGuard、Mihomo、sing-box 和外部 TUN，通过 WAN Core 边界和双向 TC 适配器接入核心：支持 ingress 交接的 helper 使用单接口边界，其余环境使用 veth 兼容路径，内部 peer 对普通界面隐藏。现有 LAN/出向 NAT 可选择隧道出口，无需关闭快速 NAT。插件架构、开发接口和边界说明见 [PLUGIN.md](PLUGIN.md)。
+`release.sh` 会把 `wan_core`、`lan_core`、`vtolocal` 和 `pppoe_client` 四个 stable 插件打成可选包；部署默认不安装插件，设置 `VEER_INSTALL_PLUGINS=1` 才会安装。安装后仍需手动设置 `plugins_enabled=true` 才会运行插件控制面，进入数据面还需设置 `plugins_dataplane_enabled=true`。`packet_observer`、`router_wizard` 与 [vpn_core](plugins/vpn_core/README.md) 仍是源码内的 lab 插件，不进入默认发布包。VPN 插件支持内核 WireGuard、Mihomo、sing-box 和外部 TUN，通过 WAN Core 边界和双向 TC 适配器接入核心：支持 ingress 交接的 helper 使用单接口边界，其余环境使用 veth 兼容路径，内部 peer 对普通界面隐藏。现有 LAN/出向 NAT 可选择隧道出口，无需关闭快速 NAT。插件架构、开发接口和边界说明见 [PLUGIN.md](PLUGIN.md)。
 
 ## 平台与依赖
 
@@ -367,7 +393,7 @@ OpenRC 部署会在 cgroup 尚未挂载时启动并启用系统的 `cgroups` 服
 
 构建要求：
 
-- Go 1.26.10+
+- Go 1.26.11+
 - `clang`
 - Debian/Ubuntu 通常需要 `linux-libc-dev`
 - RHEL-compatible/Fedora 通常需要 `kernel-headers`
@@ -404,10 +430,10 @@ go build -o veer .
 `release.sh` 会先编译并嵌入 core eBPF 对象，同时生成可选的 `veer-plugins.tar.gz` 和独立开发者产物 `veer-plugin-sdk.tar.gz`：
 
 - `internal/app/ebpf/forward-tc-bpf.o`
-- `internal/app/ebpf/forward-tc-bpf-stats.o`
 - `internal/app/ebpf/forward-xdp-bpf.o`
-- `internal/app/ebpf/forward-xdp-bpf-stats.o`
 - `internal/app/ebpf/plugin-xdp-dispatcher-bpf.o`
+
+TC 和 XDP 各只有一个对象，开关不再各编一份。`kernel_traffic_stats` 这类设置是对象 `.rodata` 里的 `const volatile` 全局变量（如 `forward_load_traffic_stats`）：veer 加载前写入，并把每处读取直接换成这个值；加载器随后把 `.rodata` 冻结为只读，验证器就把它当常量，只走设置选中的分支，并在 JIT 之前删掉其余代码。测试机上（clang 14/18/21，内核 5.10、5.15、6.12），删完以后的代码比按设置单独编译的对象只多约 0.3%（clang 编译时不知道哪些代码会被删，寄存器分配略有不同）。四轮出口 NAT A/B 测下来，统计开、关时的每包 BPF 开销都和单独编译的对象分不出差别：同一轮内成对比较的差值在 −6 到 +7 ns（约 ±2%）之间，正负不固定，同一个二进制在不同轮次之间也相差约 9 ns。veer 二进制因此小了约 8.5 MB。
 
 TC 与 XDP 源码完全相同的辅助函数放在 `internal/app/ebpf/include/forward_common.h`，两个 dataplane 都在各自的 map 与前置声明之后包含它；修改其中任一函数会同时影响两个对象。只在一侧需要或两侧实现不同的函数仍留在各自的 `.c` 文件中。
 
@@ -449,6 +475,15 @@ go test ./...
 
 插件发布使用 `sh scripts/verify-plugin-release.sh portable`；root Linux 的完整验收与性能门槛见 [PLUGIN.md](PLUGIN.md#验收边界)。
 
+接口状态变化下的内核连接表审计不在默认门禁内，需要 root Linux 与 python3，约 10 分钟：
+
+```bash
+sh scripts/build-all-ebpf.sh
+sudo env "PATH=$PATH" VEER_RUN_FLOW_CHURN_AUDIT=1 go test ./internal/app -run '^TestKernelFlowTablesAcrossInterfaceChurn$' -count=1 -v -timeout=20m
+```
+
+它启动真实进程并保持 TCP/UDP 流量，对上联、网桥和子接口做 down/up、脱离与重新加入网桥、删除重建和地址变更，每一步之后读取内核 flow 与 NAT 端口表，要求没有条目指向已不存在的接口、已撤下的规则或旧的规则版本，并核对流量恢复；接口只是短暂失去载波或地址、或全 NAT 端口转发在网桥与成员口路径间变化时，还要求原有 TCP 连接不中断。`VEER_FLOW_CHURN_SCENARIO=<名称>` 只运行单个场景。
+
 兼容性门槛包括：Debian 11、Ubuntu 22.04、Rocky Linux 9、Alpine 3.19 和当前 Fedora 容器中的真实依赖安装与 release 构建；Ubuntu amd64/arm64 原生 Linux 测试和 core dataplane；实际部署 unit 下命名 namespace 的创建、跨服务退出保留、重启复用和删除。容器只验证发行版用户环境与编译器。
 
 CI 另外启动官方 Alpine 3.19.8 和 Rocky Linux 9.8 云镜像的 QEMU VM，使用各自默认内核验证实际安装、热更新、崩溃恢复、开机启动、插件沙箱与 TC/XDP 的 IPv4/IPv6 转发和 egress NAT；Alpine 验证 OpenRC 及保留 worker 时的 cgroup 隔离，Rocky 全程保持 SELinux enforcing。镜像固定版本并校验摘要，关键测试被跳过会使验收失败，串口与测试日志保留为 CI artifact。这些结果只覆盖所列镜像与默认策略，自定义内核或 SELinux 策略仍需单独验收。
@@ -462,6 +497,16 @@ CGO_ENABLED=0 go test -c -o /tmp/veer-vm.test ./internal/app
 python3 scripts/verify-qemu-platform.py alpine --binary /tmp/veer-vm-binary --test-binary /tmp/veer-vm.test
 python3 scripts/verify-qemu-platform.py rocky --binary /tmp/veer-vm-binary --test-binary /tmp/veer-vm.test
 ```
+
+旧内核的 eBPF verifier 比新内核更容易拒绝程序：Ubuntu 22.04 初版内核（5.15.0-25）上，TC 对象里的一次 BPF-to-BPF 调用曾使 `forward_ingress_v4_egress_nat` 超过 100 万条指令的处理上限，整个 TC 数据面因此退回用户态，而新内核照常加载。CI 因此还用 QEMU 依次启动 Debian 11（5.10.0-32）、Ubuntu 22.04 初版（5.15.0-25）、Ubuntu 22.04 更新（5.15.0-203）和 Debian 12（6.1.0-50）的发行版内核，在其中用运行时的加载方式载入嵌入的 TC、TC-stats、XDP、XDP-stats 对象和 XDP 插件 dispatcher，任一程序被拒绝或测试被跳过即失败。内核包固定版本并校验 SHA256，从会长期保留该文件的归档下载（Launchpad、archive.debian.org、snapshot.debian.org）。这项检查只证明能加载，不跑转发流量。本地需要 QEMU、busybox 和 dpkg-deb：
+
+```bash
+sh scripts/build-ebpf.sh
+CGO_ENABLED=0 go test -c -o /tmp/veer-kernel-load.test ./internal/app
+python3 scripts/verify-kernel-load-matrix.py --test-binary /tmp/veer-kernel-load.test
+```
+
+新建 egress NAT 连接由单独的 tail-call 程序 `forward_ingress_v4_egress_nat_new` 打开。为新连接找空闲 NAT 端口最多试 3×64 次，verifier 会对探测之后的代码按每种探测结果各走一遍，所以探测放在哪个程序，哪个程序就离上限最近。拆出后，5.15.0-25 上 `forward_ingress_v4_egress_nat` 约 8 万条，新程序约 18 万条，拆分前前者约 44 万条。dispatcher 查不到 flow 时直接 tail call 新程序，新连接首包经过的 tail call 次数不变，插件 Hook 的预算也不受影响。
 
 最低兼容版本不代表发行版仍受上游安全维护，生产环境应选择仍在维护的版本。[Debian 11 的官方 LTS 已于 2026-08-31 结束](https://www.debian.org/releases/bullseye/)；其 CI 容器仅使用 archive.debian.org 上 LTS 结束后冻结的归档源验证旧版用户环境，安装脚本不会替用户修改 apt 源。RHEL-compatible 系统会保留已安装的 `curl-minimal` / `coreutils-single`，避免与完整版软件包冲突。
 

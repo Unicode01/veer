@@ -112,11 +112,11 @@ func preparedXDPKernelCandidateRules(items []preparedXDPKernelRule) []Rule {
 }
 
 func (rt *linuxKernelRuleRuntime) hotRestartMetadataWithRuleState(meta kernelHotRestartMetadata) kernelHotRestartMetadata {
-	return kernelHotRestartMetadataWithRuleState(meta, preparedKernelCandidateRules(rt.preparedRules), rt.flowPurgeRetry.snapshot())
+	return kernelHotRestartMetadataWithRuleState(meta, preparedKernelCandidateRules(rt.preparedRules), rt.pendingFlowPurgesForHandoffLocked())
 }
 
 func (rt *xdpKernelRuleRuntime) hotRestartMetadataWithRuleState(meta kernelHotRestartMetadata) kernelHotRestartMetadata {
-	return kernelHotRestartMetadataWithRuleState(meta, preparedXDPKernelCandidateRules(rt.preparedRules), rt.flowPurgeRetry.snapshot())
+	return kernelHotRestartMetadataWithRuleState(meta, preparedXDPKernelCandidateRules(rt.preparedRules), rt.pendingFlowPurgesForHandoffLocked())
 }
 
 func (rt *linuxKernelRuleRuntime) retainedKernelRuleCandidates(rule Rule) ([]Rule, bool) {

@@ -56,9 +56,19 @@ func TestVPNMultiExitTCAttachmentRollback(t *testing.T) {
 	}
 	old, candidate, foreign := program("old", 0), program("candidate", 2), program("foreign", 0)
 	rt := &linuxKernelRuleRuntime{}
+	plan := func(ifindex int, handle uint16, prog *ebpf.Program) kernelAttachmentPlan {
+		return kernelAttachmentPlan{
+			key:         kernelAttachmentKey{linkIndex: ifindex, parent: netlink.HANDLE_MIN_INGRESS, priority: 49100, handle: netlink.MakeHandle(0, handle)},
+			ifindex:     ifindex,
+			priority:    49100,
+			handleMinor: handle,
+			name:        "rollback",
+			prog:        prog,
+		}
+	}
 	attach := func(dst *[]kernelAttachment, handle uint16, prog *ebpf.Program) {
 		t.Helper()
-		if err := rt.attachProgramLocked(dst, link.Attrs().Index, netlink.HANDLE_MIN_INGRESS, 49100, handle, "rollback", prog); err != nil {
+		if err := rt.attachProgramLocked(dst, plan(link.Attrs().Index, handle, prog), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -70,7 +80,7 @@ func TestVPNMultiExitTCAttachmentRollback(t *testing.T) {
 	attach(&installed, 3, candidate)
 	var external []kernelAttachment
 	attach(&external, 3, foreign)
-	if err := rt.attachProgramLocked(&installed, 1<<30, netlink.HANDLE_MIN_INGRESS, 49100, 1, "rollback", candidate); err == nil {
+	if err := rt.attachProgramLocked(&installed, plan(1<<30, 1, candidate), nil); err == nil {
 		t.Fatal("missing target interface did not fail")
 	}
 	rt.discardAttachmentsLocked(installed)
@@ -213,6 +223,22 @@ func runVPNMultiTopology(t *testing.T) {
 		ip("-n", exit.ns, "link", "set", peer, "up")
 		ip("-n", exit.ns, "route", "add", "default", "via", "192.168.10.1")
 	}
+	// A guest on a second LAN bridge without egress NAT, which every exit's
+	// guest must keep reaching while its exit is broken.
+	lanPeer := fmt.Sprintf("vml-%d", os.Getpid())
+	ip("netns", "add", lanPeer)
+	t.Cleanup(func() { _ = exec.Command("ip", "netns", "del", lanPeer).Run() })
+	ip("-n", lanPeer, "link", "set", "lo", "up")
+	ip("link", "add", "br-lan2", "type", "bridge")
+	ip("addr", "add", "192.168.30.1/24", "dev", "br-lan2")
+	ip("link", "set", "br-lan2", "up")
+	ip("link", "add", "lanport", "type", "veth", "peer", "name", "lanclient")
+	ip("link", "set", "lanport", "master", "br-lan2")
+	ip("link", "set", "lanport", "up")
+	ip("link", "set", "lanclient", "netns", lanPeer)
+	ip("-n", lanPeer, "addr", "add", "192.168.30.20/24", "dev", "lanclient")
+	ip("-n", lanPeer, "link", "set", "lanclient", "up")
+	ip("-n", lanPeer, "route", "add", "default", "via", "192.168.30.1")
 	createUplink := func(i int) {
 		t.Helper()
 		wan, outside := fmt.Sprintf("wan%d", i), fmt.Sprintf("outside%d", i)
@@ -643,6 +669,22 @@ func runVPNMultiTopology(t *testing.T) {
 				t.Fatalf("unavailable VPN leaked traffic to backend: %s", leaked)
 			}
 		}
+		// A broken exit holds back what would leave by it, not the guest's
+		// traffic to the LAN, on its own bridge or routed to another.
+		lanAddr := ""
+		for i, candidate := range exits {
+			if candidate == exit {
+				lanAddr = fmt.Sprintf("192.168.10.%d", 20+i)
+			}
+		}
+		paths := []lateralPath{{exit.key + "_to_other_bridge", exit.ns, lanPeer, "192.168.30.20", lanAddr, []string{"tcp", "udp", "icmp"}}}
+		if peer := exits[len(exits)-1]; peer != exit {
+			paths = append(paths, lateralPath{exit.key + "_to_same_bridge", exit.ns, peer.ns, fmt.Sprintf("192.168.10.%d", 20+len(exits)-1), lanAddr, []string{"tcp", "udp"}})
+		}
+		runLateralPaths(t, "exit broken", paths)
+		if t.Failed() {
+			t.FailNow()
+		}
 		assertHealthy()
 	}
 	linkIndex := func(name string) int {
@@ -881,13 +923,22 @@ func runVPNMultiTopology(t *testing.T) {
 	for _, exit := range exits[:3] {
 		action(exit, "delete_profile", false)
 	}
+	var leakedRecords []string
 	for _, path := range []string{"vpn_core/resources/profiles", "vpn_core/resources/status", "wan_core/resources/profiles", "wan_core/resources/sessions", "wan_core/resources/status"} {
 		var response struct {
 			Records []json.RawMessage `json:"records"`
 		}
-		if err := json.Unmarshal(api("GET", "/api/plugins/"+path, nil, false), &response); err != nil || len(response.Records) != 0 {
-			t.Fatalf("resources leaked after multi-exit deletion: %s", path)
+		body := api("GET", "/api/plugins/"+path, nil, false)
+		if err := json.Unmarshal(body, &response); err != nil {
+			leakedRecords = append(leakedRecords, fmt.Sprintf("%s: unreadable response (%v): %s", path, err, body))
+			continue
 		}
+		for _, record := range response.Records {
+			leakedRecords = append(leakedRecords, fmt.Sprintf("%s: %s", path, record))
+		}
+	}
+	if len(leakedRecords) != 0 {
+		t.Fatalf("resources leaked after multi-exit deletion:\n%s", strings.Join(leakedRecords, "\n"))
 	}
 	for _, exit := range exits[:3] {
 		for _, name := range []string{exit.tunnel, exit.local, exit.pipeline} {
@@ -937,7 +988,7 @@ func vpnMultiAdapterMaps(t *testing.T, pid int) []*ebpf.Map {
 				continue
 			}
 			info, err := m.Info()
-			if err != nil || info.Name != "wg_links" {
+			if err != nil || info.Name != "tunnel_links" {
 				m.Close()
 				continue
 			}

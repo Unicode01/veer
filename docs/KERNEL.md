@@ -88,11 +88,28 @@ PPPoE 保留 live session 的非秘密准备参数。恢复时若模式变化，
 
 热更新保留模块和既有 BPF/session 引用，继任进程接管生命周期。替换磁盘 `.ko` 不会热替换运行中的模块代码；需要结束旧引用并完成正常停止/卸载后，新启动才加载新模块。异常退出也不强制拆除活动数据面，继任者可通过所有权记录恢复管理。
 
+模块带 `MODULE_VERSION`，modpost 因此记录 `srcversion`（按模块源码算出的哈希），加载后同一个值出现在 `/sys/module/veer_kfuncs/srcversion`。`veer kfuncs status` 比对已加载模块和当前内核的模块文件，显示两者的版本、srcversion 和 `same sources`；不一致时给出加载新文件的办法。`veer kfuncs build` 安装后也做同样比对：源码相同时不需要重启，模块未加载时任何启动（包括热更新）都会加载它，已加载的是其他源码时需要完整重启。完整重启指不带热更新标记的 `systemctl restart veer`，它会清空内核 NAT 与流表状态并重启插件进程；也可以重启主机。完整重启后模块仍未卸载（不是 Veer 加载的，或仍有引用）时，停止 Veer 后执行 `rmmod veer_kfuncs`。daemon 启动时沿用的模块与文件不一致会记录一行日志，`GET /api/kernel/runtime` 的 `kernel_helper_module` 也给出这两个 srcversion 和 `reload_hint`。
+
+## 热更新预检
+
+热更新时旧进程把 flow、NAT 和 stats map pin 到 `/sys/fs/bpf/forward/hot-restart/<engine>`，新进程用自己的对象逐个比对。任一 map 的类型、key/value 大小或 flags 与新对象不同（例如 flow value 从 64 字节增加到 104 字节），或兼容 token 不一致（`kernel_traffic_stats` 开关变化），新进程就放弃交接、改用新 map，日志记为 `... (cold restart)`，内核 NAT 连接和规则计数随之丢失。容量不影响结果：flow/NAT bank 按保留时的大小接管，stats 容量不足时复制内容。
+
+重启前用即将安装的二进制预检：
+
+```sh
+./veer-linux-amd64 hot-restart check --install-dir /opt/veer
+/opt/veer/veer hot-restart check     # 检查已安装的版本
+```
+
+预检需要 root，只读：按 `<install-dir>/config.json` 的设置加载本二进制内嵌的 TC/XDP 对象；daemon 运行时从它持有的 BPF 程序找出停止时会 pin 的 map，daemon 已停止而交接尚未被接管时读取 pin；再用新进程的接管规则逐个比对，列出每个 map 是否兼容及原因，最后给出 `hot`、`cold` 或 `nothing pinned`（没有需要保留的状态）。`--json` 输出同样内容，`verdict` 为 `hot`、`cold`、`none` 或 `unknown`；`--no-inherit-stats` 对应 deploy.sh 的同名参数。bootstrap.sh 在执行部署前运行预检并打印结论，不改变部署流程。
+
+预检不加载程序，verifier 拒绝新对象这类加载阶段的失败仍会在重启时回退。daemon 自本版本起在运行时元数据中记录兼容 token；更早的 daemon 没有记录，预检假定其 `kernel_traffic_stats` 与配置一致并给出提示。XDP 插件 dispatcher 的交接不在预检范围内。
+
 ## kfunc 开发边界
 
 公共声明在 [plugins/include/veer_kfuncs.h](../plugins/include/veer_kfuncs.h)：`veer_kfuncs_abi_v1()`、`veer_skb_handoff_v1()`，以及可选的 `veer_skb_handoff_ingress_v1()`。后者仅接受 `VEER_L3_TO_ETH`，补 Ethernet 后送入目标设备接收路径，执行目标 TC ingress；原函数发送语义与 ABI 保持不变。handoff 配置为 28 字节，仅含标量，当前只注册给 `BPF_PROG_TYPE_SCHED_CLS`。
 
-handoff 不修改或释放调用方的 skb；所有修改都作用于独立 clone。调用后 **BPF 必须终止当前路径，让 TC 释放原 skb**：成功返回 `TC_ACT_STOLEN`，失败返回 `TC_ACT_SHOT`，避免原包重复发送或回落宿主路由。旧 ingress 调用方也可以在成功后返回 `TC_ACT_SHOT`；本机 egress 成功时必须返回 `TC_ACT_STOLEN`，否则内核会把已转交的包当作发送失败，本机 TCP 无法正确推进发送序号。目标只能是同 netns 的有效、启用、类型匹配且不同于源设备的接口。模块校验参数、PPPoE 会话/长度，限制发送递归，并处理必要的 checksum/MSS。调用权限仍受宿主插件加载和 BPF 特权边界约束；这不是向不可信插件开放任意内核执行。
+handoff 不修改或释放调用方的 skb；所有修改都作用于独立 clone。调用后 **BPF 必须终止当前路径，让 TC 释放原 skb**：成功返回 `veer_tc_consumed()`（`plugins/include/veer_plugin_helpers.h`，即不带目标设备的重定向），失败返回 `TC_ACT_SHOT`，避免原包重复发送或回落宿主路由。ingress 调用方也可以在成功后返回 `TC_ACT_SHOT`；本机 egress 成功时必须返回 `veer_tc_consumed()`，否则内核会把已转交的包当作发送失败，本机 TCP 无法正确推进发送序号。不要返回 `TC_ACT_STOLEN`：核心程序通过 tcx 挂载时，tcx 把它当作“交给下一个程序”，原包会继续被发送。目标只能是同 netns 的有效、启用、类型匹配且不同于源设备的接口。模块校验参数、PPPoE 会话/长度，限制发送递归，并处理必要的 checksum/MSS。调用权限仍受宿主插件加载和 BPF 特权边界约束；这不是向不可信插件开放任意内核执行。
 
 Veer 自己的 `v1` 约定不代表 Linux 内部 ABI 稳定。增加操作或改变所有权语义需重新审查 verifier、skb/offload 和生命周期，不能把任意 skb 修改函数直接暴露为 kfunc。
 
@@ -105,6 +122,8 @@ sh scripts/verify-kernel-module.sh
 ```
 
 该门禁构建模块和两套插件对象，执行实际 ABI probe、生命周期单测、PPPoE IPv4/IPv6/TCP/UDP/UDP GSO/畸形包测试，以及真实 Veer TC NAT + 内核 WG 集成。PPPoE 还检查真实 GRO 聚合、GRO/TSO 不满足条件时的回落、纯 ACK 绕过，以及线性/非线性原始 skb 在 handoff 后逐字节不变（包含 MSS 修改）。WG 测试包含单 socket 长连接跨热更新、异常重启、接口消失、修复和拆除后重新应用。测试结束释放引用和模块；不在业务主机运行。
+
+脚本也可按阶段分步运行（`build packets-bpf load module packets-kfuncs packets-veer wireguard vpn unload`），`VEER_KMOD_WORK` 在步骤之间保留产物，`VEER_PACKET_CHECKS` 对应 `verify-kfuncs-packets.py --checks`。CI 每个阶段一个步骤：runner 因内核崩溃失去响应时日志会丢失，但各步骤的起止时间仍在，能看出停在哪一步。要看崩溃本身，`sh scripts/verify-kfuncs-guest.sh <loader> --mode bpf --checks <check>` 在 QEMU 客户机里启动本机内核运行检查，客户机控制台（Oops、soft lockup 报告）留在输出中。已知 Ubuntu `7.0.0-1019-azure` 的 x86 JIT 在 BPF 子程序内执行 tail call 时会解引用无效的计数指针；Veer 只在程序本身中 tail call，测试也避开了这种写法。
 
 性能复测使用 `scripts/verify-kfuncs-packets.py --loader <loader> --performance --output <json>`；loader 可用 `go build -o loader ./scripts/kfuncs-test-loader` 构建。WG 使用 `python3 scripts/benchmark-wireguard.py --runtime <directory>`，目录内放 `veer` 和 `plugins/{wan_core,vpn_core}`，增强模式另放匹配 `.ko`。分别用当前源码的普通/带标签二进制执行，保存 results.json；脚本使用独立 netns，WG 实际经过核心 NAT 和加解密。
 

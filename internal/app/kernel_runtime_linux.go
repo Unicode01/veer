@@ -55,6 +55,7 @@ const (
 	kernelNatPortsMapName                     = kernelNatPortsMapNameV4
 	kernelIfParentMapName                     = "if_parent_v4"
 	kernelLocalIPv4MapName                    = "local_ipv4s_v4"
+	kernelLocalNetsMapName                    = "local_nets_v4"
 	kernelLocalMACMapName                     = "local_macs"
 	kernelNATConfigMapName                    = "nat_config_v4"
 	kernelStatsMapName                        = "stats_v4"
@@ -177,9 +178,6 @@ const (
 //go:embed ebpf/forward-tc-bpf.o
 var embeddedForwardTCObject []byte
 
-//go:embed ebpf/forward-tc-bpf-stats.o
-var embeddedForwardTCStatsObject []byte
-
 type tcRuleKeyV4 struct {
 	IfIndex uint32
 	DstAddr uint32
@@ -233,6 +231,22 @@ type tcFlowValueV4 struct {
 	FrontCloseSeenNS uint64
 	RuleRevision     uint64
 	SessionID        uint64
+	Fast             tcFlowFastV4
+}
+
+// tcFlowFastV4 mirrors struct flow_fast_v4: the flow cache's record of how
+// the core's fast path last sent this direction of the flow. Only the BPF
+// programs read it; user space copies it along with the entry.
+type tcFlowFastV4 struct {
+	Stamp      uint32
+	OutIfIndex uint32
+	InIfIndex  uint32
+	DstAddr    uint32
+	MaxLen     uint16
+	DMAC       [6]byte
+	SMAC       [6]byte
+	InDMAC     [6]byte
+	Pad        [4]byte
 }
 
 type tcNATPortValue struct {
@@ -256,8 +270,11 @@ type tcNATConfigValueV4 struct {
 	Pad1    uint32
 }
 
+// kernelAttachment is one core program position: a cls_bpf filter, or a
+// tcx link when the runtime attaches through tcx.
 type kernelAttachment struct {
 	filter *netlink.BpfFilter
+	tcx    *kernelTCXAttachment
 }
 
 type kernelAttachmentKey struct {
@@ -265,6 +282,20 @@ type kernelAttachmentKey struct {
 	parent    uint32
 	priority  uint16
 	handle    uint32
+	// tcx positions are ordered by priority and handle like the cls_bpf
+	// filters they replace, but never match a filter with the same values.
+	tcx bool
+}
+
+func (att kernelAttachment) key() (kernelAttachmentKey, bool) {
+	switch {
+	case att.filter != nil:
+		return kernelAttachmentKeyForFilter(att.filter), true
+	case att.tcx != nil:
+		return att.tcx.key, true
+	default:
+		return kernelAttachmentKey{}, false
+	}
 }
 
 type kernelRuleMapEntry struct {
@@ -305,6 +336,7 @@ type kernelDualStackRuleMapDiff struct {
 }
 
 type kernelCollectionPieces struct {
+	flowCacheState              *ebpf.Map
 	forwardProg                 *ebpf.Program
 	replyProg                   *ebpf.Program
 	forwardProgV6               *ebpf.Program
@@ -335,6 +367,14 @@ type kernelCollectionPieces struct {
 	replyTransparentProg        *ebpf.Program
 	replyFullNATProg            *ebpf.Program
 	progChainV4                 *ebpf.Map
+	icmpErrorChainV4            *ebpf.Map
+	icmpErrorForwardProg        *ebpf.Program
+	icmpErrorReplyProg          *ebpf.Program
+	fragmentChainV4             *ebpf.Map
+	fragmentForwardProg         *ebpf.Program
+	fragmentReplyProg           *ebpf.Program
+	egressNATNewChainV4         *ebpf.Map
+	forwardEgressNATNewProg     *ebpf.Program
 	pluginHooksV4               *ebpf.Map
 	pluginConfigV4              *ebpf.Map
 	pluginInterfacesV4          *ebpf.Map
@@ -371,6 +411,8 @@ type kernelAttachmentPrograms struct {
 	forwardProgV6       *ebpf.Program
 	replyProgV6         *ebpf.Program
 	mode                kernelTCAttachmentProgramMode
+	// tcx attaches the programs through tcx.
+	tcx bool
 }
 
 type kernelAttachmentPlan struct {
@@ -436,6 +478,8 @@ type kernelPrepareContext struct {
 	snatAddrs          map[string]cachedKernelSNAT
 	snatIPs            map[string]cachedKernelSNATIP
 	outPaths           map[string]cachedKernelPath
+	// heldPaths overrides the out path of a rule; see kernelBridgePathHold.
+	heldPaths map[int64]preparedKernelPath
 }
 
 func newKernelPrepareContext(enableTrafficStats bool, enablePreparedL2 bool, enableReplyL2Cache bool) *kernelPrepareContext {
@@ -583,6 +627,10 @@ type linuxKernelRuleRuntime struct {
 	orphanNATPruneLog            kernelCountLogState
 	statsCorrection              map[uint32]kernelRuleStats
 	flowPurgeRetry               kernelFlowPurgeRetryState
+	deferredFlows                kernelDeferredFlowRules[preparedKernelRule]
+	pathHolds                    kernelFlowRevisionSet
+	pathHoldReleased             bool
+	lastPathHoldLog              map[string]struct{}
 	flowPruneState               kernelFlowPruneState
 	oldFlowPruneState            kernelFlowPruneState
 	natPruneState                kernelNATPruneState
@@ -594,6 +642,9 @@ type linuxKernelRuleRuntime struct {
 	enablePreparedL2             bool
 	enableReplyL2Cache           bool
 	pluginPipelineEnabled        bool
+	tcxAllowed                   bool
+	enableFlowCache              bool
+	flowCacheDisabledBy          string // see kernelTCFlowCacheDisabledBy
 	pluginPipelineActive         bool
 	pluginPipelineLoaded         []loadedPluginObjectRef
 	pluginPipelineDesired        []kernelPluginPipelineDesiredPlugin
@@ -607,7 +658,7 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 	rulesLimit := 0
 	flowsLimit := 0
 	natLimit := 0
-	natPortMin, natPortMax := effectiveKernelNATPortRange(0, 0)
+	natPortMin, natPortMax := 0, 0
 	enableTrafficStats := false
 	enableDiagnostics := false
 	enableDiagVerbose := false
@@ -615,12 +666,14 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 	enablePreparedL2 := false
 	enableReplyL2Cache := false
 	pluginPipelineEnabled := false
+	forceLegacyAttach := false
+	enableFlowCache := cfg.KernelTCFlowCacheEnabled()
 	tcpIdleTimeoutSeconds := int64(0)
 	if cfg != nil {
 		rulesLimit = cfg.KernelRulesMapLimit
 		flowsLimit = cfg.KernelFlowsMapLimit
 		natLimit = cfg.KernelNATMapLimit
-		natPortMin, natPortMax = effectiveKernelNATPortRange(cfg.KernelNATPortMin, cfg.KernelNATPortMax)
+		natPortMin, natPortMax = cfg.KernelNATPortMin, cfg.KernelNATPortMax
 		enableTrafficStats = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTraffic)
 		enableDiagnostics = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiag)
 		enableDiagVerbose = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCDiagVerbose)
@@ -629,9 +682,15 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 		enableReplyL2Cache = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCReplyL2Cache)
 		pluginPipelineEnabled = cfg.PluginsEnabled() && cfg.PluginsDataplaneEnabled()
 		tcpIdleTimeoutSeconds = cfg.KernelTCPEstablishedIdleTimeoutSeconds
+		forceLegacyAttach = cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTCLegacyAttach)
 	}
 	if enableDiagVerbose {
 		enableDiagnostics = true
+	}
+	natPortMin, natPortMax = effectiveKernelNATPortWindow(kernelEngineTC, natPortMin, natPortMax)
+	flowCacheDisabledBy := ""
+	if enableFlowCache {
+		flowCacheDisabledBy = kernelTCFlowCacheDisabledBy(enableReplyL2Cache, enableRedirectNeighFast)
 	}
 	return &linuxKernelRuleRuntime{
 		cfg:                     cfg,
@@ -650,7 +709,17 @@ func newTCKernelRuleRuntime(cfg *Config) *linuxKernelRuleRuntime {
 		enablePreparedL2:        enablePreparedL2,
 		enableReplyL2Cache:      enableReplyL2Cache,
 		pluginPipelineEnabled:   pluginPipelineEnabled,
+		// The attach API stays fixed for the life of the runtime, so
+		// reconciles never mix filters and links for one position.
+		tcxAllowed:          !forceLegacyAttach,
+		enableFlowCache:     enableFlowCache && flowCacheDisabledBy == "",
+		flowCacheDisabledBy: flowCacheDisabledBy,
 	}
+}
+
+// useTCX reports whether the core programs attach through tcx.
+func (rt *linuxKernelRuleRuntime) useTCX() bool {
+	return rt != nil && rt.tcxAllowed && kernelTCXSupported()
 }
 
 func (rt *linuxKernelRuleRuntime) natConfigFlags() uint32 {
@@ -720,6 +789,11 @@ func (rt *linuxKernelRuleRuntime) ensureAvailabilityInitialized() {
 		}
 		if rt.enableReplyL2Cache {
 			rt.availableReason += "; kernel_tc_reply_l2_cache experimental path enabled"
+		}
+		if rt.enableFlowCache {
+			rt.availableReason += "; kernel_tc_flow_cache enabled"
+		} else if rt.flowCacheDisabledBy != "" {
+			rt.availableReason += "; kernel_tc_flow_cache off while " + rt.flowCacheDisabledBy + " is enabled"
 		}
 	})
 }
@@ -796,7 +870,16 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	}
 
 	prepareStartedAt := time.Now()
-	prepared, forwardIfRules, replyIfRules, parentIfMap, prepareResults, skipLines := prepareKernelRules(rules, rt.preparedRules, rt.coll != nil, rt.enableTrafficStats, rt.enablePreparedL2, rt.enableReplyL2Cache)
+	pathHold := rt.newBridgePathHoldLocked()
+	prepared, forwardIfRules, replyIfRules, parentIfMap, prepareResults, skipLines := prepareKernelRulesHoldingPaths(rules, rt.preparedRules, rt.coll != nil, rt.enableTrafficStats, rt.enablePreparedL2, rt.enableReplyL2Cache, pathHold)
+	rt.pathHolds = pathHold.heldRevisions()
+	rt.lastPathHoldLog = logKernelPathHolds(rt.lastPathHoldLog, pathHold)
+	flowPurgePlan := planPreparedKernelRuleFlowPurge(rt.deferredFlows.items, rt.preparedRules, prepared, time.Now(), kernelLinkIndexExists)
+	for _, item := range flowPurgePlan.deferred {
+		// Keep the reply hook of a deferred rule: replies that still reach its
+		// flows are delivered instead of being reset by the host stack.
+		recordPreparedKernelReplyTargets(replyIfRules, parentIfMap, item.rule, item.rule.rule.ID)
+	}
 	attachmentRuleSets := kernelAttachmentRuleSetsForPrepared(forwardIfRules, replyIfRules)
 	reconcileMetrics.PrepareDuration = time.Since(prepareStartedAt)
 	reconcileMetrics.PreparedEntries = len(prepared)
@@ -845,7 +928,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		}
 	}
 	samePrepared := rt.samePreparedRulesLocked(prepared, attachmentRuleSets)
-	desiredLocalIPv4s, localIPv4Err := buildKernelEgressNATLocalIPv4Set(rules)
+	desiredLocal, localIPv4Err := buildKernelEgressNATLocalInventory(rules)
 	desiredLocalMACs := buildKernelLocalMACMap(prepared)
 	if localIPv4Err != nil && !samePrepared {
 		msg := fmt.Sprintf("build kernel egress nat local IPv4 inventory: %v", localIPv4Err)
@@ -861,7 +944,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	if samePrepared {
 		if localIPv4Err != nil {
 			log.Printf("kernel dataplane reconcile: keep current local IPv4 bypass inventory after refresh failure: %v", localIPv4Err)
-		} else if err := syncKernelLocalIPv4Map(rt.coll.Maps[kernelLocalIPv4MapName], desiredLocalIPv4s); err != nil {
+		} else if err := syncKernelEgressNATLocalMaps(rt.coll.Maps[kernelLocalIPv4MapName], rt.coll.Maps[kernelLocalNetsMapName], desiredLocal); err != nil {
 			log.Printf("kernel dataplane reconcile: refresh local IPv4 bypass inventory failed: %v", err)
 		}
 		if err := syncKernelLocalMACMap(rt.coll.Maps[kernelLocalMACMapName], desiredLocalMACs); err != nil {
@@ -908,7 +991,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		)
 	}
 	if rt.canReconcileInPlaceLocked(desiredCapacities) && !preferFreshMapGrowth {
-		if err := rt.reconcileInPlaceLocked(prepared, attachmentRuleSets, parentIfMap, desiredLocalIPv4s, desiredLocalMACs, pluginCatalog, pluginDesired, pluginStates, pluginOnlyPipeline, results, &reconcileMetrics); err == nil {
+		if err := rt.reconcileInPlaceLocked(prepared, attachmentRuleSets, parentIfMap, desiredLocal, desiredLocalMACs, pluginCatalog, pluginDesired, pluginStates, pluginOnlyPipeline, flowPurgePlan, results, &reconcileMetrics); err == nil {
 			return results, nil
 		} else {
 			log.Printf("kernel dataplane reconcile: in-place update unavailable, falling back to collection rebuild: %v", err)
@@ -1135,16 +1218,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 			clearKernelHotRestartState(kernelEngineTC)
 		}
 	} else if state != nil {
-		if err := validateKernelHotRestartMapReplacements(spec, state.replacements, map[string]bool{
-			kernelFlowsMapName:           true,
-			kernelFlowsMapNameV6:         true,
-			kernelNatPortsMapName:        true,
-			kernelNatPortsMapNameV6:      true,
-			kernelTCFlowsOldMapNameV4:    true,
-			kernelTCFlowsOldMapNameV6:    true,
-			kernelTCNatPortsOldMapNameV4: true,
-			kernelTCNatPortsOldMapNameV6: true,
-		}); err != nil {
+		if err := validateKernelHotRestartMapReplacements(spec, state.replacements, kernelTCHotRestartFlexibleCapacityMaps()); err != nil {
 			log.Printf(
 				"kernel dataplane hot restart: preserved tc maps are incompatible, abandoning handoff and falling back to fresh maps (cold restart): %s",
 				kernelHotRestartIncompatibilityReason(err),
@@ -1278,6 +1352,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		}
 		return results, nil
 	}
+	rt.completeAttachmentPrograms(&attachmentPrograms, coll)
 	if err := configureTCFlowMigrationState(pieces, tcFlowMigrationFlags); err != nil {
 		coll.Close()
 		msg := fmt.Sprintf("configure tc flow migration state: %v", err)
@@ -1309,6 +1384,9 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	}
 	if err := syncKernelOccupancyMapFromCollectionExact(coll, true); err != nil {
 		log.Printf("kernel dataplane reconcile: sync tc occupancy counters failed before attach: %v", err)
+	}
+	if err := configureKernelTCFlowCache(coll.Maps[kernelTCFlowCacheStateMapName], rt.enableFlowCache); err != nil {
+		log.Printf("kernel dataplane reconcile: configure tc flow cache failed, leaving it off: %v", err)
 	}
 	if err := syncKernelNATConfigMap(coll.Maps[kernelNATConfigMapName], rt.natPortMin, rt.natPortMax, rt.natConfigFlags()); err != nil {
 		coll.Close()
@@ -1347,7 +1425,12 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		}
 		return results, nil
 	}
-	if err := syncKernelLocalIPv4Map(coll.Maps[kernelLocalIPv4MapName], desiredLocalIPv4s); err != nil {
+	// The hints map starts out unknown, which makes every lookup, so a failure
+	// here leaves the programs correct.
+	if err := narrowKernelTCIfindexHints(coll, prepared); err != nil {
+		log.Printf("kernel dataplane reconcile: sync tc ifindex hints failed: %v", err)
+	}
+	if err := syncKernelEgressNATLocalMaps(coll.Maps[kernelLocalIPv4MapName], coll.Maps[kernelLocalNetsMapName], desiredLocal); err != nil {
 		coll.Close()
 		msg := fmt.Sprintf("sync kernel local IPv4 bypass map: %v", err)
 		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
@@ -1401,7 +1484,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 
 	for _, plan := range attachmentPlans {
 		ruleIDs := attachmentRuleSets.rules(plan.reply, plan.attach)[plan.ifindex]
-		if err := rt.attachProgramLocked(&newAttachments, plan.ifindex, plan.key.parent, plan.priority, plan.handleMinor, plan.name, plan.prog); err != nil {
+		if err := rt.attachProgramLocked(&newAttachments, plan, oldAttachments); err != nil {
 			log.Printf("kernel dataplane attach failed: program=%s ifindex=%d rules=%v err=%v", plan.name, plan.ifindex, ruleIDs, err)
 			label := "forward"
 			if plan.reply {
@@ -1471,6 +1554,9 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 			log.Printf("kernel dataplane hot restart: rollback transparent flow aliases after incomplete handoff: %v", rollbackErr)
 		}
 		rt.stateLog.Logf("kernel dataplane reconcile: no rules reached running state")
+		// cleanupLocked only knows the previous positions; a tcx link created
+		// in this pass would otherwise stay attached.
+		rt.deleteStaleAttachmentsLocked(newAttachments, rt.attachments)
 		coll.Close()
 		rt.cleanupLocked()
 		return results, nil
@@ -1488,8 +1574,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		}
 	}
 
-	flowPurgeTargets := collectPreparedKernelRuleFlowPurgeTargets(rt.preparedRules, prepared)
-	rt.flowPurgeRetry.add(flowPurgeTargets)
+	rt.flowPurgeRetry.add(flowPurgePlan.targets)
 	flowPurgeAttempt := rt.flowPurgeRetry.snapshot()
 	purgeCorrections := map[uint32]kernelRuleStats{}
 	purgedFlows := 0
@@ -1525,6 +1610,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	rt.coll = coll
 	rt.attachments = newAttachments
 	rt.preparedRules = clonePreparedKernelRules(prepared)
+	rt.deferredFlows.replace(flowPurgePlan.deferred)
 	rt.attachmentRuleSets = attachmentRuleSets.clone()
 	rt.attachmentMode = attachmentPrograms.mode
 	rt.rulesMapCapacity = actualCapacities.Rules
@@ -1551,7 +1637,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		mergeKernelStatsCorrections(rt.statsCorrection, purgeCorrections)
 		log.Printf("kernel dataplane reconcile: purged %d stale tc flow entry(s) for %d flow purge target(s)", purgedFlows, len(flowPurgeAttempt))
 	}
-	if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments, "")); err != nil {
+	if err := writeKernelRuntimeMetadata(kernelEngineTC, rt.runtimeMetadata()); err != nil {
 		log.Printf("kernel dataplane runtime metadata: write tc runtime metadata failed: %v", err)
 	}
 	if hotRestartState != nil {
@@ -1584,6 +1670,8 @@ func (rt *linuxKernelRuleRuntime) SnapshotStats() (kernelRuleStatsSnapshot, erro
 func (rt *linuxKernelRuleRuntime) Maintain() error {
 	startedAt := time.Now()
 	rt.mu.Lock()
+	rt.expireDeferredFlowRulesLocked(startedAt)
+	rt.checkBridgePathHoldsLocked()
 	pendingFlowPurgeDeleted, pendingFlowPurgeErr := rt.retryPendingFlowPurgesLocked()
 	if pendingFlowPurgeErr != nil {
 		rt.observability.recordMaintain(startedAt, time.Since(startedAt), kernelFlowPruneMetrics{Deleted: pendingFlowPurgeDeleted}, pendingFlowPurgeErr)
@@ -1922,49 +2010,38 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 		rt.cleanupLocked()
 		return true
 	}
-	maps := map[string]*ebpf.Map{
-		kernelFlowsMapName:    rt.coll.Maps[kernelFlowsMapName],
-		kernelNatPortsMapName: rt.coll.Maps[kernelNatPortsMapName],
-	}
-	if rt.coll.Maps[kernelFlowsMapNameV6] != nil {
-		maps[kernelFlowsMapNameV6] = rt.coll.Maps[kernelFlowsMapNameV6]
-	}
-	if rt.coll.Maps[kernelNatPortsMapNameV6] != nil {
-		maps[kernelNatPortsMapNameV6] = rt.coll.Maps[kernelNatPortsMapNameV6]
-	}
-	if existingMigrationFlags&tcFlowMigrationFlagV4Old != 0 {
-		if m := rt.coll.Maps[kernelTCFlowsOldMapNameV4]; m != nil {
-			maps[kernelTCFlowsOldMapNameV4] = m
-		}
-		if m := rt.coll.Maps[kernelTCNatPortsOldMapNameV4]; m != nil {
-			maps[kernelTCNatPortsOldMapNameV4] = m
-		}
-	}
-	if existingMigrationFlags&tcFlowMigrationFlagV6Old != 0 {
-		if m := rt.coll.Maps[kernelTCFlowsOldMapNameV6]; m != nil {
-			maps[kernelTCFlowsOldMapNameV6] = m
-		}
-		if m := rt.coll.Maps[kernelTCNatPortsOldMapNameV6]; m != nil {
-			maps[kernelTCNatPortsOldMapNameV6] = m
-		}
-	}
-	if kernelHotRestartSkipStatsRequested() {
+	skipStats := kernelHotRestartSkipStatsRequested()
+	if skipStats {
 		log.Printf("kernel dataplane hot restart: preserving tc flow/nat maps without %s as requested", kernelStatsMapName)
-	} else {
-		maps[kernelStatsMapName] = rt.coll.Maps[kernelStatsMapName]
+	}
+	present := func(name string) bool { return rt.coll.Maps[name] != nil }
+	maps := make(map[string]*ebpf.Map, 9)
+	for _, name := range kernelTCHotRestartPreservedMapNames(present, existingMigrationFlags, skipStats) {
+		maps[name] = rt.coll.Maps[name]
 	}
 	if err := pinKernelHotRestartMaps(kernelEngineTC, maps); err != nil {
 		log.Printf("kernel dataplane hot restart: preserve tc maps failed, falling back to full cleanup: %v", err)
 		rt.cleanupLocked()
 		return true
 	}
-	// Full NAT, egress NAT and every plugin stage are tail calls. Without the
-	// pins the kernel empties tc_prog_chain_v4 and tc_plugin_hooks_v4 when this
-	// process exits, and the filters left for the successor pass those packets
-	// unprocessed.
+	// Full NAT, egress NAT and its new flows, every plugin stage, the ICMP
+	// error translators and the later-fragment programs are tail calls.
+	// Without the pins the kernel empties tc_prog_chain_v4,
+	// tc_egress_nat_new_chain_v4, tc_plugin_hooks_v4, tc_icmp_error_chain_v4
+	// and tc_fragment_chain_v4 when this process exits, and the filters left
+	// for the successor pass those packets unprocessed.
 	err = pinKernelHotRestartTailCalls(kernelEngineTC, kernelTCProgramChainMapName, rt.coll.Maps[kernelTCProgramChainMapName])
 	if err == nil {
+		err = pinKernelHotRestartTailCalls(kernelEngineTC, kernelTCEgressNATNewChainMapName, rt.coll.Maps[kernelTCEgressNATNewChainMapName])
+	}
+	if err == nil {
 		err = pinKernelHotRestartTailCalls(kernelEngineTC, kernelTCPluginHooksMapName, rt.coll.Maps[kernelTCPluginHooksMapName])
+	}
+	if err == nil {
+		err = pinKernelHotRestartTailCalls(kernelEngineTC, kernelTCICMPErrorChainMapName, rt.coll.Maps[kernelTCICMPErrorChainMapName])
+	}
+	if err == nil {
+		err = pinKernelHotRestartTailCalls(kernelEngineTC, kernelTCFragmentChainMapName, rt.coll.Maps[kernelTCFragmentChainMapName])
 	}
 	if err != nil {
 		clearKernelHotRestartState(kernelEngineTC)
@@ -1979,6 +2056,7 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 			kernelForwardFullNATExistingProgramName: rt.coll.Programs[kernelForwardFullNATExistingProgramName],
 			kernelForwardFullNATNewProgramName:      rt.coll.Programs[kernelForwardFullNATNewProgramName],
 			kernelForwardEgressNATProgramName:       rt.coll.Programs[kernelForwardEgressNATProgramName],
+			kernelForwardEgressNATNewProgramName:    rt.coll.Programs[kernelForwardEgressNATNewProgramName],
 			kernelReplyTransparentProgramName:       rt.coll.Programs[kernelReplyTransparentProgramName],
 			kernelReplyFullNATProgramName:           rt.coll.Programs[kernelReplyFullNATProgramName],
 		}
@@ -1993,6 +2071,12 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 			rt.cleanupLocked()
 			return true
 		}
+	}
+	if err := pinKernelTCXAttachments(rt.attachments); err != nil {
+		clearKernelHotRestartState(kernelEngineTC)
+		log.Printf("kernel dataplane hot restart: preserve tcx links failed, falling back to full cleanup: %v", err)
+		rt.cleanupLocked()
+		return true
 	}
 	if err := writeKernelHotRestartMetadata(
 		kernelEngineTC,
@@ -2019,6 +2103,8 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPurgeRetry.reset()
+	rt.deferredFlows.reset()
+	rt.pathHolds = nil
 	rt.flowPruneState = kernelFlowPruneState{}
 	rt.oldFlowPruneState = kernelFlowPruneState{}
 	rt.maintenanceState.reset()
@@ -2032,9 +2118,7 @@ func (rt *linuxKernelRuleRuntime) prepareHotRestartLocked() bool {
 
 func (rt *linuxKernelRuleRuntime) cleanupLocked() {
 	for i := len(rt.attachments) - 1; i >= 0; i-- {
-		if rt.attachments[i].filter != nil {
-			_ = netlink.FilterDel(rt.attachments[i].filter)
-		}
+		deleteKernelAttachment(rt.attachments[i])
 	}
 	rt.cleanupPluginPipelineLocked()
 	clearKernelRuntimeMetadata(kernelEngineTC)
@@ -2049,6 +2133,8 @@ func (rt *linuxKernelRuleRuntime) cleanupLocked() {
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPurgeRetry.reset()
+	rt.deferredFlows.reset()
+	rt.pathHolds = nil
 	rt.flowPruneState = kernelFlowPruneState{}
 	rt.oldFlowPruneState = kernelFlowPruneState{}
 	rt.maintenanceState.reset()
@@ -2108,6 +2194,9 @@ func (rt *linuxKernelRuleRuntime) retainMatchingRulesLocked(rules []Rule) (map[i
 			return nil, fmt.Errorf("delete stale preserved kernel rule %d: %w", item.rule.ID, err)
 		}
 	}
+	if err := narrowKernelTCIfindexHints(rt.coll, kept); err != nil {
+		log.Printf("kernel dataplane reconcile: narrow tc ifindex hints after retaining rules failed: %v", err)
+	}
 	rt.preparedRules = kept
 	capacities := rt.currentMapCapacitiesLocked()
 	rt.rulesMapCapacity = capacities.Rules
@@ -2145,6 +2234,7 @@ func kernelAttachmentKeyForFilter(filter *netlink.BpfFilter) kernelAttachmentKey
 func desiredKernelAttachmentPlansForRuleSets(sets kernelAttachmentRuleSets, programs kernelAttachmentPrograms) []kernelAttachmentPlan {
 	targetCount := len(sets.ForwardIngress) + len(sets.ReplyIngress) + len(sets.ForwardEgress) + len(sets.ReplyEgress)
 	plans := make([]kernelAttachmentPlan, 0, targetCount*2)
+	tcx := programs.tcx
 	appendPlans := func(targets map[int][]int64, reply bool, attach uint32, prog *ebpf.Program, progV6 *ebpf.Program) {
 		parent := uint32(netlink.HANDLE_MIN_INGRESS)
 		priority := uint16(kernelForwardFilterPrio)
@@ -2177,6 +2267,7 @@ func desiredKernelAttachmentPlansForRuleSets(sets kernelAttachmentRuleSets, prog
 					parent:    parent,
 					priority:  priority,
 					handle:    netlink.MakeHandle(0, handle),
+					tcx:       tcx,
 				},
 				ifindex:     ifindex,
 				priority:    priority,
@@ -2193,6 +2284,7 @@ func desiredKernelAttachmentPlansForRuleSets(sets kernelAttachmentRuleSets, prog
 						parent:    parent,
 						priority:  priorityV6,
 						handle:    netlink.MakeHandle(0, handleV6),
+						tcx:       tcx,
 					},
 					ifindex:     ifindex,
 					priority:    priorityV6,
@@ -2382,6 +2474,10 @@ func collectPreparedKernelRuleFlowPurgeTargets(oldItems []preparedKernelRule, ne
 		used := make([]bool, len(nextGroup))
 		for _, item := range oldGroup {
 			if item.rule.ID <= 0 || item.rule.ID > int64(^uint32(0)) {
+				continue
+			}
+			// A drop guard drops before any flow lookup, so it never owns flows.
+			if item.value.Flags&kernelRuleFlagDrop != 0 {
 				continue
 			}
 			revision, err := preparedKernelRuleFlowRevision(item)
@@ -2880,18 +2976,18 @@ func mergeKernelAttachments(oldAttachments, newAttachments []kernelAttachment) [
 	out := make([]kernelAttachment, 0, len(oldAttachments)+len(newAttachments))
 	seen := make(map[kernelAttachmentKey]struct{}, len(oldAttachments)+len(newAttachments))
 	for _, att := range newAttachments {
-		if att.filter == nil {
+		key, ok := att.key()
+		if !ok {
 			continue
 		}
-		key := kernelAttachmentKeyForFilter(att.filter)
 		seen[key] = struct{}{}
 		out = append(out, att)
 	}
 	for _, att := range oldAttachments {
-		if att.filter == nil {
+		key, ok := att.key()
+		if !ok {
 			continue
 		}
-		key := kernelAttachmentKeyForFilter(att.filter)
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -2951,12 +3047,16 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 			return fmt.Errorf("clear kernel rule key during drain: %w", err)
 		}
 	}
-	if err := syncKernelLocalIPv4Map(rt.coll.Maps[kernelLocalIPv4MapName], nil); err != nil {
+	if err := narrowKernelTCIfindexHints(rt.coll, nil); err != nil {
+		log.Printf("kernel dataplane reconcile: narrow tc ifindex hints during drain failed: %v", err)
+	}
+	if err := syncKernelEgressNATLocalMaps(rt.coll.Maps[kernelLocalIPv4MapName], rt.coll.Maps[kernelLocalNetsMapName], kernelEgressNATLocalInventory{}); err != nil {
 		return fmt.Errorf("clear kernel local IPv4 bypass map during drain: %w", err)
 	}
 	if err := syncKernelLocalMACMap(rt.coll.Maps[kernelLocalMACMapName], nil); err != nil {
 		return fmt.Errorf("clear kernel local MAC guard map during drain: %w", err)
 	}
+	rt.deferredFlows.record(clonePreparedKernelRules(rt.preparedRules), time.Now())
 	rt.preparedRules = nil
 	if rt.cleanupIdlePluginPipelineRuntimeLocked("rule drain") {
 		return nil
@@ -2973,7 +3073,7 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
 	if len(rt.attachments) > 0 {
-		if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments, "")); err != nil {
+		if err := writeKernelRuntimeMetadata(kernelEngineTC, rt.runtimeMetadata()); err != nil {
 			log.Printf("kernel dataplane runtime metadata: refresh tc runtime metadata failed after rule drain: %v", err)
 		}
 	}
@@ -2981,12 +3081,15 @@ func (rt *linuxKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	return nil
 }
 
-func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKernelRule, attachmentRuleSets kernelAttachmentRuleSets, parentIfMap map[uint32]uint32, localIPv4s map[uint32]uint8, localMACs map[uint32]kernelLocalMACValue, pluginCatalog PluginCatalog, pluginDesired []kernelPluginPipelineDesiredPlugin, pluginStates map[string]PluginRuntimeState, pluginOnlyPipeline bool, results map[int64]kernelRuleApplyResult, metrics *kernelReconcileMetrics) error {
-	flowPurgeTargets := collectPreparedKernelRuleFlowPurgeTargets(rt.preparedRules, prepared)
+func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKernelRule, attachmentRuleSets kernelAttachmentRuleSets, parentIfMap map[uint32]uint32, local kernelEgressNATLocalInventory, localMACs map[uint32]kernelLocalMACValue, pluginCatalog PluginCatalog, pluginDesired []kernelPluginPipelineDesiredPlugin, pluginStates map[string]PluginRuntimeState, pluginOnlyPipeline bool, flowPurgePlan kernelFlowPurgePlan, results map[int64]kernelRuleApplyResult, metrics *kernelReconcileMetrics) error {
 	pieces, err := lookupKernelCollectionPieces(rt.coll)
 	if err != nil {
 		return err
 	}
+	// Rules, parents, local addresses and flows may change below; no entry
+	// the flow cache recorded from the old state may outlive the change.
+	invalidateKernelTCFlowCache(pieces.flowCacheState)
+	defer settleKernelTCFlowCache(pieces.flowCacheState)
 	rt.reconcilePluginPipelineLocked(pluginCatalog, pieces, pluginDesired, pluginStates, kernelPluginPipelineCoreConfig{Forward: len(prepared) > 0, Reply: len(prepared) > 0})
 	if pluginOnlyPipeline && !rt.pluginPipelineActive {
 		return fmt.Errorf("explicit plugin pipeline attachment skipped because no plugin programs are active")
@@ -2996,6 +3099,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	if err != nil {
 		return err
 	}
+	rt.completeAttachmentPrograms(&attachmentPrograms, rt.coll)
 
 	diff, err := diffPreparedKernelRules(rt.preparedRules, prepared)
 	if err != nil {
@@ -3007,10 +3111,9 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	}
 	currentAttachments := make(map[kernelAttachmentKey]kernelAttachment, len(rt.attachments))
 	for _, att := range rt.attachments {
-		if att.filter == nil {
-			continue
+		if key, ok := att.key(); ok {
+			currentAttachments[key] = att
 		}
-		currentAttachments[kernelAttachmentKeyForFilter(att.filter)] = att
 	}
 	plannedKeys := make([]kernelAttachmentKey, 0, len(plans))
 	expectedAttachments := make(map[kernelAttachmentKey]kernelAttachmentExpectation, len(plans))
@@ -3018,7 +3121,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 		plannedKeys = append(plannedKeys, plan.key)
 		expectedAttachments[plan.key] = kernelAttachmentExpectationForPlan(plan)
 	}
-	observedAttachments := kernelAttachmentObservations(plannedKeys)
+	observedAttachments := kernelAttachmentObservations(plannedKeys, rt.attachments)
 
 	newAttachments := make([]kernelAttachment, 0, len(plans))
 	createdAttachments := make([]kernelAttachment, 0, len(plans))
@@ -3030,7 +3133,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 		if current, ok := currentAttachments[plan.key]; ok && kernelAttachmentObservationMatchesExpectation(observedAttachments[plan.key], expectedAttachments[plan.key]) {
 			newAttachments = append(newAttachments, current)
 		} else {
-			if err := rt.attachProgramLocked(&createdAttachments, plan.ifindex, plan.key.parent, plan.priority, plan.handleMinor, plan.name, plan.prog); err != nil {
+			if err := rt.attachProgramLocked(&createdAttachments, plan, rt.attachments); err != nil {
 				rt.discardAttachmentsLocked(createdAttachments)
 				return fmt.Errorf("attach %s on ifindex %d: %w", plan.name, plan.ifindex, err)
 			}
@@ -3047,8 +3150,8 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	}
 	attachDuration := time.Since(attachStartedAt)
 
-	if len(localIPv4s) > 0 {
-		if err := syncKernelLocalIPv4Map(rt.coll.Maps[kernelLocalIPv4MapName], localIPv4s); err != nil {
+	if !local.empty() {
+		if err := syncKernelEgressNATLocalMaps(rt.coll.Maps[kernelLocalIPv4MapName], rt.coll.Maps[kernelLocalNetsMapName], local); err != nil {
 			rt.discardAttachmentsLocked(createdAttachments)
 			return fmt.Errorf("sync kernel local IPv4 bypass map: %w", err)
 		}
@@ -3063,6 +3166,10 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 		rt.discardAttachmentsLocked(createdAttachments)
 		return fmt.Errorf("sync kernel nat config map: %w", err)
 	}
+	if err := widenKernelTCIfindexHints(rt.coll, rt.preparedRules, prepared, parentIfMap); err != nil {
+		rt.discardAttachmentsLocked(createdAttachments)
+		return fmt.Errorf("widen tc ifindex hints: %w", err)
+	}
 	if err := applyKernelDualStackRuleMapDiff(pieces, diff); err != nil {
 		rt.discardAttachmentsLocked(createdAttachments)
 		return err
@@ -3071,8 +3178,11 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 		rt.discardAttachmentsLocked(createdAttachments)
 		return fmt.Errorf("sync kernel reply parent map: %w", err)
 	}
-	if len(localIPv4s) == 0 {
-		if err := syncKernelLocalIPv4Map(rt.coll.Maps[kernelLocalIPv4MapName], nil); err != nil {
+	if err := narrowKernelTCIfindexHints(rt.coll, prepared); err != nil {
+		log.Printf("kernel dataplane reconcile: narrow tc ifindex hints failed: %v", err)
+	}
+	if local.empty() {
+		if err := syncKernelEgressNATLocalMaps(rt.coll.Maps[kernelLocalIPv4MapName], rt.coll.Maps[kernelLocalNetsMapName], kernelEgressNATLocalInventory{}); err != nil {
 			rt.discardAttachmentsLocked(createdAttachments)
 			return fmt.Errorf("sync kernel local IPv4 bypass map: %w", err)
 		}
@@ -3085,15 +3195,14 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	}
 
 	oldAttachments := append([]kernelAttachment(nil), rt.attachments...)
-	mergedAttachments := mergeKernelAttachments(oldAttachments, newAttachments)
-	finalAttachments := mergedAttachments
-	detachedAttachments := 0
-	preservedAttachments := len(mergedAttachments) - len(newAttachments)
+	var finalAttachments []kernelAttachment
 	if attachmentReset {
 		finalAttachments = append([]kernelAttachment(nil), newAttachments...)
-		detachedAttachments = kernelAttachmentDeleteCount(oldAttachments, newAttachments)
-		preservedAttachments = 0
+	} else {
+		finalAttachments = withoutUnplannedFlowCache(mergeKernelAttachments(oldAttachments, newAttachments), newAttachments)
 	}
+	detachedAttachments := kernelAttachmentDeleteCount(oldAttachments, finalAttachments)
+	preservedAttachments := len(finalAttachments) - len(newAttachments)
 
 	runningAny := false
 	for _, item := range prepared {
@@ -3119,6 +3228,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	actualCapacities := rt.currentMapCapacitiesLocked()
 	rt.attachments = finalAttachments
 	rt.preparedRules = clonePreparedKernelRules(prepared)
+	rt.deferredFlows.replace(flowPurgePlan.deferred)
 	rt.attachmentRuleSets = attachmentRuleSets.clone()
 	rt.attachmentMode = attachmentPrograms.mode
 	rt.rulesMapCapacity = actualCapacities.Rules
@@ -3152,7 +3262,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	rt.maintenanceState.requestFull()
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
-	rt.flowPurgeRetry.add(flowPurgeTargets)
+	rt.flowPurgeRetry.add(flowPurgePlan.targets)
 	flowPurgeAttempt := rt.flowPurgeRetry.snapshot()
 	flowPurgeDeleted := 0
 	flowPurgeDuration := time.Duration(0)
@@ -3187,12 +3297,16 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 		metrics.AttachDuration = attachDuration
 		metrics.FlowPurgeDuration = flowPurgeDuration
 	}
-	if err := writeKernelRuntimeMetadata(kernelEngineTC, kernelHotRestartTCMetadata(rt.attachments, "")); err != nil {
+	if err := writeKernelRuntimeMetadata(kernelEngineTC, rt.runtimeMetadata()); err != nil {
 		log.Printf("kernel dataplane runtime metadata: write tc runtime metadata failed after in-place update: %v", err)
 	}
-	if attachmentReset && detachedAttachments > 0 {
-		rt.deleteStaleAttachmentsLocked(oldAttachments, newAttachments)
-		log.Printf("kernel dataplane reconcile: detached %d stale tc attachment(s) after egress attachment reset", detachedAttachments)
+	if detachedAttachments > 0 {
+		rt.deleteStaleAttachmentsLocked(oldAttachments, finalAttachments)
+		if attachmentReset {
+			log.Printf("kernel dataplane reconcile: detached %d stale tc attachment(s) after egress attachment reset", detachedAttachments)
+		} else {
+			log.Printf("kernel dataplane reconcile: detached %d tc flow cache attachment(s) no longer planned", detachedAttachments)
+		}
 	}
 	rt.stateLog.Logf(
 		"kernel dataplane reconcile: updated %d active kernel entry(s) in-place (upsert=%d delete=%d attach=%d detach=%d preserve=%d)",
@@ -3210,19 +3324,14 @@ func kernelAttachmentDeleteCount(oldAttachments, newAttachments []kernelAttachme
 	if len(oldAttachments) == 0 {
 		return 0
 	}
-	newKeys := make(map[kernelAttachmentKey]struct{}, len(newAttachments))
-	for _, att := range newAttachments {
-		if att.filter == nil {
-			continue
-		}
-		newKeys[kernelAttachmentKeyForFilter(att.filter)] = struct{}{}
-	}
+	newKeys := kernelAttachmentKeySet(newAttachments)
 	count := 0
 	for _, att := range oldAttachments {
-		if att.filter == nil {
+		key, ok := att.key()
+		if !ok {
 			continue
 		}
-		if _, ok := newKeys[kernelAttachmentKeyForFilter(att.filter)]; ok {
+		if _, ok := newKeys[key]; ok {
 			continue
 		}
 		count++
@@ -3248,46 +3357,92 @@ func (rt *linuxKernelRuleRuntime) discardAttachmentsLocked(attachments []kernelA
 	if err := update.rollback(); err != nil {
 		log.Printf("kernel dataplane rollback: restore tc attachments failed: %v", err)
 	}
+	// A tcx position that existed before gets its previous program back; one
+	// this attempt created is detached.
+	previousTCX := make(map[kernelAttachmentKey]*kernelTCXAttachment)
+	for _, att := range rt.attachments {
+		if att.tcx != nil {
+			previousTCX[att.tcx.key] = att.tcx
+		}
+	}
+	for i := len(attachments) - 1; i >= 0; i-- {
+		installed := attachments[i].tcx
+		if installed == nil || installed.slot == nil || installed.slot.link == nil {
+			continue
+		}
+		if previous := previousTCX[installed.key]; previous != nil && previous.prog != nil {
+			if err := installed.slot.link.Update(previous.prog); err != nil {
+				log.Printf("kernel dataplane rollback: restore tcx link of %s on ifindex %d failed: %v", previous.name, installed.key.linkIndex, err)
+			}
+			continue
+		}
+		detachKernelTCXSlot(installed.slot)
+	}
+}
+
+func kernelAttachmentKeySet(attachments []kernelAttachment) map[kernelAttachmentKey]struct{} {
+	keys := make(map[kernelAttachmentKey]struct{}, len(attachments))
+	for _, att := range attachments {
+		if key, ok := att.key(); ok {
+			keys[key] = struct{}{}
+		}
+	}
+	return keys
 }
 
 func (rt *linuxKernelRuleRuntime) deleteStaleAttachmentsLocked(oldAttachments, newAttachments []kernelAttachment) {
-	newKeys := make(map[kernelAttachmentKey]struct{}, len(newAttachments))
-	for _, att := range newAttachments {
-		if att.filter == nil {
-			continue
-		}
-		newKeys[kernelAttachmentKeyForFilter(att.filter)] = struct{}{}
-	}
-
+	newKeys := kernelAttachmentKeySet(newAttachments)
 	for _, att := range oldAttachments {
-		if att.filter == nil {
+		key, ok := att.key()
+		if !ok {
 			continue
 		}
-		if _, ok := newKeys[kernelAttachmentKeyForFilter(att.filter)]; ok {
+		if _, ok := newKeys[key]; ok {
 			continue
 		}
-		_ = netlink.FilterDel(att.filter)
+		deleteKernelAttachment(att)
 	}
 }
 
-func (rt *linuxKernelRuleRuntime) attachProgramLocked(dst *[]kernelAttachment, ifindex int, parent uint32, priority uint16, handleMinor uint16, name string, prog *ebpf.Program) error {
-	if prog == nil {
-		return fmt.Errorf("tc program %q is unavailable", name)
+func deleteKernelAttachment(att kernelAttachment) {
+	if att.filter != nil {
+		_ = netlink.FilterDel(att.filter)
 	}
-	if err := ensureClsactQdisc(ifindex); err != nil {
+	if att.tcx != nil {
+		detachKernelTCXSlot(att.tcx.slot)
+	}
+}
+
+// attachProgramLocked puts plan.prog into the position of plan. live holds
+// attachments that may already own the position; those attached earlier in
+// the same pass come from dst.
+func (rt *linuxKernelRuleRuntime) attachProgramLocked(dst *[]kernelAttachment, plan kernelAttachmentPlan, live []kernelAttachment) error {
+	prog := plan.prog
+	if prog == nil {
+		return fmt.Errorf("tc program %q is unavailable", plan.name)
+	}
+	if plan.key.tcx {
+		att, err := attachKernelTCX(plan, *dst, live)
+		if err != nil {
+			return err
+		}
+		*dst = append(*dst, att)
+		return nil
+	}
+	if err := ensureClsactQdisc(plan.ifindex); err != nil {
 		return err
 	}
 
 	filter := &netlink.BpfFilter{
 		FilterAttrs: netlink.FilterAttrs{
-			LinkIndex: ifindex,
-			Handle:    netlink.MakeHandle(0, handleMinor),
-			Parent:    parent,
-			Priority:  priority,
+			LinkIndex: plan.ifindex,
+			Handle:    netlink.MakeHandle(0, plan.handleMinor),
+			Parent:    plan.key.parent,
+			Priority:  plan.priority,
 			Protocol:  unix.ETH_P_ALL,
 		},
 		Fd:           prog.FD(),
-		Name:         name,
+		Name:         plan.name,
 		Id:           int(kernelProgramID(prog)),
 		DirectAction: true,
 	}
@@ -3312,18 +3467,18 @@ func ensureClsactQdisc(ifindex int) error {
 }
 
 func loadEmbeddedKernelCollectionSpec(enableTrafficStats bool) (*ebpf.CollectionSpec, error) {
-	objectBytes := embeddedForwardTCObject
-	objectName := "internal/app/ebpf/forward-tc-bpf.o"
-	if enableTrafficStats {
-		objectBytes = embeddedForwardTCStatsObject
-		objectName = "internal/app/ebpf/forward-tc-bpf-stats.o"
+	if len(embeddedForwardTCObject) == 0 {
+		return nil, fmt.Errorf("embedded tc eBPF object is empty; build %s before compiling", kernelTCObjectName)
 	}
-	if len(objectBytes) == 0 {
-		return nil, fmt.Errorf("embedded tc eBPF object is empty; build %s before compiling", objectName)
-	}
-	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(objectBytes))
+	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(embeddedForwardTCObject))
 	if err != nil {
 		return nil, fmt.Errorf("load embedded tc eBPF object: %w", err)
+	}
+	if err := setKernelLoadSettings(spec, enableTrafficStats); err != nil {
+		return nil, fmt.Errorf("embedded tc eBPF object: %w", err)
+	}
+	if kernelCoarseClockSupported() {
+		useKernelCoarseClock(spec)
 	}
 	return spec, nil
 }
@@ -3456,6 +3611,9 @@ func configureTCKernelProgramChain(pieces kernelCollectionPieces, pluginPipeline
 	if err := pieces.progChainV4.Put(uint32(tcProgramChainIndexV4ReplyFullNAT), uint32(pieces.replyFullNATProg.FD())); err != nil {
 		return fmt.Errorf("install tc IPv4 reply full-nat tail-call target: %w", err)
 	}
+	if err := configureKernelTCEgressNATNewChain(pieces); err != nil {
+		return err
+	}
 	if kernelCollectionPiecesSupportFullNATSplitV4(pieces) {
 		if err := pieces.progChainV4.Put(uint32(tcProgramChainIndexV4FullNATExisting), uint32(pieces.forwardFullNATExistingProg.FD())); err != nil {
 			return fmt.Errorf("install tc IPv4 full-nat existing tail-call target: %w", err)
@@ -3493,7 +3651,10 @@ func configureTCKernelProgramChain(pieces kernelCollectionPieces, pluginPipeline
 			return fmt.Errorf("install tc plugin reply post-apply continue tail-call target: %w", err)
 		}
 	}
-	return nil
+	if err := configureKernelTCICMPErrorChain(pieces); err != nil {
+		return err
+	}
+	return configureKernelTCFragmentChain(pieces)
 }
 
 func configureTCFlowMigrationState(pieces kernelCollectionPieces, flags uint32) error {
@@ -3652,6 +3813,7 @@ func validateKernelCollectionSpec(spec *ebpf.CollectionSpec) error {
 			kernelForwardTransparentProgramName,
 			kernelForwardFullNATProgramName,
 			kernelForwardEgressNATProgramName,
+			kernelForwardEgressNATNewProgramName,
 			kernelReplyDispatchProgramName,
 			kernelReplyTransparentProgramName,
 			kernelReplyFullNATProgramName,
@@ -3660,8 +3822,10 @@ func validateKernelCollectionSpec(spec *ebpf.CollectionSpec) error {
 				return fmt.Errorf("embedded tc eBPF object has incomplete IPv4 dispatcher set: missing program %q", name)
 			}
 		}
-		if _, ok := spec.Maps[kernelTCProgramChainMapName]; !ok {
-			return fmt.Errorf("embedded tc eBPF object has incomplete IPv4 dispatcher set: missing map %q", kernelTCProgramChainMapName)
+		for _, name := range []string{kernelTCProgramChainMapName, kernelTCEgressNATNewChainMapName} {
+			if _, ok := spec.Maps[name]; !ok {
+				return fmt.Errorf("embedded tc eBPF object has incomplete IPv4 dispatcher set: missing map %q", name)
+			}
 		}
 		chain := spec.Maps[kernelTCProgramChainMapName]
 		if chain.Type != ebpf.ProgramArray || chain.MaxEntries < tcProgramChainV4MaxEntries {
@@ -3810,6 +3974,7 @@ func lookupKernelCollectionPieces(coll *ebpf.Collection) (kernelCollectionPieces
 		return kernelCollectionPieces{}, fmt.Errorf("kernel object is missing")
 	}
 	pieces := kernelCollectionPieces{
+		flowCacheState:              coll.Maps[kernelTCFlowCacheStateMapName],
 		forwardProg:                 coll.Programs[kernelForwardProgramName],
 		replyProg:                   coll.Programs[kernelReplyProgramName],
 		forwardProgV6:               coll.Programs[kernelForwardProgramNameV6],
@@ -3840,6 +4005,14 @@ func lookupKernelCollectionPieces(coll *ebpf.Collection) (kernelCollectionPieces
 		replyTransparentProg:        coll.Programs[kernelReplyTransparentProgramName],
 		replyFullNATProg:            coll.Programs[kernelReplyFullNATProgramName],
 		progChainV4:                 coll.Maps[kernelTCProgramChainMapName],
+		icmpErrorChainV4:            coll.Maps[kernelTCICMPErrorChainMapName],
+		icmpErrorForwardProg:        coll.Programs[kernelICMPErrorForwardProgramName],
+		icmpErrorReplyProg:          coll.Programs[kernelICMPErrorReplyProgramName],
+		fragmentChainV4:             coll.Maps[kernelTCFragmentChainMapName],
+		fragmentForwardProg:         coll.Programs[kernelFragmentForwardProgramName],
+		fragmentReplyProg:           coll.Programs[kernelFragmentReplyProgramName],
+		egressNATNewChainV4:         coll.Maps[kernelTCEgressNATNewChainMapName],
+		forwardEgressNATNewProg:     coll.Programs[kernelForwardEgressNATNewProgramName],
 		pluginHooksV4:               coll.Maps[kernelTCPluginHooksMapName],
 		pluginConfigV4:              coll.Maps[kernelTCPluginConfigMapName],
 		pluginInterfacesV4:          coll.Maps[kernelTCPluginInterfacesMapName],
@@ -4033,6 +4206,11 @@ func prepareKernelRuleRef(ctx *kernelPrepareContext, rule *Rule) ([]preparedKern
 	if err != nil {
 		return nil, fmt.Errorf("resolve outbound path on %q: %w", rule.OutInterface, err)
 	}
+	if ctx != nil {
+		if held, ok := ctx.heldPaths[rule.ID]; ok {
+			path = held
+		}
+	}
 	replyIfIndexes, replyIfParents, err := resolveTCReplyAttachments(outLink, path.outIfIndex)
 	if err != nil {
 		return nil, fmt.Errorf("resolve reply interfaces on %q: %w", rule.OutInterface, err)
@@ -4184,13 +4362,19 @@ func prepareKernelEgressNATRule(ctx *kernelPrepareContext, rule Rule, inLink net
 	}
 	var egressSrcMAC [6]byte
 	var egressDstMAC [6]byte
-	if normalizeEgressNATRedirectMode(rule.kernelRedirectMode) == egressNATRedirectModePreparedL2 {
+	switch normalizeEgressNATRedirectMode(rule.kernelRedirectMode) {
+	case egressNATRedirectModePreparedL2:
 		var redirectErr error
 		egressSrcMAC, egressDstMAC, redirectErr = resolveKernelEgressNATPreparedL2Redirect(outLink)
 		if redirectErr != nil {
 			return nil, fmt.Errorf("resolve egress nat prepared_l2 redirect on %q: %w", rule.OutInterface, redirectErr)
 		}
 		flags |= kernelRuleFlagPreparedL2
+	case "":
+		if mac, ok := kernelEgressNATExitWithoutARP(outLink); ok {
+			egressSrcMAC, egressDstMAC = mac, mac
+			flags |= kernelRuleFlagPreparedL2
+		}
 	}
 
 	prepared := make([]preparedKernelRule, 0, len(inLinks))
@@ -4322,6 +4506,10 @@ func prepareKernelEgressNATPassthroughRule(ctx *kernelPrepareContext, rule Rule,
 }
 
 func prepareKernelRules(rules []Rule, previous []preparedKernelRule, allowTransientReuse bool, enableTrafficStats bool, enablePreparedL2 bool, enableReplyL2Cache bool) ([]preparedKernelRule, map[int][]int64, map[int][]int64, map[uint32]uint32, map[int64]kernelRuleApplyResult, map[string]struct{}) {
+	return prepareKernelRulesHoldingPaths(rules, previous, allowTransientReuse, enableTrafficStats, enablePreparedL2, enableReplyL2Cache, nil)
+}
+
+func prepareKernelRulesHoldingPaths(rules []Rule, previous []preparedKernelRule, allowTransientReuse bool, enableTrafficStats bool, enablePreparedL2 bool, enableReplyL2Cache bool, pathHold *kernelBridgePathHold) ([]preparedKernelRule, map[int][]int64, map[int][]int64, map[uint32]uint32, map[int64]kernelRuleApplyResult, map[string]struct{}) {
 	prepared := make([]preparedKernelRule, 0, len(rules))
 	forwardIfRules := make(map[int][]int64)
 	replyIfRules := make(map[int][]int64)
@@ -4364,6 +4552,9 @@ func prepareKernelRules(rules []Rule, previous []preparedKernelRule, allowTransi
 			skipLogger.Add(rule, revisionErr)
 			results[rule.ID] = kernelRuleApplyResult{Error: revisionErr.Error()}
 			continue
+		}
+		if held, ok := pathHold.apply(prepareCtx, rule, items, previousByKey); ok {
+			items = held
 		}
 		prepared = append(prepared, items...)
 		for _, item := range items {
@@ -4435,7 +4626,8 @@ func (rt *linuxKernelRuleRuntime) samePreparedRulesLocked(next []preparedKernelR
 	// Health only proves the next targets are attached. A target that went
 	// away, such as a deleted plugin boundary, must still replace the stored
 	// set; otherwise self-heal keeps reattaching to an ifindex that is gone.
-	if !effectiveKernelAttachmentRuleSets(rt.preparedRules, rt.attachmentRuleSets).sameTargets(attachmentRuleSets) {
+	current := effectiveKernelAttachmentRuleSets(rt.preparedRules, rt.attachmentRuleSets)
+	if !current.sameTargets(attachmentRuleSets) {
 		return false
 	}
 	return rt.attachmentsHealthyLocked(attachmentRuleSets)
@@ -4538,6 +4730,7 @@ func (rt *linuxKernelRuleRuntime) attachmentsHealthyLocked(attachmentRuleSets ke
 		return false
 	}
 	programs := kernelAttachmentProgramsForPreparedRules(rt.coll, rt.preparedRules, rt.attachmentMode, rt.pluginPipelineActive)
+	rt.completeAttachmentPrograms(&programs, rt.coll)
 	return kernelAttachmentsHealthyForRuleSets(attachmentRuleSets, rt.attachments, programs)
 }
 

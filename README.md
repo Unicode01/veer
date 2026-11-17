@@ -1,6 +1,6 @@
 # Veer
 
-面向虚拟机宿主机和二级路由的可编程 Linux 网络转发服务。内置 WebUI、管理 API 和 SQLite，统一管理端口转发、共享建站、端口段、Egress NAT、托管网络、IPv6 分发与插件；支持 userspace、TC 和 XDP 数据面。
+面向虚拟机宿主机和二级路由的可编程 Linux 网络转发服务。内置 WebUI、管理 API 和 SQLite，统一管理端口转发、共享建站、端口段、Egress NAT、托管网络与 IPv6 分发；支持 userspace、TC 和 XDP 数据面。可选的沙箱插件提供 PPPoE 拨号、WireGuard / Mihomo / sing-box 出口和 LAN/WAN 编排，并可通过 TC、XDP 与 Netfilter Hook 扩展数据面。
 
 ## 安装
 

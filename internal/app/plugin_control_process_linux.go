@@ -3,11 +3,11 @@ package app
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func newPluginManagedProcessDirectory() (string, error) {
@@ -56,15 +56,9 @@ func cleanupPluginManagedProcessDirectories(root string) error {
 	return nil
 }
 
-func preparePluginManagedProcess(cmd *exec.Cmd) {
-	cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
-}
-
-func terminatePluginManagedProcess(cmd *exec.Cmd) {
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-}
-
-func limitPluginManagedProcess(cmd *exec.Cmd, owner string, cfg *Config) (func(), error) {
+// limitPluginManagedProcess places a keeper in the process's resource cgroup.
+// The executable it starts afterwards, and every descendant, inherits it.
+func limitPluginManagedProcess(pid int, owner string, cfg *Config) (func(), error) {
 	if cfg == nil {
 		return func() {}, nil
 	}
@@ -74,7 +68,7 @@ func limitPluginManagedProcess(cmd *exec.Cmd, owner string, cfg *Config) (func()
 		}
 		return func() {}, nil
 	}
-	cleanup, _, err := attachPluginHostResourceLimits(cmd.Process.Pid, owner, pluginHostResourceLimitsFromConfig(cfg))
+	cleanup, _, err := attachPluginHostResourceLimits(pid, owner, pluginHostResourceLimitsFromConfig(cfg))
 	if err != nil {
 		if cfg.PluginMinimumSandboxLevel() == pluginSandboxLevelFull {
 			return nil, fmt.Errorf("managed process resource limits: %w", err)
@@ -84,8 +78,24 @@ func limitPluginManagedProcess(cmd *exec.Cmd, owner string, cfg *Config) (func()
 	return func() {
 		if root, err := pluginHostCgroupRootPath(); err == nil {
 			group := filepath.Join(root, fmt.Sprintf("veer-plugins-%d", os.Getpid()), owner)
-			_ = os.WriteFile(filepath.Join(group, "cgroup.kill"), []byte("1"), 0600)
+			if os.WriteFile(filepath.Join(group, "cgroup.kill"), []byte("1"), 0600) == nil {
+				awaitPluginCgroupEmpty(group, pluginKeeperStopGrace)
+			}
 		}
 		cleanup()
 	}, nil
+}
+
+// awaitPluginCgroupEmpty waits until every task in the cgroup has exited, so
+// that it can be removed: cgroup.kill only sends SIGKILL. That includes a
+// descendant that left the process group. Zombies no longer populate it.
+func awaitPluginCgroupEmpty(group string, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(filepath.Join(group, "cgroup.events"))
+		if err != nil || !strings.Contains(string(data), "populated 1") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

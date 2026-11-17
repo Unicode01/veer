@@ -196,9 +196,7 @@ func TestEmbeddedEBPFObjectsAreArchitectureNeutralBPF(t *testing.T) {
 		data []byte
 	}{
 		{name: "tc", data: embeddedForwardTCObject},
-		{name: "tc-stats", data: embeddedForwardTCStatsObject},
 		{name: "xdp", data: embeddedForwardXDPObject},
-		{name: "xdp-stats", data: embeddedForwardXDPStatsObject},
 	}
 
 	for _, tc := range tests {

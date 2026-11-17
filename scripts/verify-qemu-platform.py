@@ -25,7 +25,7 @@ IMAGES = {
         "a04ec220634fe46d672b89a06e7a1269df005572079eba63ac7200ab800fe88",
     ),
     "rocky": (
-        "https://dl.rockylinux.org/pub/rocky/9/images/x86_64/"
+        "https://dl.rockylinux.org/vault/rocky/9.8/images/x86_64/"
         "Rocky-9-GenericCloud-Base-9.8-20260525.0.x86_64.qcow2",
         "sha256",
         "92c206cc6f790c61583247eefe87890f8828420662c17cacf247cec78ab4eec8",

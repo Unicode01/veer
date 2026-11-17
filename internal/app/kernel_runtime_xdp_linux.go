@@ -159,6 +159,7 @@ type xdpCollectionPieces struct {
 	natOldV6             *ebpf.Map
 	flowMigrationState   *ebpf.Map
 	localIPv4s           *ebpf.Map
+	localNets            *ebpf.Map
 	localMACs            *ebpf.Map
 }
 
@@ -171,9 +172,6 @@ type preparedXDPKernelRuleBatches struct {
 
 //go:embed ebpf/forward-xdp-bpf.o
 var embeddedForwardXDPObject []byte
-
-//go:embed ebpf/forward-xdp-bpf-stats.o
-var embeddedForwardXDPStatsObject []byte
 
 type xdpAttachment struct {
 	ifindex int
@@ -212,6 +210,7 @@ type xdpKernelRuleRuntime struct {
 	maintenanceState   kernelAdaptiveMaintenanceState
 	statsCorrection    map[uint32]kernelRuleStats
 	flowPurgeRetry     kernelFlowPurgeRetryState
+	deferredFlows      kernelDeferredFlowRules[preparedXDPKernelRule]
 	flowPruneState     kernelFlowPruneState
 	oldFlowPruneState  kernelFlowPruneState
 	natPruneState      kernelNATPruneState
@@ -224,7 +223,7 @@ func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 	rulesLimit := 0
 	flowsLimit := 0
 	natLimit := 0
-	natPortMin, natPortMax := effectiveKernelNATPortRange(0, 0)
+	natPortMin, natPortMax := 0, 0
 	tcpIdleTimeoutSeconds := int64(0)
 	if cfg != nil && cfg.ExperimentalFeatureEnabled(experimentalFeatureBridgeXDP) {
 		opts.enableBridge = true
@@ -239,9 +238,10 @@ func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 		rulesLimit = cfg.KernelRulesMapLimit
 		flowsLimit = cfg.KernelFlowsMapLimit
 		natLimit = cfg.KernelNATMapLimit
-		natPortMin, natPortMax = effectiveKernelNATPortRange(cfg.KernelNATPortMin, cfg.KernelNATPortMax)
+		natPortMin, natPortMax = cfg.KernelNATPortMin, cfg.KernelNATPortMax
 		tcpIdleTimeoutSeconds = cfg.KernelTCPEstablishedIdleTimeoutSeconds
 	}
+	natPortMin, natPortMax = effectiveKernelNATPortWindow(kernelEngineXDP, natPortMin, natPortMax)
 	return &xdpKernelRuleRuntime{
 		prepareOptions:     opts,
 		allowGenericAttach: allowGeneric,
@@ -362,7 +362,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 
 	requiredIfIndices := collectXDPInterfaces(prepared)
 	samePrepared := rt.samePreparedRulesLocked(prepared, requiredIfIndices)
-	desiredLocalIPv4s, localIPv4Err := buildKernelEgressNATLocalIPv4Set(rules)
+	desiredLocal, localIPv4Err := buildKernelEgressNATLocalInventory(rules)
 	desiredLocalMACs := buildXDPKernelLocalMACMap(prepared)
 	if localIPv4Err != nil && !samePrepared {
 		msg := fmt.Sprintf("build xdp egress nat local IPv4 inventory: %v", localIPv4Err)
@@ -381,10 +381,10 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		} else if pieces, err := lookupXDPCollectionPieces(rt.coll); err != nil {
 			log.Printf("xdp dataplane reconcile: refresh local IPv4 bypass inventory skipped: %v", err)
 		} else if pieces.localIPv4s == nil {
-			if len(desiredLocalIPv4s) > 0 {
+			if len(desiredLocal.Addrs) > 0 {
 				log.Printf("xdp dataplane reconcile: refresh local IPv4 bypass inventory skipped: embedded xdp eBPF object is missing map %q", kernelLocalIPv4MapName)
 			}
-		} else if err := syncKernelLocalIPv4Map(pieces.localIPv4s, desiredLocalIPv4s); err != nil {
+		} else if err := syncKernelEgressNATLocalMaps(pieces.localIPv4s, pieces.localNets, desiredLocal); err != nil {
 			log.Printf("xdp dataplane reconcile: refresh local IPv4 bypass inventory failed: %v", err)
 		}
 		if pieces, err := lookupXDPCollectionPieces(rt.coll); err != nil {
@@ -652,16 +652,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 			clearKernelHotRestartState(kernelEngineXDP)
 		}
 	} else if state != nil {
-		if err := validateKernelHotRestartMapReplacements(spec, state.replacements, map[string]bool{
-			kernelFlowsMapName:           true,
-			kernelFlowsMapNameV6:         true,
-			kernelXDPFlowsOldMapNameV4:   true,
-			kernelXDPFlowsOldMapNameV6:   true,
-			kernelNatPortsMapName:        true,
-			kernelNatPortsMapNameV6:      true,
-			kernelTCNatPortsOldMapNameV4: true,
-			kernelTCNatPortsOldMapNameV6: true,
-		}); err != nil {
+		if err := validateKernelHotRestartMapReplacements(spec, state.replacements, kernelXDPHotRestartFlexibleCapacityMaps()); err != nil {
 			log.Printf(
 				"xdp dataplane hot restart: preserved xdp maps are incompatible, abandoning handoff and falling back to fresh maps (cold restart): %s",
 				kernelHotRestartIncompatibilityReason(err),
@@ -827,7 +818,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		return results, nil
 	}
 	if pieces.localIPv4s != nil {
-		if err := syncKernelLocalIPv4Map(pieces.localIPv4s, desiredLocalIPv4s); err != nil {
+		if err := syncKernelEgressNATLocalMaps(pieces.localIPv4s, pieces.localNets, desiredLocal); err != nil {
 			coll.Close()
 			msg := fmt.Sprintf("sync xdp local IPv4 bypass map: %v", err)
 			if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
@@ -839,7 +830,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 			}
 			return results, nil
 		}
-	} else if len(desiredLocalIPv4s) > 0 {
+	} else if len(desiredLocal.Addrs) > 0 {
 		coll.Close()
 		msg := fmt.Sprintf("embedded xdp eBPF object is missing map %q; rebuild the xdp eBPF object", kernelLocalIPv4MapName)
 		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
@@ -932,7 +923,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		}
 		results[item.rule.ID] = kernelRuleApplyResult{Running: true, Engine: kernelEngineXDP}
 	}
-	flowPurgeTargets := collectPreparedXDPKernelRuleFlowPurgeTargets(rt.preparedRules, prepared)
+	flowPurgeTargets := collectPreparedXDPKernelRuleFlowPurgeTargets(rt.deferredFlows.baseline(rt.preparedRules), prepared)
 	rt.flowPurgeRetry.add(flowPurgeTargets)
 	flowPurgeAttempt := rt.flowPurgeRetry.snapshot()
 	purgeCorrections := map[uint32]kernelRuleStats{}
@@ -971,6 +962,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 	rt.coll = coll
 	rt.attachments = newAttachments
 	rt.preparedRules = clonePreparedXDPKernelRules(prepared)
+	rt.deferredFlows.reset()
 	rt.programID = programID
 	rt.rulesMapCapacity = actualCapacities.Rules
 	rt.flowsMapCapacity = actualCapacities.Flows
@@ -996,7 +988,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		mergeKernelStatsCorrections(rt.statsCorrection, purgeCorrections)
 		log.Printf("xdp dataplane reconcile: purged %d stale xdp flow entry(s) for %d changed rule revision(s)", purgedFlows, len(flowPurgeAttempt))
 	}
-	if err := writeKernelRuntimeMetadata(kernelEngineXDP, kernelHotRestartXDPMetadata(rt.attachments, "")); err != nil {
+	if err := writeKernelRuntimeMetadata(kernelEngineXDP, rt.runtimeMetadata()); err != nil {
 		log.Printf("xdp dataplane runtime metadata: write xdp runtime metadata failed: %v", err)
 	}
 	if hotRestartState != nil {
@@ -1029,6 +1021,7 @@ func (rt *xdpKernelRuleRuntime) SnapshotStats() (kernelRuleStatsSnapshot, error)
 func (rt *xdpKernelRuleRuntime) Maintain() error {
 	startedAt := time.Now()
 	rt.mu.Lock()
+	rt.expireDeferredFlowRulesLocked(startedAt)
 	pendingFlowPurgeDeleted, pendingFlowPurgeErr := rt.retryPendingFlowPurgesLocked()
 	if pendingFlowPurgeErr != nil {
 		rt.observability.recordMaintain(startedAt, time.Since(startedAt), kernelFlowPruneMetrics{Deleted: pendingFlowPurgeDeleted}, pendingFlowPurgeErr)
@@ -1255,36 +1248,14 @@ func (rt *xdpKernelRuleRuntime) prepareHotRestartLocked() bool {
 		currentCounts.natEntries,
 		"xdp dataplane hot restart",
 	)
-	maps := map[string]*ebpf.Map{
-		kernelFlowsMapName: rt.coll.Maps[kernelFlowsMapName],
-	}
-	if rt.coll.Maps[kernelFlowsMapNameV6] != nil {
-		maps[kernelFlowsMapNameV6] = rt.coll.Maps[kernelFlowsMapNameV6]
-	}
-	if currentNATEntries > 0 {
-		maps[kernelNatPortsMapName] = rt.coll.Maps[kernelNatPortsMapName]
-		if rt.coll.Maps[kernelNatPortsMapNameV6] != nil {
-			maps[kernelNatPortsMapNameV6] = rt.coll.Maps[kernelNatPortsMapNameV6]
-		}
-	}
-	if existingMigrationFlags&xdpFlowMigrationFlagV4Old != 0 {
-		maps[kernelXDPFlowsOldMapNameV4] = rt.coll.Maps[kernelXDPFlowsOldMapNameV4]
-		if currentNATEntries > 0 {
-			maps[kernelTCNatPortsOldMapNameV4] = rt.coll.Maps[kernelTCNatPortsOldMapNameV4]
-		}
-	}
-	if existingMigrationFlags&xdpFlowMigrationFlagV6Old != 0 {
-		maps[kernelXDPFlowsOldMapNameV6] = rt.coll.Maps[kernelXDPFlowsOldMapNameV6]
-		if currentNATEntries > 0 {
-			if m := rt.coll.Maps[kernelTCNatPortsOldMapNameV6]; m != nil {
-				maps[kernelTCNatPortsOldMapNameV6] = m
-			}
-		}
-	}
-	if kernelHotRestartSkipStatsRequested() {
+	skipStats := kernelHotRestartSkipStatsRequested()
+	if skipStats {
 		log.Printf("xdp dataplane hot restart: preserving flow map without %s as requested", kernelStatsMapName)
-	} else {
-		maps[kernelStatsMapName] = rt.coll.Maps[kernelStatsMapName]
+	}
+	present := func(name string) bool { return rt.coll.Maps[name] != nil }
+	maps := make(map[string]*ebpf.Map, 9)
+	for _, name := range kernelXDPHotRestartPreservedMapNames(present, existingMigrationFlags, currentNATEntries > 0, skipStats) {
+		maps[name] = rt.coll.Maps[name]
 	}
 	if err := pinKernelHotRestartMaps(kernelEngineXDP, maps); err != nil {
 		log.Printf("xdp dataplane hot restart: preserve xdp maps failed, falling back to full cleanup: %v", err)
@@ -1324,6 +1295,7 @@ func (rt *xdpKernelRuleRuntime) prepareHotRestartLocked() bool {
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPurgeRetry.reset()
+	rt.deferredFlows.reset()
 	rt.flowPruneState = kernelFlowPruneState{}
 	rt.oldFlowPruneState = kernelFlowPruneState{}
 	rt.maintenanceState.reset()
@@ -1353,6 +1325,7 @@ func (rt *xdpKernelRuleRuntime) cleanupLocked() {
 	rt.degradedSource = kernelRuntimeDegradedSourceNone
 	rt.statsCorrection = make(map[uint32]kernelRuleStats)
 	rt.flowPurgeRetry.reset()
+	rt.deferredFlows.reset()
 	rt.flowPruneState = kernelFlowPruneState{}
 	rt.oldFlowPruneState = kernelFlowPruneState{}
 	rt.maintenanceState.reset()
@@ -1448,13 +1421,14 @@ func (rt *xdpKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 		}
 	}
 	if pieces.localIPv4s != nil {
-		if err := syncKernelLocalIPv4Map(pieces.localIPv4s, nil); err != nil {
+		if err := syncKernelEgressNATLocalMaps(pieces.localIPv4s, pieces.localNets, kernelEgressNATLocalInventory{}); err != nil {
 			return fmt.Errorf("clear xdp local IPv4 bypass map during drain: %w", err)
 		}
 	}
 	if err := syncKernelLocalMACMap(pieces.localMACs, nil); err != nil {
 		return fmt.Errorf("clear xdp local MAC guard map during drain: %w", err)
 	}
+	rt.deferredFlows.record(clonePreparedXDPKernelRules(rt.preparedRules), time.Now())
 	rt.preparedRules = nil
 	rt.rulesMapCapacity = kernelRuntimeRuleMapCapacity(kernelRuntimeMapRefsFromCollection(rt.coll))
 	rt.flowsMapCapacity = kernelRuntimeFlowMapCapacity(kernelRuntimeMapRefsFromCollection(rt.coll))
@@ -1465,7 +1439,7 @@ func (rt *xdpKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	rt.invalidateRuntimeMapCountCacheLocked()
 	rt.invalidatePressureStateLocked()
 	if len(rt.attachments) > 0 {
-		if err := writeKernelRuntimeMetadata(kernelEngineXDP, kernelHotRestartXDPMetadata(rt.attachments, "")); err != nil {
+		if err := writeKernelRuntimeMetadata(kernelEngineXDP, rt.runtimeMetadata()); err != nil {
 			log.Printf("xdp dataplane runtime metadata: refresh xdp runtime metadata failed after rule drain: %v", err)
 		}
 	}
@@ -1644,18 +1618,15 @@ func (rt *xdpKernelRuleRuntime) deleteStaleAttachmentsLocked(oldAttachments, new
 }
 
 func loadEmbeddedXDPCollectionSpec(enableTrafficStats bool) (*ebpf.CollectionSpec, error) {
-	objectBytes := embeddedForwardXDPObject
-	objectName := "internal/app/ebpf/forward-xdp-bpf.o"
-	if enableTrafficStats {
-		objectBytes = embeddedForwardXDPStatsObject
-		objectName = "internal/app/ebpf/forward-xdp-bpf-stats.o"
+	if len(embeddedForwardXDPObject) == 0 {
+		return nil, fmt.Errorf("embedded xdp eBPF object is empty; build %s before compiling", kernelXDPObjectName)
 	}
-	if len(objectBytes) == 0 {
-		return nil, fmt.Errorf("embedded xdp eBPF object is empty; build %s before compiling", objectName)
-	}
-	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(objectBytes))
+	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(embeddedForwardXDPObject))
 	if err != nil {
 		return nil, fmt.Errorf("load embedded xdp eBPF object: %w", err)
+	}
+	if err := setKernelLoadSettings(spec, enableTrafficStats); err != nil {
+		return nil, fmt.Errorf("embedded xdp eBPF object: %w", err)
 	}
 	return spec, nil
 }
@@ -1795,6 +1766,7 @@ func lookupXDPCollectionPieces(coll *ebpf.Collection) (xdpCollectionPieces, erro
 		natOldV6:             coll.Maps[kernelTCNatPortsOldMapNameV6],
 		flowMigrationState:   coll.Maps[kernelXDPFlowMigrationStateMapName],
 		localIPv4s:           coll.Maps[kernelLocalIPv4MapName],
+		localNets:            coll.Maps[kernelLocalNetsMapName],
 		localMACs:            coll.Maps[kernelLocalMACMapName],
 	}
 	if pieces.prog == nil ||

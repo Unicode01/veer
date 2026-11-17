@@ -1,32 +1,34 @@
-var KFUNCS = false, DIRECT = false, TUNNEL_OBJECT_PATH = 'wg_adapter.o';
+var KFUNCS = false, DIRECT = false, TUNNEL_OBJECT_PATH = 'tunnel_adapter.o';
 if (typeof plugin.host === 'function') {
   var host = plugin.host();
   if ((host.available_features || []).indexOf('dataplane.kfuncs.handoff.v1') >= 0) {
-    try { crypto.sha256File('wg_adapter-kfuncs.o'); KFUNCS = true; TUNNEL_OBJECT_PATH = 'wg_adapter-kfuncs.o'; }
+    try { crypto.sha256File('tunnel_adapter-kfuncs.o'); KFUNCS = true; TUNNEL_OBJECT_PATH = 'tunnel_adapter-kfuncs.o'; }
     catch (e) { /* Packages built before this capability retain the base path. */ }
   }
   if (KFUNCS && (host.available_features || []).indexOf('dataplane.kfuncs.handoff_ingress.v1') >= 0) {
-    try { crypto.sha256File('wg_adapter-direct.o'); DIRECT = true; TUNNEL_OBJECT_PATH = 'wg_adapter-direct.o'; }
+    try { crypto.sha256File('tunnel_adapter-direct.o'); DIRECT = true; TUNNEL_OBJECT_PATH = 'tunnel_adapter-direct.o'; }
     catch (e) { /* Keep the veth boundary when the optional object is absent. */ }
   }
 }
-// WAN keys and WG netdev names stay stable across the plugin ID migration.
+// Every driver shares the tunnel adapter. WireGuard keeps its own WAN keys and
+// netdev names (wg_<key>, vwg<key>, veerwg<slot>) because Egress NAT selects them.
 var coreDrivers = require('./core-drivers');
 var shares = require('./ui/share');
 var coreManager = require('./core-manager');
 var health = require('./health-check').create({path: healthPath, leases: allLeases});
 var IP = '/usr/sbin/ip', WG = '/usr/bin/wg', NFT = '/usr/sbin/nft';
 var PROTOCOL = '242'; // Used only when cleaning up leases from the old routing example.
-var OBJECT = 'wg_adapter', MAP = 'wg_links';
+var OBJECT = 'tunnel_adapter', MAP = 'tunnel_links', REPAIR_TIMER = 'tunnel_repair';
+var HOOK_IN = 'tunnel-links', HOOK_DIRECT_OUT = 'tunnel-direct-out';
 var changing = false;
 plugin.capabilities(['vpn', 'wireguard', 'mihomo', 'sing_box', 'wan', 'tc_adapter', 'control']);
 pipeline.node({id: 'vpn', description: 'VPN core attached to a WAN Core boundary.'});
 ebpf.loadObject({id: OBJECT, path: TUNNEL_OBJECT_PATH, sha256: crypto.sha256File(TUNNEL_OBJECT_PATH),
   programs: [{id: 'tc_adapter', section: 'tc/veer/pre_forward', type: 'tc'}]});
-pipeline.attach({id: 'wg-links', direction: 'forward', attach: 'ingress', priority: 20,
-  program: 'wg_adapter:tc_adapter', mode: 'rewrite', binding_required: true});
-pipeline.attach({id: 'wg-direct-out', direction: 'forward', attach: 'egress', priority: 20,
-  program: 'wg_adapter:tc_adapter', mode: 'rewrite', binding_required: true});
+pipeline.attach({id: HOOK_IN, direction: 'forward', attach: 'ingress', priority: 20,
+  program: OBJECT + ':tc_adapter', mode: 'rewrite', binding_required: true});
+pipeline.attach({id: HOOK_DIRECT_OUT, direction: 'forward', attach: 'egress', priority: 20,
+  program: OBJECT + ':tc_adapter', mode: 'rewrite', binding_required: true});
 plugin.resource({id: 'hook_bindings', methods: ['list', 'get'], control_methods: ['list', 'get', 'create', 'update', 'delete'],
   runtime_update: 'plugin_reconcile', max_records: 2, max_record_bytes: 4096});
 plugin.resource({id: 'profiles', schema_version: 3, methods: ['list', 'get', 'create', 'update'], control_methods: ['list', 'get', 'create', 'update', 'delete'], runtime_update: 'manual', max_records: 8, max_record_bytes: 16384,
@@ -150,8 +152,10 @@ exports.onReconcile = function () {
   if (errors.length) throw new Error(errors.join('; '));
 };
 exports.onTimer = function (ctx) {
-  if (ctx.timer && ctx.timer.name === 'vpn_health') { health.tick(); return; }
-  if (!ctx.timer || ctx.timer.name !== 'wg_repair') return;
+  var name = ctx.timer && ctx.timer.name;
+  if (name === 'vpn_health') { health.tick(); return; }
+  // Stop timers this version no longer arms, such as wg_repair from 0.9.0.
+  if (name !== REPAIR_TIMER) { if (name) timer.clear(name); return; }
   var leases = allLeases();
   Object.keys(leases).sort().forEach(function (key) {
     var lease = leases[key];
@@ -159,30 +163,39 @@ exports.onTimer = function (ctx) {
     if (lease.plan.driver && lease.plan.driver !== 'wireguard') { repairTUN(key, lease); return; }
     try {
       var p = lease.plan, wg = ownedLink(p), boundary = boundaryLinks(p);
-      if (lease.pending || !wg || !boundary || (wg.flags || []).indexOf('UP') < 0 || wg.mtu !== p.mtu || wg.ifindex !== lease.wg_ifindex || boundary.local.ifindex !== lease.local_ifindex || boundary.peer.ifindex !== lease.pipeline_ifindex) {
+      if (lease.pending || !wg || !boundary || (wg.flags || []).indexOf('UP') < 0 || wg.mtu !== p.mtu || wg.ifindex !== lease.tunnel_ifindex || boundary.local.ifindex !== lease.local_ifindex || boundary.peer.ifindex !== lease.pipeline_ifindex) {
         clearMaps(lease);
         apply(key, lease.settings);
       } else repairMaps(p, wg, boundary);
     } catch (e) {
-      try { clearMaps(lease); } catch (cleanup) { log.error('WG map cleanup failed: ' + String(cleanup.message || cleanup)); }
+      try { clearMaps(lease); } catch (cleanup) { log.error('Tunnel map cleanup failed: ' + String(cleanup.message || cleanup)); }
       resources.set('status', key, {phase: 'error', error: String(e.message || e), cleanup_required: true}, true);
     }
   });
 };
 exports.onDeactivate = function () {
   health.stop();
-  timer.clear('wg_repair');
+  timer.clear(REPAIR_TIMER);
   var failures = [];
   Object.keys(allLeases()).forEach(function (key) {
     try { teardown(key); } catch (e) { failures.push(key + ': ' + String(e.message || e)); }
   });
-  if (failures.length) throw new Error('WireGuard cleanup incomplete: ' + failures.join('; '));
+  if (failures.length) throw new Error('VPN cleanup incomplete: ' + failures.join('; '));
 };
 function allLeases() {
   var out = {};
   for (var offset = 0; offset < 1024; offset += 32) {
     var page = kv.list({limit: 32, offset: offset});
-    page.forEach(function (r) { if (r.key.indexOf('lease_') === 0) out[r.key.slice(6)] = r.data; });
+    page.forEach(function (r) {
+      if (r.key.indexOf('lease_') !== 0) return;
+      var lease = r.data;
+      // Leases written before 0.9.1 call the tunnel ifindex wg_ifindex; the next write drops it.
+      if (lease && lease.wg_ifindex != null) {
+        if (lease.tunnel_ifindex == null) lease.tunnel_ifindex = lease.wg_ifindex;
+        delete lease.wg_ifindex;
+      }
+      out[r.key.slice(6)] = lease;
+    });
     if (page.length < 32) break;
   }
   return out;
@@ -190,8 +203,8 @@ function allLeases() {
 function armRepair() {
   health.arm();
   var leases = allLeases(), keys = Object.keys(leases);
-  if (keys.some(function (k) { return leases[k].active; })) timer.setInterval('wg_repair', keys.some(function (k) { return leases[k].active && leases[k].plan.driver && leases[k].plan.driver !== 'wireguard'; }) ? 1000 : 5000, {});
-  else timer.clear('wg_repair');
+  if (keys.some(function (k) { return leases[k].active; })) timer.setInterval(REPAIR_TIMER, keys.some(function (k) { return leases[k].active && leases[k].plan.driver && leases[k].plan.driver !== 'wireguard'; }) ? 1000 : 5000, {});
+  else timer.clear(REPAIR_TIMER);
 }
 function normalize(key, raw) {
   raw = raw || {};
@@ -337,28 +350,33 @@ function bindings(exclude) {
       else names.push(lease.plan.pipeline);
     }
   });
-  resources.set('hook_bindings', 'wg-links', {hook_id: 'wg-links', interfaces: names}, names.length > 0, true);
-  resources.set('hook_bindings', 'wg-direct-out', {hook_id: 'wg-direct-out', interfaces: outgoing}, outgoing.length > 0, true);
+  // Records for hooks this version no longer declares, such as the wg-* hooks
+  // before 0.9.1, would otherwise fill the two-record resource.
+  resources.list('hook_bindings', {limit: 8}).forEach(function (r) {
+    if (r.key !== HOOK_IN && r.key !== HOOK_DIRECT_OUT) resources.delete('hook_bindings', r.key);
+  });
+  resources.set('hook_bindings', HOOK_IN, {hook_id: HOOK_IN, interfaces: names}, names.length > 0, true);
+  resources.set('hook_bindings', HOOK_DIRECT_OUT, {hook_id: HOOK_DIRECT_OUT, interfaces: outgoing}, outgoing.length > 0, true);
 }
 function u32(n) { var s = ''; for (var i = 0; i < 4; i++) s += ('0' + ((n >>> (i * 8)) & 255).toString(16)).slice(-2); return s; }
 function macHex(s) { if (!/^([a-fA-F0-9]{2}:){5}[a-fA-F0-9]{2}$/.test(s || '')) throw new Error('Invalid WAN boundary MAC'); return s.replace(/:/g, '').toLowerCase(); }
 function clearMaps(lease) {
-  [lease && lease.wg_ifindex, lease && lease.pipeline_ifindex].forEach(function (index) {
+  [lease && lease.tunnel_ifindex, lease && lease.pipeline_ifindex].forEach(function (index) {
     if (!index) return;
     try { ebpf.mapDelete(OBJECT, MAP, u32(index)); }
     catch (e) { if (String(e.message || e).indexOf('plugin runtime target is not loaded') < 0) throw e; }
   });
 }
-function mapEntries(p, wg, boundary) {
+function mapEntries(p, tunnel, boundary) {
   return [
-    {op: 'put', object: OBJECT, map: MAP, key: u32(boundary.peer.ifindex), value: u32(1) + u32(wg.ifindex) + '000000000000000000000000' + u32(p.mtu)},
-    {op: 'put', object: OBJECT, map: MAP, key: u32(wg.ifindex), value: u32(boundary.direct ? 3 : 2) + u32(boundary.peer.ifindex) + macHex(boundary.peer.address) + macHex(boundary.local.address) + u32(p.mtu)}
+    {op: 'put', object: OBJECT, map: MAP, key: u32(boundary.peer.ifindex), value: u32(1) + u32(tunnel.ifindex) + '000000000000000000000000' + u32(p.mtu)},
+    {op: 'put', object: OBJECT, map: MAP, key: u32(tunnel.ifindex), value: u32(boundary.direct ? 3 : 2) + u32(boundary.peer.ifindex) + macHex(boundary.peer.address) + macHex(boundary.local.address) + u32(p.mtu)}
   ];
 }
-function repairMaps(p, wg, boundary) {
+function repairMaps(p, tunnel, boundary) {
   // A dataplane replacement can lose private maps without replacing netdevs
   // or the core. Restore only this WAN's two entries; leave live flows alone.
-  var entries = mapEntries(p, wg, boundary);
+  var entries = mapEntries(p, tunnel, boundary);
   if (entries.some(function (entry) {
     // Hash-map reads may throw for absent keys.
     try { return ebpf.mapGet(OBJECT, MAP, entry.key) !== entry.value; }
@@ -366,10 +384,10 @@ function repairMaps(p, wg, boundary) {
   }))
     ebpf.mapTransaction({operations: entries});
 }
-function installMaps(p, wg, boundary, old) {
-  var ops = [], next = [wg.ifindex, boundary.peer.ifindex];
-  [old && old.wg_ifindex, old && old.pipeline_ifindex].forEach(function (n) { if (n && next.indexOf(n) < 0) ops.push({op: 'delete', object: OBJECT, map: MAP, key: u32(n)}); });
-  ebpf.mapTransaction({operations: ops.concat(mapEntries(p, wg, boundary))});
+function installMaps(p, tunnel, boundary, old) {
+  var ops = [], next = [tunnel.ifindex, boundary.peer.ifindex];
+  [old && old.tunnel_ifindex, old && old.pipeline_ifindex].forEach(function (n) { if (n && next.indexOf(n) < 0) ops.push({op: 'delete', object: OBJECT, map: MAP, key: u32(n)}); });
+  ebpf.mapTransaction({operations: ops.concat(mapEntries(p, tunnel, boundary))});
 }
 function isLegacy(lease) { return !!(lease && lease.plan && lease.plan.bindings); }
 function apply(key, raw, explicit) {
@@ -390,14 +408,14 @@ function applyProfile(key, raw, explicit) {
   var cleanWAN = cleanWANState(p);
   if (!old && (wg || link(p.local) || link(p.pipeline) || ((previousWAN || previousSession) && !cleanWAN))) throw new Error('Recorded ownership is missing; inspect leftover WAN resources before retrying');
   var stable = boundaryLinks(p);
-  if (!explicit && old && !old.pending && wg && stable && wg.ifindex === old.wg_ifindex &&
+  if (!explicit && old && !old.pending && wg && stable && wg.ifindex === old.tunnel_ifindex &&
       wg.mtu === p.mtu && (wg.flags || []).indexOf('UP') >= 0 && stable.local.ifindex === old.local_ifindex &&
       stable.peer.ifindex === old.pipeline_ifindex) {
     bindings(); repairMaps(p, wg, stable);
     return resources.get('status', key).data;
   }
   kv.set('lease_' + key, {active: true, pending: true, settings: settings(p), plan: p,
-    created_ifindex: old && old.created_ifindex, wg_ifindex: old && old.wg_ifindex, local_ifindex: old && old.local_ifindex, pipeline_ifindex: old && old.pipeline_ifindex});
+    created_ifindex: old && old.created_ifindex, tunnel_ifindex: old && old.tunnel_ifindex, local_ifindex: old && old.local_ifindex, pipeline_ifindex: old && old.pipeline_ifindex});
   try {
     if ((link(p.local) || link(p.pipeline)) && !boundaryLinks(p, true)) throw new Error('WAN boundary is not ready or no longer owned; inspect replaced interfaces');
     suspendTUN(p, old);
@@ -418,7 +436,7 @@ function applyProfile(key, raw, explicit) {
     bindings();
     installMaps(p, wg, boundary, old);
     plugins.resources.set('wan_core', 'sessions', p.wan_id, wanPayload(p, true), true, true);
-    kv.set('lease_' + key, {active: true, settings: settings(p), plan: p, wg_ifindex: wg.ifindex,
+    kv.set('lease_' + key, {active: true, settings: settings(p), plan: p, tunnel_ifindex: wg.ifindex,
       local_ifindex: boundary.local.ifindex, pipeline_ifindex: boundary.peer.ifindex});
     var result = {phase: 'applied', interface: p.interface, wan_id: p.wan_id, local_interface: p.local,
       pipeline_interface: wanPipeline(p), handoff_mode: p.handoff_mode, egress_nat_interface: p.local, egress_nat_source_ip: wanPayload(p, true).ipv4,
@@ -427,9 +445,9 @@ function applyProfile(key, raw, explicit) {
   } catch (e) {
     try {
       clearMaps(old);
-      wg = ownedLink(p); if (wg) clearMaps({wg_ifindex: wg.ifindex});
+      wg = ownedLink(p); if (wg) clearMaps({tunnel_ifindex: wg.ifindex});
       var partial = boundaryLinks(p); if (partial) clearMaps({pipeline_ifindex: partial.peer.ifindex});
-    } catch (cleanup) { log.error('WG map cleanup failed: ' + String(cleanup.message || cleanup)); }
+    } catch (cleanup) { log.error('Tunnel map cleanup failed: ' + String(cleanup.message || cleanup)); }
     resources.set('status', key, {phase: 'error', interface: p.interface, local_interface: p.local,
       error: String(e.message || e), cleanup_required: true}, true);
     throw e;
@@ -511,7 +529,7 @@ function healthPath(key, workerRead) {
   var lease = allLeases()[key], status = resources.get('status', key);
   if (!lease || !lease.active || lease.pending || isLegacy(lease) || !status || status.data.phase !== 'applied') return null;
   var p = lease.plan, tunnel = ownedLink(p), boundary = boundaryLinks(p);
-  if (!tunnel || (tunnel.flags || []).indexOf('UP') < 0 || tunnel.ifindex !== lease.wg_ifindex || !boundary ||
+  if (!tunnel || (tunnel.flags || []).indexOf('UP') < 0 || tunnel.ifindex !== lease.tunnel_ifindex || !boundary ||
       boundary.local.ifindex !== lease.local_ifindex || boundary.peer.ifindex !== lease.pipeline_ifindex) return null;
   var managed = p.driver && p.driver !== 'wireguard' && p.driver !== 'tun';
   var proc = managed && !workerRead ? process.status('vpn_' + key) : null;
@@ -821,7 +839,7 @@ function applyTUNProfile(key, raw, explicit) {
   // Reconciliation of a healthy WAN must not withdraw it or reprepare the
   // boundary: that would disturb unrelated live flows on every inventory event.
   var stableBoundary = boundaryLinks(p), stableProcess = managed ? process.status('vpn_' + key) : null;
-  if (!explicit && old && !old.pending && current && current.linkinfo && current.linkinfo.info_kind === 'tun' && current.ifalias === p.owner && current.ifindex === old.wg_ifindex &&
+  if (!explicit && old && !old.pending && current && current.linkinfo && current.linkinfo.info_kind === 'tun' && current.ifalias === p.owner && current.ifindex === old.tunnel_ifindex &&
       current.mtu === p.mtu && (current.flags || []).indexOf('UP') >= 0 && stableBoundary &&
       stableBoundary.local.ifindex === old.local_ifindex && stableBoundary.peer.ifindex === old.pipeline_ifindex &&
       (!managed || (stableProcess.state === 'running' && stableProcess.started_at === old.process_started_at))) {
@@ -831,7 +849,7 @@ function applyTUNProfile(key, raw, explicit) {
     return resources.get('status', key).data;
   }
   var lease = {active: true, pending: true, settings: p.settings, plan: p,
-    wg_ifindex: old && old.wg_ifindex, pipeline_ifindex: old && old.pipeline_ifindex,
+    tunnel_ifindex: old && old.tunnel_ifindex, pipeline_ifindex: old && old.pipeline_ifindex,
     local_ifindex: old && old.local_ifindex, process_started_at: old && old.process_started_at};
   kv.set('lease_' + key, lease);
   try {
@@ -853,7 +871,7 @@ function applyTUNProfile(key, raw, explicit) {
       // Some cores keep running after their TUN is deleted. Restart only a
       // previously published generation, with the supervisor's existing budget.
       if (!explicit && !current && proc.state === 'running' &&
-          ((old && old.wg_ifindex && proc.started_at === old.process_started_at) || Date.now() - proc.started_at >= p.startup_timeout_seconds * 1000))
+          ((old && old.tunnel_ifindex && proc.started_at === old.process_started_at) || Date.now() - proc.started_at >= p.startup_timeout_seconds * 1000))
         proc = process.restart('vpn_' + key);
       if (proc.state !== 'running' || !current) {
         resources.set('status', key, {phase: proc.state === 'exited' || proc.state === 'failed' ? 'failed' : 'starting',
@@ -900,13 +918,13 @@ function applyTUNProfile(key, raw, explicit) {
     }
     var boundary = boundaryLinks(p);
     if (!boundary) throw new Error('WAN boundary is not ready');
-    lease.wg_ifindex = current.ifindex; lease.local_ifindex = boundary.local.ifindex;
+    lease.tunnel_ifindex = current.ifindex; lease.local_ifindex = boundary.local.ifindex;
     lease.pipeline_ifindex = boundary.peer.ifindex;
     kv.set('lease_' + key, lease);
     bindings(); installMaps(p, current, boundary, old);
     if (managed && (process.status('vpn_' + key).state !== 'running' || process.status('vpn_' + key).started_at !== proc.started_at)) throw new Error('Core restarted while publishing the WAN');
     plugins.resources.set('wan_core', 'sessions', p.wan_id, wanPayload(p, true), true, true);
-    lease.pending = false; lease.wg_ifindex = current.ifindex; lease.local_ifindex = boundary.local.ifindex;
+    lease.pending = false; lease.tunnel_ifindex = current.ifindex; lease.local_ifindex = boundary.local.ifindex;
     lease.pipeline_ifindex = boundary.peer.ifindex; lease.process_started_at = proc && proc.started_at;
     kv.set('lease_' + key, lease);
     var result = {phase: 'applied', driver: p.driver, interface: p.interface, wan_id: p.wan_id,
@@ -925,7 +943,7 @@ function repairTUN(key, lease) {
   try {
     var p = lease.plan, current = link(p.interface), boundary = boundaryLinks(p);
     var proc = p.driver === 'tun' ? null : process.status('vpn_' + key);
-    if (lease.pending || !current || !current.linkinfo || current.linkinfo.info_kind !== 'tun' || !boundary || current.ifalias !== p.owner || current.ifindex !== lease.wg_ifindex ||
+    if (lease.pending || !current || !current.linkinfo || current.linkinfo.info_kind !== 'tun' || !boundary || current.ifalias !== p.owner || current.ifindex !== lease.tunnel_ifindex ||
         current.mtu !== p.mtu || (current.flags || []).indexOf('UP') < 0 || boundary.local.ifindex !== lease.local_ifindex ||
         boundary.peer.ifindex !== lease.pipeline_ifindex || (proc && (proc.state !== 'running' || proc.started_at !== lease.process_started_at))) {
       suspendTUN(p, lease);

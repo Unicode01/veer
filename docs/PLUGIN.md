@@ -757,7 +757,7 @@ packet metadata 的 namespace 防止可信插件之间误用 ABI，不是恶意 
 
 没有 Veer/Egress NAT 规则时，显式声明了 `interfaces` 的 hook 仍可把 TC pipeline 挂到目标接口上；这时 Veer Core 的 forward/reply 路径会被关闭，pipeline 只执行插件链。core 后插件仍可运行，但 `tc_plugin_ctx_v4/tc_plugin_ctx_v6` 是按当前包地址族清空的上下文，不包含规则或 flow 匹配结果。
 
-进入 `veer` pipeline 的 TC object 必须声明共享 `tc_prog_chain_v4` prog-array map，处理后应 tail-call 回对应 stage 的 continue slot，除非插件明确要返回最终 TC action。eBPF tail call 是 continuation，不是普通函数调用；tail-call 成功后不会回到插件原来的栈帧。core 后插件如果要读取规则匹配上下文，需要同时声明共享 `tc_plugin_ctx_v4` 和 `tc_plugin_ctx_v6` map；只有内置 core 实际启用并匹配规则或回包 flow 时，对应地址族上下文才会带有 `have_rule` 或 `have_flow`。新插件应 include 当前版本的 `plugins/include/veer_plugin_helpers.h` 并随 ABI 版本重新编译 object，以保持共享 prog-array 规格一致，同时复用 slot、continue helper、skb 写入/校验和/redirect 包装以及 IPv4/IPv6/L4 解析 helper。
+进入 `veer` pipeline 的 TC object 必须声明共享 `tc_prog_chain_v4` prog-array map，处理后应 tail-call 回对应 stage 的 continue slot，除非插件明确要返回最终 TC action。最终 action 只能是 `TC_ACT_OK`、`TC_ACT_SHOT`、`TC_ACT_UNSPEC`、重定向 helper 的返回值，或 `veer_tc_consumed()`。插件已接管数据包（例如 kfunc 已发出 clone）时返回 `veer_tc_consumed()`：TC 释放原包，并向发送方报告成功。不要返回 `TC_ACT_STOLEN`：Linux 6.6 及以上内核中核心程序通过 tcx 挂载，tcx 会把它当作“交给下一个程序”，原包会继续被发送；helper 头文件因此不再定义这个常量。eBPF tail call 是 continuation，不是普通函数调用；tail-call 成功后不会回到插件原来的栈帧。core 后插件如果要读取规则匹配上下文，需要同时声明共享 `tc_plugin_ctx_v4` 和 `tc_plugin_ctx_v6` map；只有内置 core 实际启用并匹配规则或回包 flow 时，对应地址族上下文才会带有 `have_rule` 或 `have_flow`。新插件应 include 当前版本的 `plugins/include/veer_plugin_helpers.h` 并随 ABI 版本重新编译 object，以保持共享 prog-array 规格一致，同时复用 slot、continue helper、skb 写入/校验和/redirect 包装以及 IPv4/IPv6/L4 解析 helper。
 
 生产环境只应加载可信 eBPF object。服务会校验路径、大小、sha256、program type 和 section，但不能证明第三方程序一定不会改包或丢包。
 
@@ -992,6 +992,8 @@ net.route.replace({namespace: ns.name, dst: "192.0.2.0/24", dev: "tun0", table: 
 
 插件创建的 bridge/veth/dummy/macvlan，以及对已有接口 master、up/down、MTU、ARP、promiscuous、offload、GSO、地址和路由的修改都会写入宿主资源租约。租约按属性互斥，记录首次修改前的值和 Linux boot ID；插件禁用、卸载或加载失败时按依赖顺序恢复，同名接口 identity 已变化或系统已跨 boot 时只丢弃旧租约，不会修改新设备。插件主动把属性、地址或自己新增的路由恢复到原值时租约自动释放。`net.lease.list()` 可读取本插件当前租约；`net.lease.restore(type, key)` 会恢复并释放指定租约，失败时保留记录供重试。`net.link.delete()` 只允许删除本插件通过 ensure API 创建并持有的 link，不能凭接口白名单删除宿主或其他插件的设备。
 
+`net.link.ensureVeth()` 的 `peer_internal: true` 把 peer 端标记为内部管道（例如 WAN 边界的 pipeline 端）：只要本插件仍持有这对 veth，且接口 identity 与租约一致，WebUI 和 `GET /api/interfaces`、宿主网络拓扑接口就不列出它；`include_internal=true` 仍可查询。标记写在所有权记录里，对已存在的 veth 再次调用时按最新值更新，旧宿主会忽略该字段。宿主不读取插件自己的资源记录来判断接口用途。
+
 需要同时切换多条路由、策略规则或静态邻居时，使用 `net.route.transaction()`、`net.rule.transaction()` 或 `net.neigh.transaction()`。每批最多 128 项；运行时先完成全部参数、权限、接口、租约冲突和内核快照预检，再按顺序应用，任一项失败会逆序恢复已经应用的项及 ownership ledger。事务只发生在控制面，不给 TC 热路径增加指令。单条 route/rule/neigh 写入也使用同一持久恢复路径；失败项保留 journal 和 ownership，阻止该表项被再次改写，无关表项继续处理。恢复按较新的事务优先、逐表项保存进度，并先核对当前属主、启动标识和接口身份，避免旧快照操作同名重建的接口。卸载前必须完成恢复，失败时保留依赖接口供重试。示例：
 
 ```js
@@ -1158,7 +1160,7 @@ socket 生命周期不受单次 handler 结束影响，但一次拨号、手工�
 
 ## 随仓库维护的插件
 
-可选 `veer_kfuncs` 模块为 TC 插件提供 `dataplane.kfuncs.handoff.v1`。插件必须根据宿主实际发布的 available_features 选择独立增强对象，缺少能力时保留基础路径；其 skb 所有权、GSO/GRO、编译/部署与生命周期契约见 [KERNEL.md](KERNEL.md)。这项能力默认不编译、不部署。
+可选 `veer_kfuncs` 模块为 TC 插件提供 `dataplane.kfuncs.handoff.v1`，按探测结果另行发布 `dataplane.kfuncs.handoff_ingress.v1` 和 `dataplane.kfuncs.wan.v1`。插件必须根据宿主实际发布的 available_features 选择独立增强对象，缺少能力时保留基础路径；其 skb 所有权、GSO/GRO、编译/部署与生命周期契约见 [KERNEL.md](KERNEL.md)。这项能力默认不编译、不部署。
 
 - `wan_core`（stable）：消费标准化 WAN session；direct 模式管理本地 L3 dummy，`segmented_veth` 管理 local/pipeline veth 边界，`direct_gro` 管理可选 helper 的单口 GRO 边界。
 - `lan_core`（stable）：管理 LAN bridge，并生成 Egress NAT、DHCPv4 和 IPv6 assignment plan。
@@ -1176,7 +1178,9 @@ PPPoE tunnel 自愈按接口名重新解析 ifindex，并核对 veth 配对、�
 
 `release.sh` 和 `scripts/package-plugins.sh` 默认只把 stable 插件放入 `veer-plugins.tar.gz`。
 
-`bootstrap.sh` 默认只构建和安装 Veer 核心，不执行 bundled 插件构建；`deploy.sh` 默认也不会解压或覆盖插件目录。设置 `VEER_INSTALL_PLUGINS=1` 才会构建并安装 bundled 插件；该开关不启用插件运行时，插件控制面和 TC 数据面仍分别由 `plugins_enabled`、`plugins_dataplane_enabled` 控制。直接运行 `release.sh` 时仍默认生成插件包，可用 `VEER_BUILD_PLUGIN_BUNDLE=0` 只构建核心发布物。
+插件自己的测试放在插件目录内并以 `test-` 开头：Node 单元测试命名为 `test-*.test.js`，由 `npm run test:plugins` 与发布门禁的 portable 层执行，可用 `sdk/plugin/test-host.cjs` 驱动控制面；宿主的 `internal/app/web_test` 只测试 WebUI 与 bridge 本身。bundled 打包会跳过 `test-` 开头的文件；`veer plugin pack` 不做这项过滤。
+
+`bootstrap.sh` 默认只构建和安装 Veer 核心，不执行 bundled 插件构建；`deploy.sh` 默认也不会解压或覆盖插件目录。设置 `VEER_INSTALL_PLUGINS=1` 才会构建并安装 bundled 插件；该开关不启用插件运行时，插件控制面和数据面仍分别由 `plugins_enabled`、`plugins_dataplane_enabled` 控制。直接运行 `release.sh` 时仍默认生成插件包，可用 `VEER_BUILD_PLUGIN_BUNDLE=0` 只构建核心发布物。
 
 ## 插件包发布
 
@@ -1216,9 +1220,11 @@ if (result.exit_code !== 0 || result.timed_out || result.cancelled || result.tru
 
 常驻外部程序使用 Linux 主控制 VM 的 `process.start({id, command, args, stdin, config, restart, max_restarts, stop_timeout_ms})`，对应 feature 为 `control.process.v1`，同样要求本地 `exec` 权限及关闭远程安装。config 最多 1 MiB，写入私有目录的 0600 文件，argv 中的 `{config}` 替换为文件路径；目录随最终退出清理；Veer 被强杀时遗留的私有目录按进程所有者区分，后续启动自动清理已退出所有者的目录，保留活跃目录和符号链接。持久配置另存加密 Secret（每条上限 2 MiB，计入数据库配额）。
 
-进程 ID 按插件隔离；同代际同配置的 start 幂等，改变配置或代际需先 stop。`process.status(id)`、`list()` 返回状态、PID、启动次数、时间和退出码，不含配置和参数。`process.logs(id)` 显式读取 stdout/stderr 各自最多 64 KiB 的尾部，可能包含凭据，不能直接加入公开状态。restart 默认为 never；on-failure 按 1、2、4、8、16 秒退避，最多重启 max_restarts 次（0–10），耗尽后相同 start 不重置预算。`process.restart(id)` 用于健康检查发现的故障，先优雅停止再退避重启，与失败退出共用同一重启预算。每插件最多 8 项，全局最多 32 项。
+进程 ID 按插件隔离；同代际同配置的 start 幂等，改变配置或代际需先 stop。`process.status(id)`、`list()` 返回状态、PID、启动次数、时间和退出码，不含配置和参数。`process.logs(id)` 显式读取 stdout/stderr 各自最多 64 KiB 的尾部，可能包含凭据，不能直接加入公开状态。restart 默认为 never；on-failure 按 1、2、4、8、16 秒退避，最多连续重启 max_restarts 次（0–10）。一次运行持续 10 分钟以上后，之前的重启不再计入预算，退避也从 1 秒重新开始，所以偶尔崩溃的程序每次都会被拉起，而启动即崩溃的程序仍会耗尽预算；耗尽后进程保持退出，相同 start 不重置预算。`process.restart(id)` 用于健康检查发现的故障，先优雅停止再退避重启，与失败退出共用同一重启预算。热重启交接进程时，已用的预算随进程一起交给新 daemon。每插件最多 8 项，全局最多 32 项。
 
-`process.stop(id)` 先 TERM，默认 1 秒后 KILL（可设 1–3000 ms），并清理同组子进程。控制 VM 停止、插件停用及运行时关闭都会停止所属进程。Linux 设置父进程死亡信号；完整保护要求 cgroup 限额成功，并通过独立 cgroup 清理后代。CPU/内存/PID 复用插件配置，全局内存/PID 与控制 Host 共用；这些资源限制不表示核心受到低权限 JS 沙箱约束。
+`process.stop(id)` 先 TERM，默认 1 秒后 KILL（可设 1–3000 ms），并清理同组子进程；这些后代退出（或超过 2 秒）后才返回，有 cgroup 时也等 cgroup 清空。控制 VM 停止、插件停用及运行时关闭都会停止所属进程。每个进程由一个 `veer --plugin-process-keeper` 守护进程托管：keeper 设置父进程死亡信号启动程序、转发输出并上报退出码；Veer 异常退出时 keeper 立即强杀程序，效果与原来的父进程死亡信号相同。完整保护要求 cgroup 限额成功，并通过独立 cgroup 清理后代；keeper 与程序位于同一 cgroup，计入同一限额。CPU/内存/PID 复用插件配置，全局内存/PID 与控制 Host 共用；这些资源限制不表示核心受到低权限 JS 沙箱约束。
+
+热重启时运行中的进程交给新 Veer，不重启：旧进程为每个 keeper 启用一次性抽象 socket 和随机令牌，写入运行状态目录下的私有交接文件，把进程移到不带控制器的 `veer-handoff/` cgroup 叶子，并关闭委托 cgroup 根上的控制器，使 systemd 能把新主进程放进根 cgroup；做不到时改为停止这些进程。新 Veer 只接受同用户、持有令牌的连接，接管后恢复资源限额，保留 PID、启动时间、启动次数和日志尾部。新 Veer 中的插件用完全相同的规格调用 `start` 即认领该进程，不会重启；规格不同则停止旧进程后重新启动；2 分钟内未被认领的进程会被停止。keeper 等待接管最多 90 秒，超时自行停止程序。`process.restart` 在认领前不可用。服务私有 `/tmp` 在旧实例退出后会被删除，运行中的程序不再能在原私有目录创建文件，认领时新建的私有目录供之后的重启使用。
 
 需要管理外部可执行文件时，Linux 主控制 VM 可使用 feature `control.process_binaries.v1`：`process.binaryInstall(request)` 后台下载，`binaryStatus(id)` 查询版本与进度，`binarySelect({id, version})` 切换默认版本，`binaryRemove({id, version})` 删除未使用版本。均要求本地 `exec` 权限和关闭远程插件安装。该下载属于受信任宿主执行能力，使用宿主网络，不经过 JS 的 `net_access`。
 
@@ -1284,4 +1290,4 @@ trust store 不物理删除发布者记录。撤销后状态变为 `revoked`，�
 - UI 永远通过 `VeerPluginHost` 访问资源和动作，不假设能拿到 Web Token。
 - 慢任务、重试、拨号状态机放 worker 或 timer，不阻塞主控制 VM。
 - 热路径能力只放 eBPF object 和 map，配置更新通过控制面批量写 map，避免包路径查询 SQLite 或 HTTP。
-- 默认发布包不包含 `lab` 插件。手动部署 lab 插件前必须审查 manifest 权限，并显式开启全局 `plugins_enabled`，再用插件级状态控制其控制面；进入 TC 数据面还必须显式开启 `plugins_dataplane_enabled`。
+- 默认发布包不包含 `lab` 插件。手动部署 lab 插件前必须审查 manifest 权限，并显式开启全局 `plugins_enabled`，再用插件级状态控制其控制面；进入数据面还必须显式开启 `plugins_dataplane_enabled`。

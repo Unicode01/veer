@@ -1411,7 +1411,7 @@ func TestPluginPipelineVersionedMapReplacementsReuseCompatibleStateMapFD(t *test
 }
 
 func TestKernelPluginPipelineRebuildRetainsPrivateMapsAfterFailure(t *testing.T) {
-	state := newPluginMapAPITestMap(t, &ebpf.MapSpec{Name: "wg_links", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16})
+	state := newPluginMapAPITestMap(t, &ebpf.MapSpec{Name: "tunnel_links", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16})
 	if err := state.Put(uint32(17), uint64(99)); err != nil {
 		t.Fatal(err)
 	}
@@ -1424,7 +1424,7 @@ func TestKernelPluginPipelineRebuildRetainsPrivateMapsAfterFailure(t *testing.T)
 	rt := &linuxKernelRuleRuntime{
 		coll: core, pluginPipelineActive: true, pluginPipelineFingerprint: "applied",
 		pluginPipelineBankSwitchedAt: time.Now(),
-		pluginPipelineLoaded:         []loadedPluginObjectRef{{PluginID: "vpn_core", ObjectID: "wg_adapter", coll: &ebpf.Collection{Maps: map[string]*ebpf.Map{"wg_links": state}, Programs: map[string]*ebpf.Program{"tc_adapter": prog}}}},
+		pluginPipelineLoaded:         []loadedPluginObjectRef{{PluginID: "vpn_core", ObjectID: "tunnel_adapter", coll: &ebpf.Collection{Maps: map[string]*ebpf.Map{"tunnel_links": state}, Programs: map[string]*ebpf.Program{"tc_adapter": prog}}}},
 		pluginRuntimeSnapshot:        pluginRuntimeSnapshot{Plugins: map[string]PluginRuntimeState{"vpn_core": {Attached: true}}},
 	}
 	t.Cleanup(rt.cleanupPluginPipelineLocked)
@@ -1437,7 +1437,7 @@ func TestKernelPluginPipelineRebuildRetainsPrivateMapsAfterFailure(t *testing.T)
 		// while retaining the original core and its active TC attachments.
 		rt.cleanupPluginPipelineLocked()
 		finish(false)
-		got, err := getPluginMapValueInRefs(rt.pluginPipelineLoaded, "vpn_core", "wg_adapter", "wg_links", pluginMapTestUint32(17))
+		got, err := getPluginMapValueInRefs(rt.pluginPipelineLoaded, "vpn_core", "tunnel_adapter", "tunnel_links", pluginMapTestUint32(17))
 		if err != nil || string(got) != string(pluginMapTestUint64(99)) {
 			t.Fatalf("attempt %d lost live adapter map: %x %v", attempt, got, err)
 		}
@@ -1451,9 +1451,9 @@ func TestKernelPluginPipelineRebuildRetainsPrivateMapsAfterFailure(t *testing.T)
 }
 
 func TestKernelPluginPipelineRebuildCommitKeepsReplacement(t *testing.T) {
-	state := newPluginMapAPITestMap(t, &ebpf.MapSpec{Name: "wg_links", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16})
+	state := newPluginMapAPITestMap(t, &ebpf.MapSpec{Name: "tunnel_links", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16})
 	rt := &linuxKernelRuleRuntime{coll: &ebpf.Collection{}, pluginPipelineActive: true,
-		pluginPipelineLoaded: []loadedPluginObjectRef{{coll: &ebpf.Collection{Maps: map[string]*ebpf.Map{"wg_links": state}}}}}
+		pluginPipelineLoaded: []loadedPluginObjectRef{{coll: &ebpf.Collection{Maps: map[string]*ebpf.Map{"tunnel_links": state}}}}}
 	finish, err := rt.preservePluginPipelineForRebuildLocked()
 	if err != nil {
 		t.Fatal(err)
@@ -1468,9 +1468,9 @@ func TestKernelPluginPipelineRebuildCommitKeepsReplacement(t *testing.T) {
 }
 
 func TestKernelPluginPipelineRebuildDoesNotResurrectCleanedRuntime(t *testing.T) {
-	state := newPluginMapAPITestMap(t, &ebpf.MapSpec{Name: "wg_links", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16})
+	state := newPluginMapAPITestMap(t, &ebpf.MapSpec{Name: "tunnel_links", Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: 16})
 	rt := &linuxKernelRuleRuntime{coll: &ebpf.Collection{}, pluginPipelineActive: true,
-		pluginPipelineLoaded: []loadedPluginObjectRef{{coll: &ebpf.Collection{Maps: map[string]*ebpf.Map{"wg_links": state}}}}}
+		pluginPipelineLoaded: []loadedPluginObjectRef{{coll: &ebpf.Collection{Maps: map[string]*ebpf.Map{"tunnel_links": state}}}}}
 	finish, err := rt.preservePluginPipelineForRebuildLocked()
 	if err != nil {
 		t.Fatal(err)
@@ -2573,22 +2573,31 @@ func TestKernelPluginPipelineRuntimeAttachesExplicitEgressInterfaceWithoutRules(
 	if _, err := rt.Reconcile(nil); err != nil {
 		t.Fatalf("Reconcile(nil) error = %v", err)
 	}
-	if len(rt.attachments) != 2 || rt.attachments[0].filter == nil || rt.attachments[1].filter == nil {
-		t.Fatalf("attachments = %+v, want IPv4 and IPv6 egress filters", rt.attachments)
+	if len(rt.attachments) != 2 {
+		t.Fatalf("attachments = %+v, want IPv4 and IPv6 egress attachments", rt.attachments)
 	}
 	wantNames := map[string]bool{
 		kernelForwardEgressPipelineProgramName:   false,
 		kernelForwardEgressPipelineProgramNameV6: false,
 	}
 	for _, attachment := range rt.attachments {
-		filter := attachment.filter
-		if filter.Parent != netlink.HANDLE_MIN_EGRESS {
-			t.Fatalf("filter parent = %#x, want HANDLE_MIN_EGRESS %#x", filter.Parent, uint32(netlink.HANDLE_MIN_EGRESS))
+		key, ok := attachment.key()
+		if !ok {
+			t.Fatalf("attachment %+v has no position", attachment)
 		}
-		if _, ok := wantNames[filter.Name]; !ok {
-			t.Fatalf("unexpected egress filter name %q", filter.Name)
+		if key.parent != netlink.HANDLE_MIN_EGRESS {
+			t.Fatalf("attachment parent = %#x, want HANDLE_MIN_EGRESS %#x", key.parent, uint32(netlink.HANDLE_MIN_EGRESS))
 		}
-		wantNames[filter.Name] = true
+		name := ""
+		if attachment.filter != nil {
+			name = attachment.filter.Name
+		} else {
+			name = attachment.tcx.name
+		}
+		if _, ok := wantNames[name]; !ok {
+			t.Fatalf("unexpected egress program %q", name)
+		}
+		wantNames[name] = true
 	}
 	for name, found := range wantNames {
 		if !found {
@@ -3290,26 +3299,43 @@ func TestKernelPluginPipelineRuntimePersistsReplyFlowSnapshotState(t *testing.T)
 			}
 
 			initialLastSeen := flowValue.LastSeenNS
+			// Clearing last_seen_ns makes the next reply refresh it. The
+			// dataplane reads the coarse clock, so a refresh within the tick
+			// of initialLastSeen stores the same value, and a packet that read
+			// the entry before the clear writes the old value back; clear
+			// again until a refresh lands on a later tick.
 			if assertionErr == nil {
-				flowValue.LastSeenNS = 0
-				if err := pieces.flowsV4.Put(flowKey, flowValue); err != nil {
-					assertionErr = fmt.Errorf("clear reply flow last_seen_ns: %w", err)
-				}
-			}
-			if assertionErr == nil {
-				_, refreshed, waitErr := waitForKernelPluginReplyFlowV4(
-					pieces.flowsV4,
-					uint32(rule.ID),
-					fullNAT,
-					2*time.Second,
-					func(value tcFlowValueV4) bool {
-						return value.Flags&kernelFlowFlagReplySeen != 0 && value.LastSeenNS > initialLastSeen
-					},
-				)
-				if waitErr != nil {
-					assertionErr = fmt.Errorf("reply flow did not refresh after another packet: %w", waitErr)
-				} else if refreshed.LastSeenNS == 0 {
-					assertionErr = errors.New("reply flow last_seen_ns remained zero")
+				deadline := time.Now().Add(2 * time.Second)
+				for {
+					var current tcFlowValueV4
+					if err := pieces.flowsV4.Lookup(flowKey, &current); err != nil {
+						assertionErr = fmt.Errorf("read reply flow: %w", err)
+						break
+					}
+					current.LastSeenNS = 0
+					if err := pieces.flowsV4.Put(flowKey, current); err != nil {
+						assertionErr = fmt.Errorf("clear reply flow last_seen_ns: %w", err)
+						break
+					}
+					_, refreshed, waitErr := waitForKernelPluginReplyFlowV4(
+						pieces.flowsV4,
+						uint32(rule.ID),
+						fullNAT,
+						250*time.Millisecond,
+						func(value tcFlowValueV4) bool {
+							return value.Flags&kernelFlowFlagReplySeen != 0 && value.LastSeenNS > initialLastSeen
+						},
+					)
+					if waitErr == nil {
+						if refreshed.LastSeenNS == 0 {
+							assertionErr = errors.New("reply flow last_seen_ns remained zero")
+						}
+						break
+					}
+					if time.Now().After(deadline) {
+						assertionErr = fmt.Errorf("reply flow did not refresh after another packet: %w", waitErr)
+						break
+					}
 				}
 			}
 			if assertionErr == nil {

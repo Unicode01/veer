@@ -4,6 +4,10 @@ set -eu
 ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 : "${BPF_CLANG:=clang}"
 : "${BPF_EXTRA_CFLAGS:=}"
+# The objects are verified as BPF v1, the default of clang up to 19. Newer
+# clang defaults to v3: 5.10 rejects its atomics, and the code it emits for
+# the larger programs no longer passes the 5.15.0-25 verifier.
+: "${BPF_CPU:=v1}"
 
 target_arch() {
 	case "$(uname -m)" in
@@ -60,7 +64,7 @@ build_core() {
 	shift 2
 	# arch_include_flags and BPF_EXTRA_CFLAGS intentionally expand to argument lists.
 	# shellcheck disable=SC2046,SC2086
-	"$BPF_CLANG" -O2 -g -target bpf -D__TARGET_ARCH_"$(target_arch)" -I"$EBPF_DIR/include" $(arch_include_flags) $BPF_EXTRA_CFLAGS "$@" -c "$src" -o "$out"
+	"$BPF_CLANG" -O2 -g -target bpf -mcpu="$BPF_CPU" -D__TARGET_ARCH_"$(target_arch)" -I"$EBPF_DIR/include" $(arch_include_flags) $BPF_EXTRA_CFLAGS "$@" -c "$src" -o "$out"
 	if command -v llvm-strip >/dev/null 2>&1; then
 		llvm-strip -g "$out" || true
 	fi
@@ -69,7 +73,5 @@ build_core() {
 
 EBPF_DIR="$ROOT_DIR/internal/app/ebpf"
 build_core "$EBPF_DIR/forward-tc-bpf.c" "$EBPF_DIR/forward-tc-bpf.o"
-build_core "$EBPF_DIR/forward-tc-bpf.c" "$EBPF_DIR/forward-tc-bpf-stats.o" -DFORWARD_ENABLE_TRAFFIC_STATS=1
 build_core "$EBPF_DIR/forward-xdp-bpf.c" "$EBPF_DIR/forward-xdp-bpf.o"
-build_core "$EBPF_DIR/forward-xdp-bpf.c" "$EBPF_DIR/forward-xdp-bpf-stats.o" -DFORWARD_ENABLE_TRAFFIC_STATS=1
 build_core "$EBPF_DIR/plugin-xdp-dispatcher-bpf.c" "$EBPF_DIR/plugin-xdp-dispatcher-bpf.o"

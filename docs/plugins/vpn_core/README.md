@@ -20,6 +20,8 @@ WireGuard 地址须来自实际连接配置，页面不虚构默认地址。代�
 
 0.8.5 修复 WG 清理失败后、隧道已不存在时的重试异常；保留 journal 继续完成清理，不影响其他出口。多出口接口故障隔离还需要配合包含对应 TC 挂载与回滚、源地址恢复重试及 veth 双端所有权清理修复的 Veer 主程序。
 
+0.9.1 把各驱动共用的 TC 适配器从 WireGuard 时期的名字改为中性名称：对象文件 `tunnel_adapter*.o`、map `tunnel_links`、hook `tunnel-links` / `tunnel-direct-out`、巡检定时器 `tunnel_repair`。升级后照常读取旧出口记录里的隧道 ifindex，并删除旧 hook 的绑定记录；首次 reconcile 按原接口重新填充映射和绑定，不因改名重建出口。WireGuard 驱动自己的 WAN ID（`wg_<key>`）和接口名（`vwg*`、`veerwg*`）不变，出向 NAT 无需调整。
+
 ## 链路健康检测（0.8.0）
 
 出口卡片提供一个“健康检测”按钮，点击后直接在卡片上显示检测中、结果、请求耗时、检测时间及失败原因，不打开独立面板。默认仅手动检测；内网目标、预期状态、DNS 及可选定时检测通过下方 API 设置，不重新应用出口。
@@ -43,19 +45,7 @@ Linux 集成测试通过实际插件 API 验证 WG、Mihomo、sing-box 探测及
 
 ## 从 wireguard_mesh 迁移
 
-0.6.0 将旧插件 ID `wireguard_mesh` 改为 `vpn_core`。不能只改目录或直接修改数据库中的 ID：密钥密文的认证信息绑定了原 ID。
-
-1. 备份数据库、对应 `.veer-secrets.key`、插件代码及 `<plugins_dir>.veer-state`。先将引用 VPN 的 LAN / NAT 切换到其他出口，再在旧插件中拆除隧道并停用旧插件。拆除会中断这些隧道的连接，保留草稿与密钥。
-2. 把旧 `wireguard_mesh` 代码移到插件扫描目录以外，安装新 `vpn_core` 代码。保持 Veer 停止或旧插件停用，不要在迁移完成前启用新插件。
-3. 使用新版本 Veer 执行本地命令：
-
-   ```sh
-   /opt/veer/veer plugin migrate-vpn --database /opt/veer/forward.db --plugins-dir /opt/veer/plugins
-   ```
-
-4. 重启 Veer 并启用 VPN 插件。确认草稿和核心版本，重新应用所需出口，再恢复 LAN / NAT 的选择。
-
-迁移在 SQLite 事务内改写身份、按新 ID 重新加密 Secret，并迁移受管理核心目录和该目录内的显式 `core_path` 引用。已停用的插件保持停用；旧租约未清理、新 ID 已有状态或两边核心目录同时存在时明确拒绝合并。核心目录改名与数据库提交之间的崩溃可通过原命令重试；迁移失败时保持插件停用。WAN ID、接口名和 LAN/NAT 引用不改名。历史性能报告中的旧路径保留其当时含义。
+0.6.0 将旧插件 ID `wireguard_mesh` 改为 `vpn_core`。当前 Veer 不再携带这项一次性迁移；仍在使用旧 ID 的安装先用 Veer v0.1.0 的 `veer plugin migrate-vpn` 完成迁移（步骤见 v0.1.0 中的本文档），再升级到更新版本。不能只改目录或直接修改数据库中的 ID：密钥密文的认证信息绑定了原 ID。
 
 | driver | 数据处理 | 依赖 |
 | --- | --- | --- |
@@ -66,7 +56,7 @@ Linux 集成测试通过实际插件 API 验证 WG、Mihomo、sing-box 探测及
 
 各驱动共用 WAN Core 和双向 TC L2/L3 适配，JavaScript 不逐包转发，无需关闭 Veer 快速 NAT。
 
-0.9.0 配合 `wan_core >=1.5.6` 自动选择两种数据路径。宿主编译了可选 helper、实际加载的模块提供 `dataplane.kfuncs.handoff_ingress.v1`，且插件含 `wg_adapter-direct.o` 时，本机 WAN 使用单个 dummy 边界，TC egress 送入隧道，helper 将回包送回该边界的 ingress；每个出口只有本机边界和实际隧道两个接口。未满足这些条件时使用 veth 兼容路径，旧 helper 继续使用原有交接能力。
+0.9.0 配合 `wan_core >=1.5.6` 自动选择两种数据路径。宿主编译了可选 helper、实际加载的模块提供 `dataplane.kfuncs.handoff_ingress.v1`，且插件含 `tunnel_adapter-direct.o` 时，本机 WAN 使用单个 dummy 边界，TC egress 送入隧道，helper 将回包送回该边界的 ingress；每个出口只有本机边界和实际隧道两个接口。未满足这些条件时使用 veth 兼容路径，旧 helper 继续使用原有交接能力。
 
 两种路径使用相同 WAN ID 和源地址。能力变化后，正常恢复或重新应用会迁移自有边界；迁移会中断该出口的现有连接。普通接口列表、IPv6 / 托管网络表单和出口选择隐藏 WAN Core 核验归属的内部 veth peer，保留可选 WAN 边界；诊断 API 可通过 `include_internal=true` 查看完整接口，不按名称前缀隐藏管理员自己的接口。
 
@@ -89,6 +79,8 @@ TC 适配器要求显式动态接口绑定，只在已应用出口的自有隧�
 核心统一持久保存到 `<plugins_dir>.veer-state/cores/vpn_core/<driver>/<os>-<arch>/<version>/`，与插件代码包和临时运行配置分开。每种核心最多保留 4 个版本，每插件核心文件合计上限 1 GiB；压缩包和解压出的可执行文件各最多 256 MiB。安装失败保留原默认版本并清理临时文件；Veer 崩溃遗留的下载目录在后续启动核心管理时按进程所有者清理。备份包含已安装核心及默认版本，不包含下载临时目录。
 
 “设为默认”选择已安装版本，“回滚上一版本”切回上次默认版本，“删除所选版本”清理不用的版本；默认版本及仍被受管理进程引用的文件禁止删除。安装、更新、选择和回滚均不重启正在运行的出口。确认版本后，重新应用需要切换的出口；其恢复配置固定到应用时的核心路径，不会因后来切换默认版本而自行升级。重新应用会中断该出口的代理连接。版本命令通过只表示核心可运行，不等于节点或出口健康。
+
+Veer 热重启（部署更新）时，运行中的 Mihomo / sing-box 核心交给新进程继续运行，不重启，经代理的连接保持不断；出口恢复时按核心启动时间确认是同一个核心。交接由旧实例完成，因此从不支持交接的版本升级上来的那一次热重启仍会重启核心。普通重启、停止服务或 Veer 崩溃时核心照常停止。
 
 未填写 `core_path` 的出口优先使用此处安装的默认核心；没有受管理版本时仍使用 `/usr/local/bin/mihomo` 或 `/usr/local/bin/sing-box`。也可用 `core_path` 指定本机其他绝对路径，文件名必须对应核心；指定的文件不参与插件版本管理。插件不运行 shell。WireGuard 工具和外部 TUN 提供者仍由本机管理员安装维护。
 
@@ -119,7 +111,7 @@ sing-box 使用 `"driver":"sing_box"`。核心配置由 `set_core_config` 加密
 
 `addresses` 可省略或为空，首次应用会检查本机接口网段、非默认路由、其他出口草稿和已应用租约，从有界候选池选择内部 WAN IPv4 `/32`。优先使用 `10.78.<slot>.1/32`，冲突时尝试其他候选；无可用地址时明确失败，不修改网络或启动核心。已分配地址固定在应用租约中，重新应用和恢复时沿用，避免改变现有 LAN/NAT 选择。高级设置仍可显式填写 `addresses`，保留原 API 行为；已保存的显式地址不会被替换。最终地址发布为 `status.wan_addresses` 和 `status.egress_nat_source_ip`。
 
-宿主按插件控制代际托管进程，提供状态、有限日志、优雅停止、超时强杀、子进程清理和指数退避重启。默认失败重启 3 次，耗尽后需显式重新应用；定时恢复不重置预算；TUN 丢失时通过同一预算执行受控重启，接口 DOWN/MTU 漂移在核验归属后原地修复。插件停用、控制 VM 停止及 Veer 退出会停止进程，Linux 设置父进程死亡信号。完整资源保护下，核心使用独立 cgroup，复用配置中的插件 CPU/内存/PID 和全局上限；核心拥有本地 exec 的服务权限，不属于低权限 JS 沙箱。
+宿主按插件控制代际托管进程，提供状态、有限日志、优雅停止、超时强杀、子进程清理和指数退避重启。默认最多连续失败重启 3 次，核心稳定运行 10 分钟以上后预算恢复；耗尽后需显式重新应用，定时恢复不重置预算；TUN 丢失时通过同一预算执行受控重启，接口 DOWN/MTU 漂移在核验归属后原地修复。插件停用、控制 VM 停止及 Veer 退出会停止进程，Linux 设置父进程死亡信号。完整资源保护下，核心使用独立 cgroup，复用配置中的插件 CPU/内存/PID 和全局上限；核心拥有本地 exec 的服务权限，不属于低权限 JS 沙箱。
 
 核心进程存在且自有 TUN 就绪后才发布可用 WAN；每秒检查状态、ifindex 和 MTU；启动后默认 30 秒仍未创建 TUN 则按同一预算重启，可用 startup_timeout_seconds 调整为 1–300 秒。失败时撤销 TC 映射和 WAN 可用状态，保留所选出口，不回退到直连。ready 只表示本机接入完成，不代表远端节点健康；核心重启会中断它持有的代理连接。WebUI 可按需读取核心日志的尾部，日志可能包含凭据，不会自动加入状态。
 
@@ -160,7 +152,7 @@ JavaScript 负责配置和恢复，不参与逐包转发。无需关闭 Veer 快
 
 ## 安装
 
-默认使用基础 TC 适配器和 veth 分段边界。可选 [Veer 内核扩展](../../KERNEL.md) 支持接收注入时，插件自动选择 `wg_adapter-direct.o`，只创建 WAN local dummy 与实际 WG/TUN 两个接口；发送适配挂 local egress，回包补头后直接进入 local ingress。旧版 helper 使用 `wg_adapter-kfuncs.o` 与 veth，模块或对象不可用时保留兼容路径。切换能力后正常重载插件会迁移自有边界，保留 WAN 名称、源地址与配置；改变边界类型会中断该出口的既有连接。WireGuard 加密仍由内核 WG 完成。
+默认使用基础 TC 适配器和 veth 分段边界。可选 [Veer 内核扩展](../../KERNEL.md) 支持接收注入时，插件自动选择 `tunnel_adapter-direct.o`，只创建 WAN local dummy 与实际 WG/TUN 两个接口；发送适配挂 local egress，回包补头后直接进入 local ingress。旧版 helper 使用 `tunnel_adapter-kfuncs.o` 与 veth，模块或对象不可用时保留兼容路径。切换能力后正常重载插件会迁移自有边界，保留 WAN 名称、源地址与配置；改变边界类型会中断该出口的既有连接。WireGuard 加密仍由内核 WG 完成。
 
 `pipeline.node` / `pipeline.handoff` 只是逻辑定义，本身不创建 Linux 网卡。兼容路径的 pipeline veth 则是真实设备，属于插件内部实现，不出现在普通接口列表或规则出口选择中；诊断资源和 `/api/interfaces?include_internal=true` 仍可查看。隐藏前核验 WAN 所有权、boot ID、接口代际、MAC 与双端关系，不按名称前缀隐藏管理员的设备。
 
@@ -168,7 +160,7 @@ JavaScript 负责配置和恢复，不参与逐包转发。无需关闭 Veer 快
 2. 在 Linux 源码目录运行 `sh plugins/vpn_core/build.sh`，生成基础、helper 与 direct 三份适配对象。将整个插件目录复制到实际 `plugins_dir`，同时安装 `wan_core >=1.5.6 <2.0.0`。
 3. 开启 `plugins_enabled=true` 和 `plugins_dataplane_enabled=true`；保持默认 `plugins_remote_install_enabled=false` 以允许插件 exec。插件需要 Veer 的网络管理权限，不执行 shell 或用户提供的脚本。
 4. 打开 VPN 页面，保存私钥，再保存并应用 profile。空插件和仅保存的草稿不更改网络。
-5. 在 LAN 配置中选择此 WAN，或在出向 NAT 中设置出口接口、源 IPv4 与 `prepared_l2` 重定向模式。不要填写内核 `vwg*` 接口作为核心 NAT 出口。
+5. 在 LAN 配置中选择此 WAN，或在出向 NAT 中设置出口接口和源 IPv4。出口边界不做 ARP，核心自动按 `prepared_l2` 用边界自己的 MAC 发送，出向 NAT 页面无需（也无法）另设重定向模式。不要填写内核 `vwg*` 接口作为核心 NAT 出口。
 
 ## 配置示例
 
@@ -195,11 +187,11 @@ JavaScript 负责配置和恢复，不参与逐包转发。无需关闭 Veer 快
 | WAN Core ID | `wg_default` |
 | 出向 NAT 接口 | `veerwg1` |
 | 出向 NAT 源地址 | `10.77.0.1` |
-| 出向 NAT 重定向模式 | `prepared_l2` |
+| 出向 NAT 重定向模式 | `prepared_l2`（LAN 选择此 WAN 时写入；手工出向 NAT 由核心自动选择） |
 | pipeline veth | `veerwgp1` |
 | 内核 WG 接口 | `vwgdefault` |
 
-整个 LAN 选择这个 WAN；仅一个设备走 WG 时，为它的下游接口创建更具体的出向 NAT，父接口保持原出口。协议子集覆盖沿用 Veer 的现有编排，不在插件中另建一套设备选择规则。多个出口使用不同 profile 和 slot。
+整个 LAN 选择这个 WAN；仅一个设备走 WG 时，为它的下游接口创建更具体的出向 NAT，父接口保持原出口。协议子集覆盖沿用 Veer 的现有编排，不在插件中另建一套设备选择规则。多个出口使用不同 profile 和 slot。走隧道的设备访问同一网桥或宿主其他网卡直连网段里的设备（例如另一个托管网络的虚拟机）时不进隧道，由宿主直接转发；出口不可用时这部分流量也照常放行，见 [Dataplane](../../README.md#dataplane)。
 
 每个 profile 最多 8 个 peer，slot 为 1–8，不可重复；更换 slot 前先拆除。标识限 1–11 位小写字母、数字或下划线，以字母开头。至少提供一个 IPv4 隧道地址；它安装在 WAN local veth，WG 设备自身不重复配置该地址。MTU 默认 1420，范围 1280–9000，应按上游实际 MTU 调整。
 
@@ -223,8 +215,8 @@ DNS 沿用 LAN 配置。Veer 本机代发的 DNS 属于宿主流量，不会自�
 
 ```sh
 sh scripts/build-all-ebpf.sh
-node --test internal/app/web_test/vpn_plugin.test.js
-sudo env VEER_RUN_WIREGUARD_TESTS=1 go test ./internal/app -run '^TestWireGuardMeshLinuxIntegration$' -count=1 -v -timeout=5m
+node --test plugins/vpn_core/test-*.test.js
+sudo env VEER_RUN_WIREGUARD_TESTS=1 go test ./internal/app -run '^TestVPNWireGuardLinuxIntegration$' -count=1 -v -timeout=5m
 ```
 
 Linux 测试在独立网络命名空间启动真实 Veer 和 WG peer，验证核心 NAT 与适配器的 TCP/UDP/ICMP 收发、下游接口覆盖、普通 WAN 不受影响、WG 重建及拆除后重新应用。显式启用时缺少权限、工具或内核能力直接失败。

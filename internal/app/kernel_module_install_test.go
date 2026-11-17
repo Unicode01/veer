@@ -165,11 +165,86 @@ func TestValidateKernelHelperModuleFile(t *testing.T) {
 	}
 }
 
+// kernelHelperTestModuleFrom is a valid module built from sources hashing to
+// srcversion, as modpost records them for a module with MODULE_VERSION.
+func kernelHelperTestModuleFrom(release, srcversion string) []byte {
+	return kernelHelperTestELF(
+		kernelHelperTestSection{
+			name: ".modinfo",
+			data: []byte("version=1.2.0\x00license=GPL\x00srcversion=" + srcversion + "\x00name=veer_kfuncs\x00vermagic=" + release + " SMP preempt mod_unload \x00"),
+		},
+		kernelHelperTestSection{name: ".BTF", data: []byte{0x9f, 0xeb, 1, 0}},
+	)
+}
+
+func TestKernelHelperModuleBuildComparesLoadedWithInstalled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "veer_kfuncs.ko")
+	if err := os.WriteFile(path, kernelHelperTestModuleFrom("6.12.74", "BCDDF444E260D9124A2007C"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	installed, err := readKernelHelperModuleBuild(path)
+	if err != nil || installed != (kernelHelperModuleBuild{Version: "1.2.0", SrcVersion: "BCDDF444E260D9124A2007C"}) {
+		t.Fatalf("installed build = %+v, %v", installed, err)
+	}
+	if _, err := readKernelHelperModuleBuild(filepath.Join(dir, "missing.ko")); err == nil {
+		t.Fatal("a missing file must fail")
+	}
+
+	sys := filepath.Join(dir, "sys", "veer_kfuncs")
+	if _, ok := loadedKernelHelperModuleBuild(sys); ok {
+		t.Fatal("no sysfs directory means not loaded")
+	}
+	if err := os.MkdirAll(sys, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sys, "version"), []byte("1.2.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sys, "srcversion"), []byte("0123456789ABCDEF0123456\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, ok := loadedKernelHelperModuleBuild(sys)
+	if !ok || loaded != (kernelHelperModuleBuild{Version: "1.2.0", SrcVersion: "0123456789ABCDEF0123456"}) {
+		t.Fatalf("loaded build = %+v, %v", loaded, ok)
+	}
+
+	if matches, known := kernelHelperLoadedMatches(loaded, installed); matches || !known {
+		t.Fatalf("different sources: matches=%v known=%v", matches, known)
+	}
+	detail := kernelHelperStaleDetail(loaded, installed, path)
+	for _, want := range []string{"srcversion 0123456789ABCDEF0123456", "srcversion BCDDF444E260D9124A2007C", path, "hot restart keeps", "systemctl restart veer"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("stale detail %q lacks %q", detail, want)
+		}
+	}
+	if matches, known := kernelHelperLoadedMatches(installed, installed); !matches || !known || kernelHelperStaleDetail(installed, installed, path) != "" {
+		t.Fatalf("same sources: matches=%v known=%v", matches, known)
+	}
+	// A module without srcversion (built outside modpost's version support)
+	// cannot be compared and is not reported stale.
+	unknown := kernelHelperModuleBuild{Version: "1.2.0"}
+	if _, known := kernelHelperLoadedMatches(unknown, installed); known || kernelHelperStaleDetail(unknown, installed, path) != "" {
+		t.Fatal("a missing srcversion must leave the comparison unknown")
+	}
+
+	status := withKernelHelperBuilds(KernelHelperModuleStatus{Name: optionalKernelModuleName, Loaded: true, ModuleInstalled: true}, loaded, installed, path)
+	if status.LoadedMatchesInstalled == nil || *status.LoadedMatchesInstalled || status.ReloadHint == "" ||
+		status.LoadedSrcVersion != loaded.SrcVersion || status.InstalledSrcVersion != installed.SrcVersion {
+		t.Fatalf("runtime status = %+v", status)
+	}
+	if status := withKernelHelperBuilds(KernelHelperModuleStatus{}, installed, installed, path); status.LoadedMatchesInstalled == nil || !*status.LoadedMatchesInstalled || status.ReloadHint != "" {
+		t.Fatalf("matching runtime status = %+v", status)
+	}
+}
+
 type kernelHelperFakeBuild struct {
 	calls  int
 	module []byte
 	env    []string
 	err    error
+	// loaded is the module in the kernel; nil means none is loaded.
+	loaded *kernelHelperModuleBuild
 }
 
 func kernelHelperFakeSystem(build *kernelHelperFakeBuild) kernelHelperBuildSystem {
@@ -198,6 +273,51 @@ func kernelHelperFakeSystem(build *kernelHelperFakeBuild) kernelHelperBuildSyste
 			}
 			return os.WriteFile(filepath.Join(dir, kernelHelperModuleFile), build.module, 0o644)
 		},
+		loaded: func() (kernelHelperModuleBuild, bool) {
+			if build.loaded == nil {
+				return kernelHelperModuleBuild{}, false
+			}
+			return *build.loaded, true
+		},
+	}
+}
+
+// After installing for the running kernel, the build says whether the loaded
+// module already has these sources or needs a full restart to be replaced.
+func TestBuildKernelHelperModuleComparesTheLoadedModule(t *testing.T) {
+	kdir := kernelHelperTestKDIR(t)
+	run := func(build *kernelHelperFakeBuild, installDir string, force bool) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		options := kernelHelperBuildOptions{KDIR: kdir, InstallDir: installDir, Force: force}
+		if err := buildKernelHelperModule(options, kernelHelperFakeSystem(build), &stdout, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		return stdout.String()
+	}
+
+	same := &kernelHelperFakeBuild{
+		module: kernelHelperTestModuleFrom("6.12.74", "BCDDF444E260D9124A2007C"),
+		loaded: &kernelHelperModuleBuild{Version: "1.2.0", SrcVersion: "BCDDF444E260D9124A2007C"},
+	}
+	if out := run(same, t.TempDir(), false); !strings.Contains(out, "same sources") || !strings.Contains(out, "no restart is needed") {
+		t.Fatalf("matching loaded module: %s", out)
+	}
+
+	installDir := t.TempDir()
+	older := &kernelHelperFakeBuild{
+		module: kernelHelperTestModuleFrom("6.12.74", "BCDDF444E260D9124A2007C"),
+		loaded: &kernelHelperModuleBuild{Version: "1.1.0", SrcVersion: "0123456789ABCDEF0123456"},
+	}
+	out := run(older, installDir, false)
+	for _, want := range []string{"is not this build", "version 1.1.0, srcversion 0123456789ABCDEF0123456", "hot restart keeps", "systemctl restart veer", "rmmod veer_kfuncs"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("older loaded module: output lacks %q:\n%s", want, out)
+		}
+	}
+	// Running build again without --force still says the file is not in use.
+	if out := run(older, installDir, false); !strings.Contains(out, "--force") || !strings.Contains(out, "is not this build") || older.calls != 1 {
+		t.Fatalf("installed file, older module loaded: calls=%d\n%s", older.calls, out)
 	}
 }
 
@@ -421,5 +541,15 @@ func TestKernelHelperCLIDispatchAndStatus(t *testing.T) {
 	}
 	if status.BinarySupport && !strings.Contains(status.NextStep, "kfuncs build --install-dir "+installDir) {
 		t.Fatalf("next step = %q", status.NextStep)
+	}
+	if status.LoadedMatchesInstalled != nil || status.InstalledSrcVersion != "" {
+		t.Fatalf("nothing installed, nothing to compare: %+v", status)
+	}
+	stdout.Reset()
+	if _, err := runKernelHelperCLI([]string{"kfuncs", "status", "--install-dir", installDir}, &stdout, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if text := stdout.String(); !strings.Contains(text, "installed:        no\n") || !strings.Contains(text, "loaded:           ") || strings.Contains(text, "same sources") {
+		t.Fatalf("status text:\n%s", text)
 	}
 }

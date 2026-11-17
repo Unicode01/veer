@@ -60,11 +60,16 @@ func Main(buildNonce string) {
 		exitOnVeerCLIError("kfuncs", err)
 		return
 	}
+	if handled, err := runHotRestartCLI(os.Args[1:], os.Stdout, os.Stderr); handled {
+		exitOnVeerCLIError("hot-restart", err)
+		return
+	}
 
 	workerMode := flag.Bool("worker", false, "run in worker mode")
 	rangeWorkerMode := flag.Bool("range-worker", false, "run in range worker mode")
 	sharedProxyMode := flag.Bool("shared-proxy", false, "run as shared proxy")
 	pluginHostMode := flag.Bool("plugin-host", false, "run isolated plugin control host")
+	pluginProcessKeeperMode := flag.Bool("plugin-process-keeper", false, "keep one managed plugin process")
 	workerIndex := flag.Int("id", 0, "worker slot index")
 	sockPath := flag.String("sock", "", "unix socket path")
 	configPath := flag.String("config", "config.json", "config file path")
@@ -82,6 +87,13 @@ func Main(buildNonce string) {
 	if *pluginHostMode {
 		if err := runPluginHostProcess(); err != nil {
 			log.Fatalf("plugin host: %v", err)
+		}
+		return
+	}
+
+	if *pluginProcessKeeperMode {
+		if err := runPluginProcessKeeper(); err != nil {
+			log.Fatalf("plugin process keeper: %v", err)
 		}
 		return
 	}

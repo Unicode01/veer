@@ -1921,19 +1921,7 @@ func validateEmbeddedEBPFObjects(repoRoot string) error {
 			}, includeDeps...),
 		},
 		{
-			objectPath: filepath.Join(ebpfDir, "forward-tc-bpf-stats.o"),
-			deps: append([]string{
-				filepath.Join(ebpfDir, "forward-tc-bpf.c"),
-			}, includeDeps...),
-		},
-		{
 			objectPath: filepath.Join(ebpfDir, "forward-xdp-bpf.o"),
-			deps: append([]string{
-				filepath.Join(ebpfDir, "forward-xdp-bpf.c"),
-			}, includeDeps...),
-		},
-		{
-			objectPath: filepath.Join(ebpfDir, "forward-xdp-bpf-stats.o"),
 			deps: append([]string{
 				filepath.Join(ebpfDir, "forward-xdp-bpf.c"),
 			}, includeDeps...),
@@ -1993,11 +1981,9 @@ func TestValidateEmbeddedEBPFObjectsDetectsStaleObject(t *testing.T) {
 	tcSource := filepath.Join(ebpfDir, "forward-tc-bpf.c")
 	xdpSource := filepath.Join(ebpfDir, "forward-xdp-bpf.c")
 	tcObject := filepath.Join(ebpfDir, "forward-tc-bpf.o")
-	tcStatsObject := filepath.Join(ebpfDir, "forward-tc-bpf-stats.o")
 	xdpObject := filepath.Join(ebpfDir, "forward-xdp-bpf.o")
-	xdpStatsObject := filepath.Join(ebpfDir, "forward-xdp-bpf-stats.o")
 
-	for _, path := range []string{header, commonHeader, tcSource, xdpSource, tcObject, tcStatsObject, xdpObject, xdpStatsObject} {
+	for _, path := range []string{header, commonHeader, tcSource, xdpSource, tcObject, xdpObject} {
 		writeFile(path)
 	}
 
@@ -2005,7 +1991,7 @@ func TestValidateEmbeddedEBPFObjectsDetectsStaleObject(t *testing.T) {
 	for _, path := range []string{header, commonHeader, tcSource, xdpSource} {
 		setModTime(path, base)
 	}
-	for _, path := range []string{tcObject, tcStatsObject, xdpObject, xdpStatsObject} {
+	for _, path := range []string{tcObject, xdpObject} {
 		setModTime(path, base.Add(time.Hour))
 	}
 

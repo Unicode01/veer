@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const uiDir = path.join(__dirname, '..', '..', '..', 'plugins', 'vpn_core', 'ui');
+const uiDir = path.join(__dirname, 'ui');
 const I = require(path.join(uiDir, 'i18n.js'));
 const M = require(path.join(uiDir, 'model.js'));
 const S = require(path.join(uiDir, 'share.js'));

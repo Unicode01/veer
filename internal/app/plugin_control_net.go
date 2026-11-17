@@ -551,6 +551,10 @@ func (h *pluginControlHost) netLinkEnsureVeth(call goja.FunctionCall) goja.Value
 	if raw := h.objectField(obj, "up"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
 		req.Up = raw.ToBoolean()
 	}
+	peerInternal := false
+	if raw := h.objectField(obj, "peer_internal"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
+		peerInternal = raw.ToBoolean()
+	}
 	if err := validatePluginControlInterfaceName(req.Host, "host"); err != nil {
 		h.throwf("net.link.ensureVeth: %v", err)
 	}
@@ -592,11 +596,13 @@ func (h *pluginControlHost) netLinkEnsureVeth(call goja.FunctionCall) goja.Value
 		}
 		if err := h.claimPluginOwnedLinks([]pluginOwnedLinkClaim{
 			{Namespace: req.Namespace, Name: req.Host, Kind: "veth", Peer: req.Peer, IfIndex: result.Host.IfIndex, MAC: result.Host.MAC},
-			{Namespace: req.Namespace, Name: req.Peer, Kind: "veth", Peer: req.Host, IfIndex: result.Peer.IfIndex, MAC: result.Peer.MAC},
+			{Namespace: req.Namespace, Name: req.Peer, Kind: "veth", Peer: req.Host, IfIndex: result.Peer.IfIndex, MAC: result.Peer.MAC, Internal: peerInternal},
 		}); err != nil {
 			_ = admin.LinkDelete(req.Host)
 			h.throwf("net.link.ensureVeth: record ownership: %v", err)
 		}
+	} else if err := h.setPluginOwnedLinkInternal(req.Namespace, req.Peer, peerInternal); err != nil {
+		h.throwf("net.link.ensureVeth: record ownership: %v", err)
 	}
 	return h.vm.ToValue(map[string]any{
 		"host":    pluginControlNetLinkInfoMap(result.Host),

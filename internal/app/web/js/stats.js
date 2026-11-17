@@ -210,6 +210,21 @@
     });
   }
 
+  // The configured flow cache, and the option that keeps it from taking effect on the TC engine.
+  function kernelFlowCachePill(data) {
+    if (!data.kernel_tc_flow_cache) {
+      return kernelStatePill(false, 'kernel.flowCache.enabled', 'kernel.flowCache.disabled');
+    }
+    const tc = (Array.isArray(data.engines) ? data.engines : []).find((engine) => engine && engine.name === 'tc');
+    if (tc && tc.flow_cache_disabled_by) {
+      return app.createNode('span', {
+        className: 'stat-pill',
+        text: app.t('kernel.flowCache.inactive', { option: tc.flow_cache_disabled_by })
+      });
+    }
+    return kernelStatePill(true, 'kernel.flowCache.enabled', 'kernel.flowCache.disabled');
+  }
+
   function kernelEngineBadge(name) {
     const normalized = String(name || '').toLowerCase();
     const badgeClass = normalized === 'xdp' ? 'badge-xdp' : normalized === 'tc' ? 'badge-tc' : 'badge-kernel';
@@ -1049,7 +1064,8 @@
       ['fib', engine.diag_fib_non_success],
       ['drop', engine.diag_redirect_drop],
       ['nat_fail', engine.diag_nat_reserve_fail],
-      ['recreate', engine.diag_reply_flow_recreated]
+      ['recreate', engine.diag_reply_flow_recreated],
+      ['oversize', engine.diag_oversize_drop]
     ].forEach(([label, value]) => {
       if (!value) return;
       diagParts.push(label + '=' + String(value));
@@ -1063,7 +1079,10 @@
         ['rewrite_fail', engine.diag_rewrite_fail],
         ['probe2', engine.diag_nat_probe_round2_used],
         ['probe3', engine.diag_nat_probe_round3_used],
-        ['tcp_close_del', engine.diag_tcp_close_delete]
+        ['tcp_close_del', engine.diag_tcp_close_delete],
+        ['pmtu', engine.diag_pmtu_to_stack],
+        ['frag', engine.diag_fragment_forwarded],
+        ['flow_cache', engine.diag_flow_cache_hit]
       ].forEach(([label, value]) => {
         if (!value) return;
         diagParts.push(label + '=' + String(value));
@@ -1501,6 +1520,7 @@
       }),
       kernelRuntimeSummaryInline([
         kernelStatePill(!!data.traffic_stats, 'kernel.traffic.enabled', 'kernel.traffic.disabled'),
+        kernelFlowCachePill(data),
         app.createNode('span', {
           text: app.t(data.retry_pending ? 'kernel.retry.pending' : 'kernel.retry.idle')
         })

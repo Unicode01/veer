@@ -26,7 +26,7 @@ import (
 
 // The complete topology runs in a disposable network namespace. No route,
 // firewall rule, sysctl or WireGuard device is installed in the runner's netns.
-func TestWireGuardMeshLinuxIntegration(t *testing.T) {
+func TestVPNWireGuardLinuxIntegration(t *testing.T) {
 	if os.Getenv("VEER_VPN_CAPTURE_SOURCE") != "" {
 		runVPNOuterSourceCapture(t)
 		return
@@ -62,7 +62,7 @@ func TestWireGuardMeshLinuxIntegration(t *testing.T) {
 		}
 	}
 	if os.Getenv("VEER_WG_TEST_CHILD") == "1" {
-		runWireGuardMeshTopology(t)
+		runVPNWireGuardTopology(t)
 		return
 	}
 	binary, err := os.Executable()
@@ -71,7 +71,7 @@ func TestWireGuardMeshLinuxIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "unshare", "--net", "--", binary, "-test.run=^TestWireGuardMeshLinuxIntegration$", "-test.v", "-test.timeout=230s")
+	cmd := exec.CommandContext(ctx, "unshare", "--net", "--", binary, "-test.run=^TestVPNWireGuardLinuxIntegration$", "-test.v", "-test.timeout=230s")
 	cmd.Env = append(os.Environ(), "VEER_WG_TEST_CHILD=1")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -97,7 +97,7 @@ func TestVPNCoreLinuxIntegration(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, "unshare", "--net", "--", binary, "-test.run=^TestWireGuardMeshLinuxIntegration$", "-test.v", "-test.timeout=230s")
+			cmd := exec.CommandContext(ctx, "unshare", "--net", "--", binary, "-test.run=^TestVPNWireGuardLinuxIntegration$", "-test.v", "-test.timeout=230s")
 			cmd.Env = append(os.Environ(), "VEER_RUN_WIREGUARD_TESTS=1", "VEER_WG_TEST_CHILD=1", "VEER_TEST_VPN_DRIVER="+driver)
 			output, err := cmd.CombinedOutput()
 			if err != nil {
@@ -108,7 +108,7 @@ func TestVPNCoreLinuxIntegration(t *testing.T) {
 	}
 }
 
-func runWireGuardMeshTopology(t *testing.T) {
+func runVPNWireGuardTopology(t *testing.T) {
 	t.Helper()
 	driver := os.Getenv("VEER_TEST_VPN_DRIVER")
 	tunnelInterface, wanInterface, selectedSource := "vwgdefault", "veerwg1", "10.77.0.1"
@@ -158,6 +158,42 @@ func runWireGuardMeshTopology(t *testing.T) {
 		ip("-n", ns, "link", "set", peer, "up")
 		ip("-n", ns, "route", "add", "default", "via", "192.168.10.1")
 		ip("-n", ns, "-6", "route", "add", "default", "via", "fd10::1")
+	}
+	// A guest on a second LAN bridge without egress NAT: the host routes
+	// between the bridges, and the guest whose traffic leaves by the VPN must
+	// still reach it directly, not through the tunnel.
+	other := "vwg-o-" + suffix
+	ip("netns", "add", other)
+	t.Cleanup(func() { _ = exec.Command("ip", "netns", "del", other).Run() })
+	ip("-n", other, "link", "set", "lo", "up")
+	ip("link", "add", "br-lan2", "type", "bridge")
+	ip("address", "add", "192.168.30.1/24", "dev", "br-lan2")
+	ip("link", "set", "br-lan2", "up")
+	ip("link", "add", "port2", "type", "veth", "peer", "name", "client2")
+	ip("link", "set", "port2", "master", "br-lan2")
+	ip("link", "set", "port2", "up")
+	ip("link", "set", "client2", "netns", other)
+	ip("-n", other, "address", "add", "192.168.30.20/24", "dev", "client2")
+	ip("-n", other, "link", "set", "client2", "up")
+	ip("-n", other, "route", "add", "default", "via", "192.168.30.1")
+	// lanReachable checks that the VPN-selected guest and the guests of its
+	// own and the other bridge reach each other with their own addresses.
+	lanLabel := driver
+	if lanLabel == "" {
+		lanLabel = "wireguard"
+	}
+	lanReachable := func(phase string) {
+		t.Helper()
+		all := []string{"tcp", "udp", "icmp"}
+		runLateralPaths(t, lanLabel+" "+phase, []lateralPath{
+			{"selected_to_same_bridge", selected, direct, "192.168.10.30", "192.168.10.20", all},
+			{"same_bridge_to_selected", direct, selected, "192.168.10.20", "192.168.10.30", all},
+			{"selected_to_other_bridge", selected, other, "192.168.30.20", "192.168.10.20", all},
+			{"other_bridge_to_selected", other, selected, "192.168.10.20", "192.168.30.20", all},
+		})
+		if t.Failed() {
+			t.FailNow()
+		}
 	}
 	ip("link", "add", "wan", "type", "veth", "peer", "name", "outside")
 	ip("link", "set", "outside", "netns", remote)
@@ -538,7 +574,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 	waitNAT(childID, natSource)
 	if driver == "sing_box" {
 		capture := filepath.Join(t.TempDir(), "outer-source")
-		watcher := exec.Command("ip", "netns", "exec", remote, os.Args[0], "-test.run=^TestWireGuardMeshLinuxIntegration$", "-test.timeout=30s")
+		watcher := exec.Command("ip", "netns", "exec", remote, os.Args[0], "-test.run=^TestVPNWireGuardLinuxIntegration$", "-test.timeout=30s")
 		watcher.Env = append(os.Environ(), "VEER_VPN_CAPTURE_SOURCE="+capture)
 		var logs bytes.Buffer
 		watcher.Stdout = &logs
@@ -578,6 +614,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 		probe(selected, selectedSource)
 	}
 	probe(direct, "192.0.2.1")
+	lanReachable("vpn applied")
 	{
 		// Retain packet/route evidence on failure; a working downstream NAT
 		// does not imply that a device-bound host probe uses the same path.
@@ -604,7 +641,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 			}()
 		}
 		observed := filepath.Join(t.TempDir(), "health-source")
-		server := exec.Command("ip", "netns", "exec", remote, os.Args[0], "-test.run=^TestWireGuardMeshLinuxIntegration$")
+		server := exec.Command("ip", "netns", "exec", remote, os.Args[0], "-test.run=^TestVPNWireGuardLinuxIntegration$")
 		server.Env = append(os.Environ(), "VEER_VPN_HEALTH_SERVER=1", "VEER_VPN_HEALTH_OBSERVED="+observed)
 		if err := server.Start(); err != nil {
 			t.Fatal(err)
@@ -694,7 +731,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 					continue
 				}
 				info, err := m.Info()
-				if err != nil || info.Name != "wg_links" {
+				if err != nil || info.Name != "tunnel_links" {
 					m.Close()
 					continue
 				}
@@ -861,7 +898,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 	}
 	// A 2 MiB echo in each direction crosses the tunnel MTU many times.
 	ready := filepath.Join(t.TempDir(), "bulk-ready")
-	bulk := exec.Command("ip", "netns", "exec", remote, os.Args[0], "-test.run=^TestWireGuardMeshLinuxIntegration$")
+	bulk := exec.Command("ip", "netns", "exec", remote, os.Args[0], "-test.run=^TestVPNWireGuardLinuxIntegration$")
 	bulk.Env = append(os.Environ(), "VEER_WG_BULK=server", "VEER_WG_BULK_READY="+ready)
 	var bulkLogs bytes.Buffer
 	bulk.Stdout = &bulkLogs
@@ -885,7 +922,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	client := exec.Command("ip", "netns", "exec", selected, os.Args[0], "-test.run=^TestWireGuardMeshLinuxIntegration$")
+	client := exec.Command("ip", "netns", "exec", selected, os.Args[0], "-test.run=^TestVPNWireGuardLinuxIntegration$")
 	client.Env = append(os.Environ(), "VEER_WG_BULK=client")
 	if out, err := client.CombinedOutput(); err != nil {
 		t.Fatalf("bulk client: %v: %s", err, out)
@@ -922,7 +959,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 		serverReady, connected := filepath.Join(work, "stream-ready"), filepath.Join(work, "stream-connected")
 		release := filepath.Join(work, "stream-release")
 		startStream := func(ns, role string) *exec.Cmd {
-			p := exec.Command("ip", "netns", "exec", ns, os.Args[0], "-test.run=^TestWireGuardMeshLinuxIntegration$")
+			p := exec.Command("ip", "netns", "exec", ns, os.Args[0], "-test.run=^TestVPNWireGuardLinuxIntegration$")
 			p.Env = append(os.Environ(), "VEER_WG_BULK=stream-"+role, "VEER_WG_BULK_READY="+serverReady, "VEER_WG_STREAM_CONNECTED="+connected, "VEER_WG_STREAM_RELEASE="+release)
 			p.Stdout = logFile
 			p.Stderr = logFile
@@ -1017,7 +1054,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 	t.Cleanup(func() { _ = cmd.Process.Signal(syscall.SIGCONT) })
 	ip("link", "del", tunnelInterface)
 	leakReady := filepath.Join(t.TempDir(), "leak-ready")
-	leakServer := exec.Command("ip", "netns", "exec", remote, os.Args[0], "-test.run=^TestWireGuardMeshLinuxIntegration$")
+	leakServer := exec.Command("ip", "netns", "exec", remote, os.Args[0], "-test.run=^TestVPNWireGuardLinuxIntegration$")
 	leakServer.Env = append(os.Environ(), "VEER_WG_BULK=leak-server", "VEER_WG_BULK_READY="+leakReady)
 	var leakLogs bytes.Buffer
 	leakServer.Stdout = &leakLogs
@@ -1043,7 +1080,7 @@ func runWireGuardMeshTopology(t *testing.T) {
 	}
 	// TCP must fail even when the parent has a healthy ordinary WAN. ICMP
 	// alone would be a weak leak test for a proxy that cannot carry ICMP.
-	check := exec.Command("ip", "netns", "exec", selected, os.Args[0], "-test.run=^TestWireGuardMeshLinuxIntegration$")
+	check := exec.Command("ip", "netns", "exec", selected, os.Args[0], "-test.run=^TestVPNWireGuardLinuxIntegration$")
 	check.Env = append(os.Environ(), "VEER_WG_BULK=leak-client")
 	if out, err := check.CombinedOutput(); err != nil {
 		t.Fatalf("missing tunnel TCP isolation: %v: %s", err, out)
@@ -1055,6 +1092,9 @@ func runWireGuardMeshTopology(t *testing.T) {
 		t.Fatalf("missing WG leaked selected traffic: %s", out)
 	}
 	ip("netns", "exec", direct, "ping", "-n", "-c", "1", "-W", "1", "203.0.113.1")
+	// With the tunnel gone the selected guest is cut off from the outside,
+	// but not from the LAN.
+	lanReachable("tunnel missing")
 	_ = cmd.Process.Signal(syscall.SIGCONT)
 	deadline = time.Now().Add(15 * time.Second)
 	for {

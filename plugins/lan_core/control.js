@@ -76,7 +76,7 @@ plugin.service({
 ui.register({
   static_dir: 'ui',
   entry: 'index.html',
-  sha256: '1823a0f072b0e2c209ba3b2c5996353a62dbbf6a5ea688eebb43d24a5f744c4f',
+  sha256: 'c9567110b1deb8e65aa3793455c6e9c362327db4ce57a5f26e829001b2863e1a',
   page: 'lan',
   page_title: 'LAN',
   resources: [
@@ -120,7 +120,7 @@ exports.onTimer = function (ctx) {
 
 exports.onResourceApply = function (ctx) {
   if (!ctx.resource || ctx.resource.id !== 'profiles') return;
-  var records = ctx.records || [];
+  var records = currentProfileRecords(ctx.records || []);
   try {
     applyRecords(records, true);
   } finally {
@@ -243,6 +243,27 @@ function armRepairTimer(records) {
   timer.clear('lan_repair');
 }
 
+// The host reads ctx.records before the event waits for this plugin's queue,
+// so a teardown or an API delete that ran in between may have changed or
+// removed them. Applying the pre-teardown snapshot would rebuild the bridge,
+// re-enslave its ports and re-enable its plans for a LAN that is gone. Use
+// each stored record as it is now and skip deleted ones. Records without a
+// stored revision were supplied by the caller as is.
+function currentProfileRecords(records) {
+  var out = [];
+  for (var i = 0; i < records.length; i++) {
+    var record = records[i];
+    if (!record) continue;
+    if (!(record.revision > 0)) {
+      out.push(record);
+      continue;
+    }
+    var stored = resources.get('profiles', record.key);
+    if (stored) out.push(stored);
+  }
+  return out;
+}
+
 function mergedProfileRecords(records) {
   var out = [];
   var positions = {};
@@ -300,7 +321,7 @@ function disableProfileRuntime(record) {
     child_interface: '',
     out_interface: safeIfaceName(raw.wan_egress_interface || raw.out_interface || raw.wan_interface || ''),
     out_source_ip: text(raw.wan_egress_source_ip || raw.out_source_ip || raw.source_ip || ''),
-    protocol: normalizeProtocol(raw.protocol || 'tcp+udp'),
+    protocol: normalizeProtocol(raw.protocol || 'tcp+udp+icmp'),
     nat_type: text(raw.nat_type || 'symmetric'),
     redirect_mode: normalizeRedirectMode(raw.redirect_mode || raw.egress_nat_redirect_mode || ''),
     enabled: false,
@@ -860,7 +881,7 @@ function normalizeProfile(key, raw) {
     auto_ipv6_pd: bool(raw.auto_ipv6_pd, true),
     ipv6_subnet_id: intValue(raw.ipv6_subnet_id || raw.pd_subnet_id, 0, 65535, 0),
     nat_type: text(raw.nat_type || 'symmetric'),
-    protocol: normalizeProtocol(raw.protocol || 'tcp+udp'),
+    protocol: normalizeProtocol(raw.protocol || 'tcp+udp+icmp'),
     redirect_mode: normalizeRedirectMode(raw.redirect_mode || raw.egress_nat_redirect_mode || ''),
     preserve_bridge: bool(raw.preserve_bridge, isProtectedBridgeName(bridge))
   };
@@ -1312,8 +1333,8 @@ function utf8ByteLength(value) {
 }
 
 function normalizeProtocol(value) {
-  value = lower(value || 'tcp+udp');
-  if (!value) return 'tcp+udp';
+  value = lower(value || 'tcp+udp+icmp');
+  if (!value) return 'tcp+udp+icmp';
   var seen = {};
   var parts = value.split(/[^a-z0-9]+/);
   for (var i = 0; i < parts.length; i++) {

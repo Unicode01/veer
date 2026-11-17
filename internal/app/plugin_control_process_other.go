@@ -3,8 +3,8 @@
 package app
 
 import (
+	"fmt"
 	"os"
-	"os/exec"
 )
 
 func newPluginManagedProcessDirectory() (string, error) {
@@ -13,8 +13,21 @@ func newPluginManagedProcessDirectory() (string, error) {
 
 func cleanupPluginBinaryStages(root string) error { return os.MkdirAll(root, 0700) }
 
-func preparePluginManagedProcess(cmd *exec.Cmd)   {}
-func terminatePluginManagedProcess(cmd *exec.Cmd) { _ = cmd.Process.Kill() }
-func limitPluginManagedProcess(cmd *exec.Cmd, owner string, cfg *Config) (func(), error) {
-	return func() {}, nil
+// Managed processes are Linux-only; the plugin API refuses them elsewhere.
+func (p *pluginManagedProcess) launch(pluginProcessRequest, string) (*pluginKeeperRun, func(), error) {
+	return nil, nil, fmt.Errorf("managed processes require Linux")
 }
+
+func (run *pluginKeeperRun) kill() {}
+
+func runPluginProcessKeeper() error {
+	return fmt.Errorf("process keepers require Linux")
+}
+
+func (r *pluginProcessRegistry) adoptHandedOffProcesses() {}
+
+func handOffPluginProcesses(pluginControlRuntime) *pluginProcessHandoff { return nil }
+
+type pluginProcessHandoff struct{}
+
+func (*pluginProcessHandoff) finalize() error { return nil }

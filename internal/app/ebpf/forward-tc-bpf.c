@@ -15,7 +15,10 @@
 #include "include/forward_flow_time.h"
 
 #define ICMP_ECHOREPLY 0
+#define ICMP_DEST_UNREACH 3
 #define ICMP_ECHO 8
+#define ICMP_TIME_EXCEEDED 11
+#define ICMP_PARAMETERPROB 12
 #define ICMPV6_ECHO_REQUEST 128
 #define ICMPV6_ECHO_REPLY 129
 
@@ -76,6 +79,33 @@ struct flow_key_v4 {
 	__u8 pad[3];
 };
 
+/*
+ * How the core's fast path last sent one direction of an egress NAT flow,
+ * kept in that direction's flow entry so the dispatcher can send the next
+ * packet straight from its flow lookup (try_front_flow_fast_v4,
+ * try_reply_flow_fast_v4). stamp ties the record to the fast-path window
+ * that began at the entry's last_seen_ns and to one generation of
+ * tc_flow_cache_state_v4 (flow_fast_stamp_v4): the slow path renewing
+ * last_seen_ns or user space bumping the generation retires it. The record
+ * is written in place (remember_flow_fast_v4) and read under stamp checks
+ * on both sides of the copy.
+ */
+struct flow_fast_v4 {
+	__u32 stamp;
+	__u32 out_ifindex;
+	/* The port the recorded packet entered, which a reply's key may not name. */
+	__u32 in_ifindex;
+	/* Full-cone front entries serve every destination; the record serves this one. */
+	__u32 dst_addr;
+	/* Largest non-GSO IPv4 length the FIB accepted for the next hop. */
+	__u16 max_len;
+	__u8 dmac[ETH_ALEN];
+	__u8 smac[ETH_ALEN];
+	/* The destination MAC the recorded packet arrived with. */
+	__u8 in_dmac[ETH_ALEN];
+	__u8 pad[4];
+};
+
 struct flow_value_v4 {
 	__u32 rule_id;
 	__u32 front_addr;
@@ -90,6 +120,7 @@ struct flow_value_v4 {
 	__u64 front_close_seen_ns;
 	__u64 rule_revision;
 	__u64 session_id;
+	struct flow_fast_v4 fast;
 };
 
 struct nat_port_key_v4 {
@@ -109,6 +140,28 @@ struct nat_port_value_v4 {
 struct reply_l2_value_v4 {
 	__u8 front_mac[ETH_ALEN];
 	__u8 client_mac[ETH_ALEN];
+};
+
+/* Next hop resolved by a FIB lookup on a slow path, keyed like that lookup. */
+struct tc_l2_key_v4 {
+	__u32 ifindex;
+	__u32 src_addr;
+	__u32 dst_addr;
+};
+
+struct tc_l2_value_v4 {
+	__u8 dmac[ETH_ALEN];
+	__u8 smac[ETH_ALEN];
+	__u32 out_ifindex;
+	/* Largest non-GSO IPv4 length the FIB accepted for this next hop. */
+	__u32 max_len;
+};
+
+struct tc_flow_cache_state_v4 {
+	/* A fast-path record made under another generation is stale. */
+	__u32 generation;
+	/* Whether the core records fast-path records at all (kernel_tc_flow_cache). */
+	__u32 enabled;
 };
 
 struct rule_key_v6 {
@@ -214,6 +267,14 @@ struct kernel_diag_value_v4 {
 	__u64 xdp_v4_transparent_forward_rule_hit;
 	__u64 xdp_v4_transparent_no_match_pass;
 	__u64 xdp_v4_transparent_reply_closing_handled;
+	/* Too big for the uplink with DF: left to the stack's ICMP fragmentation needed. */
+	__u64 pmtu_to_stack;
+	/* Too big for the uplink and not DF: cannot be fragmented after the NAT. */
+	__u64 oversize_drop;
+	/* Later fragments translated like their datagram's first fragment. */
+	__u64 fragment_forwarded;
+	/* Packets sent from a flow entry's fast-path record (the flow cache). */
+	__u64 flow_cache_hit;
 };
 
 struct kernel_occupancy_value_v4 {
@@ -264,9 +325,17 @@ struct forward_vlan_hdr {
 	__be16 h_vlan_encapsulated_proto;
 };
 
-#ifndef FORWARD_ENABLE_TRAFFIC_STATS
-#define FORWARD_ENABLE_TRAFFIC_STATS 0
-#endif
+/*
+ * Settings veer fixes when it loads the programs. They live in .rodata: veer
+ * writes them before loading (CollectionSpec.Variables) and the loader then
+ * freezes the map read-only, so the verifier reads each one as a constant. It
+ * walks only the branches a setting selects and removes the others before the
+ * program is JIT-compiled, so a feature that is off costs what leaving it out
+ * of the build did, and one object serves every combination. The reads must
+ * stay volatile, or clang folds in the default.
+ */
+volatile const __u32 forward_load_traffic_stats = 0;
+#define FORWARD_TRAFFIC_STATS_ON (forward_load_traffic_stats != 0)
 
 #ifndef FORWARD_TC_PREFER_REDIRECT_NEIGH
 #define FORWARD_TC_PREFER_REDIRECT_NEIGH 0
@@ -282,9 +351,13 @@ struct packet_ctx {
 	__u8 closing;
 	__u8 tos;
 	__u8 rule_wildcard_addr;
+	/* FORWARD_IP_FLAG_*: DF, and whether this is a datagram's first fragment. */
+	__u8 ip_flags;
 	__u16 src_port;
 	__u16 dst_port;
 	__u16 tot_len;
+	/* The L4 header's length, for the segment size of a GSO packet. */
+	__u8 l4_hdr_len;
 	int l3_off;
 	int l4_off;
 	int l4_check_off;
@@ -292,9 +365,8 @@ struct packet_ctx {
 	int l4_dst_off;
 	__u64 l4_addr_csum_flags;
 	__u64 l4_port_csum_flags;
-#if FORWARD_ENABLE_TRAFFIC_STATS
+	/* Set only while traffic stats are on. */
 	__u16 payload_len;
-#endif
 };
 
 struct packet_ctx_v6 {
@@ -315,9 +387,8 @@ struct packet_ctx_v6 {
 	int l4_dst_off;
 	__u64 l4_addr_csum_flags;
 	__u64 l4_port_csum_flags;
-#if FORWARD_ENABLE_TRAFFIC_STATS
+	/* Set only while traffic stats are on. */
 	__u16 payload_len;
-#endif
 };
 
 struct tc_dispatch_ctx_v4 {
@@ -496,6 +567,25 @@ struct tc_plugin_metric_value {
 #endif
 
 #define FORWARD_IPV4_FRAG_MASK 0x3fff
+#define FORWARD_IPV4_FRAG_OFFSET_MASK 0x1fff
+#define FORWARD_IPV4_DF 0x4000
+#define FORWARD_IPV4_MF 0x2000
+/* packet_ctx.ip_flags */
+#define FORWARD_IP_FLAG_DF 0x1
+#define FORWARD_IP_FLAG_FIRST_FRAGMENT 0x2
+/*
+ * Packets up to this size fit every IPv4 link in practice (every host must
+ * accept 576-byte datagrams), so the path MTU check skips them.
+ */
+#define FORWARD_TC_MIN_PATH_MTU 576
+/* egress_nat_check_mtu_v4: the packet fits; any other value is its action. */
+#define FORWARD_TC_MTU_FITS (-100)
+/* egress_nat_check_mtu_v4: no route by the uplink to check a length against. */
+#define FORWARD_TC_PATH_UNCHECKED 0xffffU
+/* How long the later fragments of a datagram follow its first one. */
+#define FORWARD_TC_FRAGMENT_TTL_NS (5ULL * 1000000000ULL)
+#define FORWARD_TC_FRAGMENT_SEND 0
+#define FORWARD_TC_FRAGMENT_DROP 1
 #define FORWARD_FLOW_FLAG_FRONT_CLOSING 0x1
 #define FORWARD_FLOW_FLAG_REPLY_SEEN 0x2
 #define FORWARD_FLOW_FLAG_FULL_NAT 0x4
@@ -512,6 +602,12 @@ struct tc_plugin_metric_value {
 #define FORWARD_RULE_FLAG_PREPARED_L2 0x40
 #define FORWARD_RULE_FLAG_DROP 0x80
 #define FORWARD_TCP_FLOW_REFRESH_NS (30ULL * 1000000000ULL)
+/*
+ * An established flow whose own direction was fully processed within this
+ * window skips the per-packet pair bookkeeping (partner lookup, refresh,
+ * close tracking). Slow paths touch last_seen at least this often.
+ */
+#define FORWARD_TC_FAST_PATH_WINDOW_NS (1ULL * 1000000000ULL)
 #define FORWARD_UDP_FLOW_REFRESH_NS (1ULL * 1000000000ULL)
 #define FORWARD_ICMP_FLOW_IDLE_NS (30ULL * 1000000000ULL)
 #define FORWARD_UDP_FLOW_IDLE_NS (300ULL * 1000000000ULL)
@@ -546,21 +642,29 @@ static __always_inline int transparent_flow_matches_rule_v4(const struct flow_va
 #error FORWARD_NAT_PORT_PROBE_ROUNDS above 3 requires extending reserve_nat_port()
 #endif
 
-#if FORWARD_ENABLE_TRAFFIC_STATS
+/*
+ * veer sets the rule flag only while traffic stats are on. Every test starts
+ * with the load-time setting so that, when it is off, the verifier drops the
+ * counting code behind it.
+ */
 #define FORWARD_FLOW_FLAG_TRAFFIC_STATS 0x40
 #define FORWARD_RULE_FLAG_TRAFFIC_STATS 0x4
-#define FORWARD_RULE_TRAFFIC_ENABLED(rule) (((rule)->flags & FORWARD_RULE_FLAG_TRAFFIC_STATS) != 0)
-#define FORWARD_FLOW_TRAFFIC_ENABLED(flow) (((flow)->flags & FORWARD_FLOW_FLAG_TRAFFIC_STATS) != 0)
-#define FORWARD_SET_PAYLOAD_LEN(ctx, value) ((ctx)->payload_len = (__u16)(value))
+#define FORWARD_RULE_TRAFFIC_ENABLED(rule) \
+	(FORWARD_TRAFFIC_STATS_ON && ((rule)->flags & FORWARD_RULE_FLAG_TRAFFIC_STATS) != 0)
+#define FORWARD_FLOW_TRAFFIC_ENABLED(flow) \
+	(FORWARD_TRAFFIC_STATS_ON && ((flow)->flags & FORWARD_FLOW_FLAG_TRAFFIC_STATS) != 0)
+#define FORWARD_SET_PAYLOAD_LEN(ctx, value) \
+	do { \
+		if (FORWARD_TRAFFIC_STATS_ON) \
+			(ctx)->payload_len = (__u16)(value); \
+	} while (0)
+/* The payload after hdr bytes of a packet of total bytes, or 0. */
+#define FORWARD_SET_PAYLOAD_AFTER(ctx, total, hdr) \
+	do { \
+		if (FORWARD_TRAFFIC_STATS_ON) \
+			(ctx)->payload_len = (total) > (hdr) ? (__u16)((total) - (hdr)) : 0; \
+	} while (0)
 #define FORWARD_GET_PAYLOAD_LEN(ctx) ((__u64)(ctx)->payload_len)
-#else
-#define FORWARD_FLOW_FLAG_TRAFFIC_STATS 0
-#define FORWARD_RULE_FLAG_TRAFFIC_STATS 0
-#define FORWARD_RULE_TRAFFIC_ENABLED(rule) 0
-#define FORWARD_FLOW_TRAFFIC_ENABLED(flow) 0
-#define FORWARD_SET_PAYLOAD_LEN(ctx, value) do { (void)(ctx); (void)(value); } while (0)
-#define FORWARD_GET_PAYLOAD_LEN(ctx) 0ULL
-#endif
 
 struct bpf_map_def SEC("maps") rules_v4 = {
 	.type = BPF_MAP_TYPE_HASH,
@@ -607,6 +711,63 @@ struct bpf_map_def SEC("maps") reply_l2_cache_v4 = {
 	.key_size = sizeof(struct flow_key_v4),
 	.value_size = sizeof(struct reply_l2_value_v4),
 	.max_entries = 131072,
+};
+/*
+ * Established NAT flows reuse the next hop their slow path last resolved
+ * instead of a FIB lookup per packet. Each flow takes its slow path at least
+ * once per FORWARD_TC_FAST_PATH_WINDOW_NS, which refreshes or removes the
+ * entry, so a route or neighbour change is picked up within that window. An
+ * entry without out_ifindex names no next hop: the egress NAT uplink check
+ * found no route by the uplink (egress_nat_check_mtu_v4).
+ */
+struct bpf_map_def SEC("maps") tc_l2_cache_v4 = {
+	.type = BPF_MAP_TYPE_LRU_HASH,
+	.key_size = sizeof(struct tc_l2_key_v4),
+	.value_size = sizeof(struct tc_l2_value_v4),
+	.max_entries = 16384,
+};
+
+/*
+ * The flow cache (kernel_tc_flow_cache). The core's fast path records in a
+ * flow entry how it sent a packet of an established egress NAT flow (struct
+ * flow_fast_v4), and the dispatcher sends the flow's next packets the same
+ * way straight from its flow lookup, before the rule lookup. A record lasts
+ * until the fast-path window of its entry ends, so the core still sees every
+ * flow at least once per window. This array holds whether recording is on
+ * and the generation that user space bumps to retire every record.
+ */
+struct bpf_map_def SEC("maps") tc_flow_cache_state_v4 = {
+	.type = BPF_MAP_TYPE_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(struct tc_flow_cache_state_v4),
+	.max_entries = 1,
+};
+
+/*
+ * Per-ifindex hints written by userspace after the rule and parent maps
+ * change: which rule key forms exist on the interface and whether it has a
+ * reply parent. They only let lookups be skipped, so an entry without
+ * FORWARD_TC_IFINDEX_HINT_KNOWN (a fresh map, or an ifindex past the end)
+ * falls back to trying every form. Userspace widens the hints before it adds
+ * rules or parents and narrows them only afterwards.
+ */
+#define FORWARD_TC_IFINDEX_HINTS_MAX 65536
+#define FORWARD_TC_IFINDEX_HINT_RULE_EXACT 0x1
+#define FORWARD_TC_IFINDEX_HINT_RULE_ANY_ADDR 0x2
+#define FORWARD_TC_IFINDEX_HINT_RULE_ANY_PORT 0x4
+#define FORWARD_TC_IFINDEX_HINT_RULE_ANY 0x8
+#define FORWARD_TC_IFINDEX_HINT_RULE_FORMS 0xf
+#define FORWARD_TC_IFINDEX_HINT_RULE_V6_SHIFT 4
+#define FORWARD_TC_IFINDEX_HINT_HAS_PARENT 0x100
+/* A full-cone egress NAT rule receives packets here. */
+#define FORWARD_TC_IFINDEX_HINT_FULL_CONE 0x200
+#define FORWARD_TC_IFINDEX_HINT_KNOWN 0x80000000U
+
+struct bpf_map_def SEC("maps") tc_ifindex_hints = {
+	.type = BPF_MAP_TYPE_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(__u32),
+	.max_entries = FORWARD_TC_IFINDEX_HINTS_MAX,
 };
 
 struct bpf_map_def SEC("maps") scratch_flow_v4 = {
@@ -665,6 +826,73 @@ struct bpf_map_def SEC("maps") tc_prog_chain_v4 = {
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(__u32),
 	.max_entries = 111,
+};
+
+/*
+ * The ICMP error translators. Plugins share tc_prog_chain_v4 and keep its
+ * layout, so they get a chain of their own.
+ */
+#define FORWARD_TC_ICMP_ERROR_FORWARD 0
+#define FORWARD_TC_ICMP_ERROR_REPLY 1
+struct bpf_map_def SEC("maps") tc_icmp_error_chain_v4 = {
+	.type = BPF_MAP_TYPE_PROG_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(__u32),
+	.max_entries = 2,
+};
+
+/*
+ * Opening an egress NAT flow, in a program of its own (see
+ * handle_forward_ingress_v4_egress_nat_new), which gets a chain of its own
+ * for the same reason as the ICMP error translators.
+ */
+#define FORWARD_TC_EGRESS_NAT_NEW_V4 0
+struct bpf_map_def SEC("maps") tc_egress_nat_new_chain_v4 = {
+	.type = BPF_MAP_TYPE_PROG_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(__u32),
+	.max_entries = 1,
+};
+
+/*
+ * Where the first fragment of a datagram went (remember_ipv4_fragment), for
+ * the later fragments, which carry no ports (handle_ipv4_later_fragment).
+ * Keyed as the fragments arrive: ingress interface, addresses, IP ID and
+ * protocol, in network byte order. Addresses in the value are host order,
+ * like a redirect_target_v4.
+ */
+struct tc_fragment_key_v4 {
+	__u32 ifindex;
+	__be32 src_addr;
+	__be32 dst_addr;
+	__be16 id;
+	__u8 proto;
+	__u8 pad;
+};
+
+struct tc_fragment_value_v4 {
+	__u64 expires_ns;
+	__u32 out_ifindex;
+	__u32 src_addr;
+	__u32 dst_addr;
+	__u32 action;
+};
+
+struct bpf_map_def SEC("maps") tc_fragments_v4 = {
+	.type = BPF_MAP_TYPE_LRU_HASH,
+	.key_size = sizeof(struct tc_fragment_key_v4),
+	.value_size = sizeof(struct tc_fragment_value_v4),
+	.max_entries = 4096,
+};
+
+/* The later-fragment programs, in a chain of their own like the ICMP error ones. */
+#define FORWARD_TC_FRAGMENT_FORWARD 0
+#define FORWARD_TC_FRAGMENT_REPLY 1
+struct bpf_map_def SEC("maps") tc_fragment_chain_v4 = {
+	.type = BPF_MAP_TYPE_PROG_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(__u32),
+	.max_entries = 2,
 };
 
 struct bpf_map_def SEC("maps") tc_plugin_hooks_v4 = {
@@ -845,6 +1073,26 @@ struct bpf_map_def SEC("maps") local_ipv4s_v4 = {
 	.max_entries = 4096,
 };
 
+/* addr in network byte order, as an LPM trie compares it. */
+struct local_net_key_v4 {
+	__u32 prefixlen;
+	__u32 addr;
+};
+
+/*
+ * The IPv4 networks directly connected to this host's interfaces, filled from
+ * userspace. 1 marks a network egress NAT leaves to the kernel's routing (a
+ * guest on another bridge, say); 0 marks a network of an egress NAT uplink,
+ * so that one nested in a LAN network still gets translated.
+ */
+struct bpf_map_def SEC("maps") local_nets_v4 = {
+	.type = BPF_MAP_TYPE_LPM_TRIE,
+	.key_size = sizeof(struct local_net_key_v4),
+	.value_size = sizeof(__u8),
+	.max_entries = 1024,
+	.map_flags = BPF_F_NO_PREALLOC,
+};
+
 struct bpf_map_def SEC("maps") local_macs = {
 	.type = BPF_MAP_TYPE_HASH,
 	.key_size = sizeof(__u32),
@@ -970,7 +1218,7 @@ static __always_inline int handle_forward_ingress_v4_fullnat(struct __sk_buff *s
 static __always_inline int handle_forward_ingress_v4_egress_nat(struct __sk_buff *skb);
 static __always_inline int handle_forward_ingress_v4_fullnat_existing(struct __sk_buff *skb);
 static __always_inline int handle_forward_ingress_v4_fullnat_new(struct __sk_buff *skb);
-static __always_inline int handle_egress_nat_forward_existing(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, struct flow_value_v4 *front_flow, __u8 flow_bank);
+static __always_inline int handle_egress_nat_forward_existing(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, struct flow_value_v4 *front_flow, __u8 flow_bank, int try_fast);
 static __always_inline int handle_reply_ingress_v4_transparent(struct __sk_buff *skb);
 static __always_inline int handle_reply_ingress_v4_fullnat(struct __sk_buff *skb);
 
@@ -1470,6 +1718,38 @@ static __always_inline void tc_diag_redirect_drop(void)
 		diag->redirect_drop += 1;
 }
 
+static __always_inline void tc_diag_pmtu_to_stack(void)
+{
+	struct kernel_diag_value_v4 *diag = lookup_tc_diag_v4();
+
+	if (diag)
+		diag->pmtu_to_stack += 1;
+}
+
+static __always_inline void tc_diag_oversize_drop(void)
+{
+	struct kernel_diag_value_v4 *diag = lookup_tc_diag_v4();
+
+	if (diag)
+		diag->oversize_drop += 1;
+}
+
+static __always_inline void tc_diag_fragment_forwarded(void)
+{
+	struct kernel_diag_value_v4 *diag = lookup_tc_diag_v4();
+
+	if (diag)
+		diag->fragment_forwarded += 1;
+}
+
+static __always_inline void tc_diag_flow_cache_hit(void)
+{
+	struct kernel_diag_value_v4 *diag = lookup_tc_diag_v4();
+
+	if (diag)
+		diag->flow_cache_hit += 1;
+}
+
 static __always_inline __u32 tc_flow_migration_flags(void)
 {
 	__u32 key = 0;
@@ -1558,6 +1838,21 @@ static __always_inline struct flow_value_v6 *lookup_flow_v6_active_or_old(const 
 	return flow;
 }
 
+/* lookup_flow_v4_active_or_old into a checked copy; see copy_flow_v4. */
+static __always_inline struct flow_value_v4 *lookup_flow_v4_copy_active_or_old(const struct flow_key_v4 *key, __u8 *bank, struct flow_value_v4 *copy)
+{
+	struct flow_value_v4 *live = lookup_flow_v4_active_or_old(key, bank);
+
+	return copy_flow_v4(live, key, copy) == 0 ? live : 0;
+}
+
+static __always_inline struct flow_value_v6 *lookup_flow_v6_copy_active_or_old(const struct flow_key_v6 *key, __u8 *bank, struct flow_value_v6 *copy)
+{
+	struct flow_value_v6 *live = lookup_flow_v6_active_or_old(key, bank);
+
+	return copy_flow_v6(live, key, copy) == 0 ? live : 0;
+}
+
 static __always_inline int update_flow_v4_in_bank(__u8 bank, const struct flow_key_v4 *key, const struct flow_value_v4 *value, __u64 flags)
 {
 	if (bank == FORWARD_TC_FLOW_BANK_OLD)
@@ -1630,40 +1925,124 @@ static __always_inline int delete_nat_port_v6_in_bank(__u8 bank, const struct na
 	return bpf_map_delete_elem(&nat_ports_v6, key);
 }
 
+/* Largest header offset the parsers produce (VLAN, IPv6, L4 ports), with room to spare. */
+#define FORWARD_TC_MAX_HEADER_OFF 255
+
+/*
+ * Direct access to len bytes of the packet at off, or NULL. The parsers read
+ * the same headers directly, so a parsed packet has them in the linear area.
+ * Offsets kept in packet_ctx live in map memory and must be bounded for the
+ * verifier. Writing through the pointer is cheaper than the store and L3
+ * checksum helpers; only the L4 checksum, which the kernel may still be
+ * completing (CHECKSUM_PARTIAL), has to go through bpf_l4_csum_replace.
+ * Any helper that changes packet data invalidates the pointer.
+ */
+static __always_inline void *tc_packet_ptr(struct __sk_buff *skb, __u32 off, __u32 len)
+{
+	void *data;
+	void *data_end;
+	void *ptr;
+
+	/*
+	 * Without this clang may compute &skb->data_end once and reuse it across
+	 * the inlined callers; the verifier rejects loads through a ctx pointer
+	 * with an offset added.
+	 */
+	asm volatile("" : "+r"(skb));
+	data = (void *)(long)skb->data;
+	data_end = (void *)(long)skb->data_end;
+	if (off > FORWARD_TC_MAX_HEADER_OFF)
+		return 0;
+	ptr = data + off;
+	if (ptr + len > data_end)
+		return 0;
+	return ptr;
+}
+
+static __always_inline int is_icmp_error_type(__u8 type)
+{
+	return type == ICMP_DEST_UNREACH || type == ICMP_TIME_EXCEEDED || type == ICMP_PARAMETERPROB;
+}
+
+/*
+ * Whether the packet the IPv4 parsers rejected may be an ICMP error about a
+ * NAT flow, which icmp_error_forward_v4 and icmp_error_reply_v4 translate.
+ * A cheap guess: those programs parse the error properly.
+ */
+static __always_inline int tc_packet_may_be_icmp_error_v4(struct __sk_buff *skb)
+{
+	const struct iphdr *iph;
+	const __u8 *type;
+
+	if (skb->protocol != bpf_htons(ETH_P_IP))
+		return 0;
+	iph = tc_packet_ptr(skb, sizeof(struct ethhdr), sizeof(*iph));
+	if (!iph || iph->protocol != IPPROTO_ICMP)
+		return 0;
+	type = tc_packet_ptr(skb, sizeof(struct ethhdr) + sizeof(*iph), sizeof(*type));
+	return type && is_icmp_error_type(*type);
+}
+
+/*
+ * skb->ifindex for a read that is inlined in many places. Like tc_packet_ptr,
+ * this keeps clang (14 at least) from holding &skb->ifindex in a register and
+ * reusing it, which the verifier rejects as a modified ctx pointer.
+ */
+static __always_inline __u32 tc_skb_ifindex(struct __sk_buff *skb)
+{
+	asm volatile("" : "+r"(skb));
+	return skb->ifindex;
+}
+
+/* An IPv4 fragment other than the first, which has no L4 header to parse. */
+static __always_inline int tc_packet_is_later_fragment_v4(struct __sk_buff *skb)
+{
+	const struct iphdr *iph;
+
+	if (skb->protocol != bpf_htons(ETH_P_IP))
+		return 0;
+	iph = tc_packet_ptr(skb, sizeof(struct ethhdr), sizeof(*iph));
+	return iph && (bpf_ntohs(iph->frag_off) & FORWARD_IPV4_FRAG_OFFSET_MASK) != 0;
+}
+
 static __always_inline int rewrite_eth_addrs(struct __sk_buff *skb, const __u8 dst[ETH_ALEN], const __u8 src[ETH_ALEN])
 {
-	__u8 mac_addrs[ETH_ALEN * 2];
+	struct ethhdr *eth = tc_packet_ptr(skb, 0, sizeof(*eth));
 
-	__builtin_memcpy(mac_addrs, dst, ETH_ALEN);
-	__builtin_memcpy(mac_addrs + ETH_ALEN, src, ETH_ALEN);
-	return bpf_skb_store_bytes(skb, offsetof(struct ethhdr, h_dest), mac_addrs, sizeof(mac_addrs), 0);
+	if (!eth)
+		return -1;
+	__builtin_memcpy(eth->h_dest, dst, ETH_ALEN);
+	__builtin_memcpy(eth->h_source, src, ETH_ALEN);
+	return 0;
 }
 
 static __always_inline int egress_nat_dst_mac_mismatch(struct __sk_buff *skb, const struct rule_value_v4 *rule)
 {
-	__u8 dst[ETH_ALEN];
+	const struct ethhdr *eth;
 
 	if (!rule || (rule->flags & FORWARD_RULE_FLAG_EGRESS_NAT) == 0 || mac_is_zero(rule->src_mac))
 		return 0;
-	if (bpf_skb_load_bytes(skb, offsetof(struct ethhdr, h_dest), dst, sizeof(dst)) < 0)
+	eth = tc_packet_ptr(skb, 0, sizeof(*eth));
+	if (!eth)
 		return 0;
-	return !mac_equal(dst, rule->src_mac);
+	return !mac_equal(eth->h_dest, rule->src_mac);
 }
 
 static __always_inline int local_dst_mac_mismatch(struct __sk_buff *skb, __u8 wildcard_addr_match)
 {
 	struct local_mac_value *local;
+	const struct ethhdr *eth;
 	__u32 ifindex = skb->ifindex;
-	__u8 dst[ETH_ALEN];
 
 	if (!wildcard_addr_match)
 		return 0;
 	local = bpf_map_lookup_elem(&local_macs, &ifindex);
 	if (!local || mac_is_zero(local->mac))
 		return 0;
-	if (bpf_skb_load_bytes(skb, offsetof(struct ethhdr, h_dest), dst, sizeof(dst)) < 0)
+	eth = tc_packet_ptr(skb, 0, sizeof(*eth));
+	if (!eth)
 		return 0;
-	return !mac_equal(dst, local->mac);
+	return !mac_equal(eth->h_dest, local->mac);
 }
 
 static __always_inline int prepend_eth_header(struct __sk_buff *skb, const __u8 dst[ETH_ALEN], const __u8 src[ETH_ALEN], __be16 proto)
@@ -1691,9 +2070,15 @@ static __always_inline int prepend_eth_header(struct __sk_buff *skb, const __u8 
 
 static __always_inline int load_packet_macs(struct __sk_buff *skb, struct reply_l2_value_v4 *value)
 {
+	const void *macs;
+
 	if (!value)
 		return -1;
-	return bpf_skb_load_bytes(skb, 0, value, sizeof(*value));
+	macs = tc_packet_ptr(skb, 0, sizeof(*value));
+	if (!macs)
+		return -1;
+	__builtin_memcpy(value, macs, sizeof(*value));
+	return 0;
 }
 
 static __always_inline int update_l4_addr_checksum(struct __sk_buff *skb, const struct packet_ctx *ctx, int check_off, __be32 old_addr, __be32 new_addr)
@@ -1782,10 +2167,19 @@ static __always_inline int parse_ipv4_l4(struct __sk_buff *skb, struct packet_ct
 		return -1;
 	if (iph->ihl != 5)
 		return -1;
-	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_FRAG_MASK) != 0)
+	/*
+	 * A first fragment carries the L4 header and is translated like any
+	 * packet; the later ones go to handle_ipv4_later_fragment.
+	 */
+	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_FRAG_OFFSET_MASK) != 0)
 		return -1;
 	if (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP && iph->protocol != IPPROTO_ICMP)
 		return -1;
+	ctx->ip_flags = 0;
+	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_DF) != 0)
+		ctx->ip_flags |= FORWARD_IP_FLAG_DF;
+	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_MF) != 0)
+		ctx->ip_flags |= FORWARD_IP_FLAG_FIRST_FRAGMENT;
 
 	l4_off = l3_off + (int)sizeof(*iph);
 	ctx->src_addr = iph->saddr;
@@ -1806,15 +2200,14 @@ static __always_inline int parse_ipv4_l4(struct __sk_buff *skb, struct packet_ct
 		ctx->src_port = bpf_ntohs(tcph->source);
 		ctx->dst_port = bpf_ntohs(tcph->dest);
 		ctx->has_l4_checksum = 1;
+		ctx->l4_hdr_len = (__u8)(tcph->doff << 2);
 		ctx->tcp_flags =
 			(tcph->fin ? FORWARD_TCP_FLAG_FIN : 0) |
 			(tcph->syn ? FORWARD_TCP_FLAG_SYN : 0) |
 			(tcph->rst ? FORWARD_TCP_FLAG_RST : 0) |
 			(tcph->ack ? FORWARD_TCP_FLAG_ACK : 0);
 		ctx->closing = tcph->fin || tcph->rst;
-		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
-		if (ctx->tot_len > (sizeof(*iph) + (((__u16)tcph->doff) << 2)))
-			FORWARD_SET_PAYLOAD_LEN(ctx, ctx->tot_len - (sizeof(*iph) + (((__u16)tcph->doff) << 2)));
+		FORWARD_SET_PAYLOAD_AFTER(ctx, ctx->tot_len, (sizeof(*iph) + (((__u16)tcph->doff) << 2)));
 		ctx->l4_addr_csum_flags = BPF_F_PSEUDO_HDR | sizeof(__be32);
 		ctx->l4_port_csum_flags = sizeof(__be16);
 		ctx->l4_check_off = (int)(l4_off + offsetof(struct tcphdr, check));
@@ -1829,6 +2222,7 @@ static __always_inline int parse_ipv4_l4(struct __sk_buff *skb, struct packet_ct
 		ctx->src_port = bpf_ntohs(udph->source);
 		ctx->dst_port = bpf_ntohs(udph->dest);
 		ctx->has_l4_checksum = udph->check != 0;
+		ctx->l4_hdr_len = sizeof(*udph);
 		ctx->closing = 0;
 		FORWARD_SET_PAYLOAD_LEN(ctx, bpf_ntohs(udph->len) - sizeof(*udph));
 		ctx->l4_addr_csum_flags = BPF_F_PSEUDO_HDR | BPF_F_MARK_MANGLED_0 | sizeof(__be32);
@@ -1851,10 +2245,9 @@ static __always_inline int parse_ipv4_l4(struct __sk_buff *skb, struct packet_ct
 			ctx->dst_port = bpf_ntohs(icmph->un.echo.id);
 		}
 		ctx->has_l4_checksum = 1;
+		ctx->l4_hdr_len = sizeof(*icmph);
 		ctx->closing = 0;
-		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
-		if (ctx->tot_len > (sizeof(*iph) + sizeof(*icmph)))
-			FORWARD_SET_PAYLOAD_LEN(ctx, ctx->tot_len - (sizeof(*iph) + sizeof(*icmph)));
+		FORWARD_SET_PAYLOAD_AFTER(ctx, ctx->tot_len, (sizeof(*iph) + sizeof(*icmph)));
 		ctx->l4_addr_csum_flags = 0;
 		ctx->l4_port_csum_flags = sizeof(__be16);
 		ctx->l4_check_off = (int)(l4_off + offsetof(struct icmphdr, checksum));
@@ -1888,10 +2281,19 @@ static __always_inline int parse_ipv4_l4_raw(struct __sk_buff *skb, struct packe
 		return -1;
 	if (iph->ihl != 5)
 		return -1;
-	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_FRAG_MASK) != 0)
+	/*
+	 * A first fragment carries the L4 header and is translated like any
+	 * packet; the later ones go to handle_ipv4_later_fragment.
+	 */
+	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_FRAG_OFFSET_MASK) != 0)
 		return -1;
 	if (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP && iph->protocol != IPPROTO_ICMP)
 		return -1;
+	ctx->ip_flags = 0;
+	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_DF) != 0)
+		ctx->ip_flags |= FORWARD_IP_FLAG_DF;
+	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_MF) != 0)
+		ctx->ip_flags |= FORWARD_IP_FLAG_FIRST_FRAGMENT;
 
 	l4_off = (int)sizeof(*iph);
 	ctx->src_addr = iph->saddr;
@@ -1912,15 +2314,14 @@ static __always_inline int parse_ipv4_l4_raw(struct __sk_buff *skb, struct packe
 		ctx->src_port = bpf_ntohs(tcph->source);
 		ctx->dst_port = bpf_ntohs(tcph->dest);
 		ctx->has_l4_checksum = 1;
+		ctx->l4_hdr_len = (__u8)(tcph->doff << 2);
 		ctx->tcp_flags =
 			(tcph->fin ? FORWARD_TCP_FLAG_FIN : 0) |
 			(tcph->syn ? FORWARD_TCP_FLAG_SYN : 0) |
 			(tcph->rst ? FORWARD_TCP_FLAG_RST : 0) |
 			(tcph->ack ? FORWARD_TCP_FLAG_ACK : 0);
 		ctx->closing = tcph->fin || tcph->rst;
-		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
-		if (ctx->tot_len > (sizeof(*iph) + (((__u16)tcph->doff) << 2)))
-			FORWARD_SET_PAYLOAD_LEN(ctx, ctx->tot_len - (sizeof(*iph) + (((__u16)tcph->doff) << 2)));
+		FORWARD_SET_PAYLOAD_AFTER(ctx, ctx->tot_len, (sizeof(*iph) + (((__u16)tcph->doff) << 2)));
 		ctx->l4_addr_csum_flags = BPF_F_PSEUDO_HDR | sizeof(__be32);
 		ctx->l4_port_csum_flags = sizeof(__be16);
 		ctx->l4_check_off = (int)(l4_off + offsetof(struct tcphdr, check));
@@ -1935,6 +2336,7 @@ static __always_inline int parse_ipv4_l4_raw(struct __sk_buff *skb, struct packe
 		ctx->src_port = bpf_ntohs(udph->source);
 		ctx->dst_port = bpf_ntohs(udph->dest);
 		ctx->has_l4_checksum = udph->check != 0;
+		ctx->l4_hdr_len = sizeof(*udph);
 		ctx->closing = 0;
 		FORWARD_SET_PAYLOAD_LEN(ctx, bpf_ntohs(udph->len) - sizeof(*udph));
 		ctx->l4_addr_csum_flags = BPF_F_PSEUDO_HDR | BPF_F_MARK_MANGLED_0 | sizeof(__be32);
@@ -1957,10 +2359,9 @@ static __always_inline int parse_ipv4_l4_raw(struct __sk_buff *skb, struct packe
 			ctx->dst_port = bpf_ntohs(icmph->un.echo.id);
 		}
 		ctx->has_l4_checksum = 1;
+		ctx->l4_hdr_len = sizeof(*icmph);
 		ctx->closing = 0;
-		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
-		if (ctx->tot_len > (sizeof(*iph) + sizeof(*icmph)))
-			FORWARD_SET_PAYLOAD_LEN(ctx, ctx->tot_len - (sizeof(*iph) + sizeof(*icmph)));
+		FORWARD_SET_PAYLOAD_AFTER(ctx, ctx->tot_len, (sizeof(*iph) + sizeof(*icmph)));
 		ctx->l4_addr_csum_flags = 0;
 		ctx->l4_port_csum_flags = sizeof(__be16);
 		ctx->l4_check_off = (int)(l4_off + offsetof(struct icmphdr, checksum));
@@ -2027,9 +2428,7 @@ static __always_inline int parse_ipv6_l4(struct __sk_buff *skb, struct packet_ct
 			(tcph->rst ? FORWARD_TCP_FLAG_RST : 0) |
 			(tcph->ack ? FORWARD_TCP_FLAG_ACK : 0);
 		ctx->closing = tcph->fin || tcph->rst;
-		FORWARD_SET_PAYLOAD_LEN(ctx, 0);
-		if (ctx->tot_len > (sizeof(*ip6h) + (((__u16)tcph->doff) << 2)))
-			FORWARD_SET_PAYLOAD_LEN(ctx, ctx->tot_len - (sizeof(*ip6h) + (((__u16)tcph->doff) << 2)));
+		FORWARD_SET_PAYLOAD_AFTER(ctx, ctx->tot_len, (sizeof(*ip6h) + (((__u16)tcph->doff) << 2)));
 		ctx->l4_addr_csum_flags = BPF_F_PSEUDO_HDR;
 		ctx->l4_port_csum_flags = sizeof(__be16);
 		ctx->l4_check_off = (int)(l4_off + offsetof(struct tcphdr, check));
@@ -2058,6 +2457,28 @@ static __always_inline int parse_ipv6_l4(struct __sk_buff *skb, struct packet_ct
 	return 0;
 }
 
+static __always_inline __u32 lookup_tc_ifindex_hints(__u32 ifindex)
+{
+	__u32 key = ifindex;
+	__u32 *hints;
+
+	if (ifindex >= FORWARD_TC_IFINDEX_HINTS_MAX)
+		return 0;
+	hints = bpf_map_lookup_elem(&tc_ifindex_hints, &key);
+	if (!hints)
+		return 0;
+	return *hints;
+}
+
+static __always_inline __u32 tc_ifindex_rule_forms(__u32 ifindex, __u32 shift)
+{
+	__u32 hints = lookup_tc_ifindex_hints(ifindex);
+
+	if ((hints & FORWARD_TC_IFINDEX_HINT_KNOWN) == 0)
+		return FORWARD_TC_IFINDEX_HINT_RULE_FORMS;
+	return (hints >> shift) & FORWARD_TC_IFINDEX_HINT_RULE_FORMS;
+}
+
 static __always_inline struct rule_value_v4 *lookup_rule_v4(struct __sk_buff *skb, struct packet_ctx *ctx)
 {
 	struct rule_key_v4 key = {
@@ -2067,30 +2488,40 @@ static __always_inline struct rule_value_v4 *lookup_rule_v4(struct __sk_buff *sk
 		.proto = ctx->proto,
 	};
 	struct rule_value_v4 *rule;
+	__u32 forms = tc_ifindex_rule_forms(skb->ifindex, 0);
 
 	ctx->rule_wildcard_addr = 0;
-	rule = bpf_map_lookup_elem(&rules_v4, &key);
-	if (rule)
-		return rule;
-
-	key.dst_addr = 0;
-	rule = bpf_map_lookup_elem(&rules_v4, &key);
-	if (rule) {
-		ctx->rule_wildcard_addr = 1;
-		return rule;
+	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_EXACT) {
+		rule = bpf_map_lookup_elem(&rules_v4, &key);
+		if (rule)
+			return rule;
 	}
 
-	key.dst_addr = bpf_ntohl(ctx->dst_addr);
-	key.dst_port = 0;
-	rule = bpf_map_lookup_elem(&rules_v4, &key);
-	if (rule)
-		return rule;
+	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY_ADDR) {
+		key.dst_addr = 0;
+		rule = bpf_map_lookup_elem(&rules_v4, &key);
+		if (rule) {
+			ctx->rule_wildcard_addr = 1;
+			return rule;
+		}
+	}
 
-	key.dst_addr = 0;
-	rule = bpf_map_lookup_elem(&rules_v4, &key);
-	if (rule) {
-		ctx->rule_wildcard_addr = 1;
-		return rule;
+	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY_PORT) {
+		key.dst_addr = bpf_ntohl(ctx->dst_addr);
+		key.dst_port = 0;
+		rule = bpf_map_lookup_elem(&rules_v4, &key);
+		if (rule)
+			return rule;
+	}
+
+	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY) {
+		key.dst_addr = 0;
+		key.dst_port = 0;
+		rule = bpf_map_lookup_elem(&rules_v4, &key);
+		if (rule) {
+			ctx->rule_wildcard_addr = 1;
+			return rule;
+		}
 	}
 
 	return 0;
@@ -2104,92 +2535,100 @@ static __always_inline struct rule_value_v6 *lookup_rule_v6(struct __sk_buff *sk
 		.proto = ctx->proto,
 	};
 	struct rule_value_v6 *rule;
+	__u32 forms = tc_ifindex_rule_forms(skb->ifindex, FORWARD_TC_IFINDEX_HINT_RULE_V6_SHIFT);
 
 	ctx->rule_wildcard_addr = 0;
-	copy_ipv6_addr(key.dst_addr, ctx->dst_addr);
-	rule = bpf_map_lookup_elem(&rules_v6, &key);
-	if (rule)
-		return rule;
-
-	__builtin_memset(key.dst_addr, 0, sizeof(key.dst_addr));
-	rule = bpf_map_lookup_elem(&rules_v6, &key);
-	if (rule) {
-		ctx->rule_wildcard_addr = 1;
-		return rule;
+	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_EXACT) {
+		copy_ipv6_addr(key.dst_addr, ctx->dst_addr);
+		rule = bpf_map_lookup_elem(&rules_v6, &key);
+		if (rule)
+			return rule;
 	}
 
-	copy_ipv6_addr(key.dst_addr, ctx->dst_addr);
-	key.dst_port = 0;
-	rule = bpf_map_lookup_elem(&rules_v6, &key);
-	if (rule)
-		return rule;
-
-	__builtin_memset(key.dst_addr, 0, sizeof(key.dst_addr));
-	rule = bpf_map_lookup_elem(&rules_v6, &key);
-	if (rule) {
-		ctx->rule_wildcard_addr = 1;
-		return rule;
+	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY_ADDR) {
+		__builtin_memset(key.dst_addr, 0, sizeof(key.dst_addr));
+		rule = bpf_map_lookup_elem(&rules_v6, &key);
+		if (rule) {
+			ctx->rule_wildcard_addr = 1;
+			return rule;
+		}
 	}
 
+	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY_PORT) {
+		copy_ipv6_addr(key.dst_addr, ctx->dst_addr);
+		key.dst_port = 0;
+		rule = bpf_map_lookup_elem(&rules_v6, &key);
+		if (rule)
+			return rule;
+	}
+
+	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY) {
+		__builtin_memset(key.dst_addr, 0, sizeof(key.dst_addr));
+		key.dst_port = 0;
+		rule = bpf_map_lookup_elem(&rules_v6, &key);
+		if (rule) {
+			ctx->rule_wildcard_addr = 1;
+			return rule;
+		}
+	}
+
+	return 0;
+}
+
+/*
+ * Rewrites the IPv4 source or destination address and L4 port in place: the
+ * header fields and the IPv4 checksum directly, the L4 checksum through the
+ * helper (see tc_packet_ptr).
+ */
+static __always_inline int rewrite_l4_addr_port(struct __sk_buff *skb, const struct packet_ctx *ctx, int dst, __u32 new_addr_host, __u16 new_port_host)
+{
+	__be32 old_addr = dst ? ctx->dst_addr : ctx->src_addr;
+	__be32 new_addr = bpf_htonl(new_addr_host);
+	__be16 old_port = bpf_htons(dst ? ctx->dst_port : ctx->src_port);
+	__be16 new_port = bpf_htons(new_port_host);
+	int addr_changed = old_addr != new_addr;
+	int port_changed = old_port != new_port;
+
+	if (addr_changed) {
+		struct iphdr *iph = tc_packet_ptr(skb, ctx->l3_off, sizeof(*iph));
+
+		if (!iph)
+			return -1;
+		iph->check = csum_replace4_val(iph->check, old_addr, new_addr);
+		if (dst)
+			iph->daddr = new_addr;
+		else
+			iph->saddr = new_addr;
+	}
+	if (port_changed) {
+		__be16 *port = tc_packet_ptr(skb, dst ? ctx->l4_dst_off : ctx->l4_src_off, sizeof(*port));
+
+		if (!port)
+			return -1;
+		*port = new_port;
+	}
+	if (addr_changed && update_l4_addr_checksum(skb, ctx, ctx->l4_check_off, old_addr, new_addr) < 0)
+		return -1;
+	if (port_changed && update_l4_port_checksum(skb, ctx, ctx->l4_check_off, old_port, new_port) < 0)
+		return -1;
 	return 0;
 }
 
 static __always_inline int rewrite_l4_dnat(struct __sk_buff *skb, const struct packet_ctx *ctx, __u32 new_addr_host, __u16 new_port_host)
 {
-	const int ip_check_off = ctx->l3_off + offsetof(struct iphdr, check);
-	const int ip_dst_off = ctx->l3_off + offsetof(struct iphdr, daddr);
-	__be32 old_addr = ctx->dst_addr;
-	__be32 new_addr = bpf_htonl(new_addr_host);
-
-	if (old_addr != new_addr) {
-		if (bpf_l3_csum_replace(skb, ip_check_off, old_addr, new_addr, sizeof(new_addr)) < 0)
-			return -1;
-		if (update_l4_addr_checksum(skb, ctx, ctx->l4_check_off, old_addr, new_addr) < 0)
-			return -1;
-		if (bpf_skb_store_bytes(skb, ip_dst_off, &new_addr, sizeof(new_addr), 0) < 0)
-			return -1;
-	}
-
-	__be16 old_port = bpf_htons(ctx->dst_port);
-	__be16 new_port = bpf_htons(new_port_host);
-	if (old_port != new_port) {
-		if (update_l4_port_checksum(skb, ctx, ctx->l4_check_off, old_port, new_port) < 0)
-			return -1;
-		if (bpf_skb_store_bytes(skb, ctx->l4_dst_off, &new_port, sizeof(new_port), 0) < 0)
-			return -1;
-	}
-
-	return 0;
+	return rewrite_l4_addr_port(skb, ctx, 1, new_addr_host, new_port_host);
 }
 
 static __always_inline int rewrite_l4_snat(struct __sk_buff *skb, const struct packet_ctx *ctx, __u32 new_addr_host, __u16 new_port_host)
 {
-	const int ip_check_off = ctx->l3_off + offsetof(struct iphdr, check);
-	const int ip_src_off = ctx->l3_off + offsetof(struct iphdr, saddr);
-	__be32 old_addr = ctx->src_addr;
-	__be32 new_addr = bpf_htonl(new_addr_host);
-
-	if (old_addr != new_addr) {
-		if (bpf_l3_csum_replace(skb, ip_check_off, old_addr, new_addr, sizeof(new_addr)) < 0)
-			return -1;
-		if (update_l4_addr_checksum(skb, ctx, ctx->l4_check_off, old_addr, new_addr) < 0)
-			return -1;
-		if (bpf_skb_store_bytes(skb, ip_src_off, &new_addr, sizeof(new_addr), 0) < 0)
-			return -1;
-	}
-
-	__be16 old_port = bpf_htons(ctx->src_port);
-	__be16 new_port = bpf_htons(new_port_host);
-	if (old_port != new_port) {
-		if (update_l4_port_checksum(skb, ctx, ctx->l4_check_off, old_port, new_port) < 0)
-			return -1;
-		if (bpf_skb_store_bytes(skb, ctx->l4_src_off, &new_port, sizeof(new_port), 0) < 0)
-			return -1;
-	}
-
-	return 0;
+	return rewrite_l4_addr_port(skb, ctx, 0, new_addr_host, new_port_host);
 }
 
+/*
+ * IPv6 keeps the store helper: copying a 16-byte address directly takes
+ * about 30 instructions per site, and the IPv6 pipeline programs are close
+ * to the jump range the verifier can still patch on recent kernels.
+ */
 static __always_inline int rewrite_l4_dnat_v6(struct __sk_buff *skb, const struct packet_ctx_v6 *ctx, const __u8 new_addr[16], __u16 new_port_host)
 {
 	const int ip_dst_off = ctx->l3_off + offsetof(struct ipv6hdr, daddr);
@@ -2253,6 +2692,7 @@ static __always_inline int prefer_reply_l2_cache(__u32 nat_cfg_flags)
 static __always_inline void update_reply_l2_cache_v4(struct __sk_buff *skb, const struct flow_key_v4 *reply_key, __u32 nat_cfg_flags)
 {
 	struct reply_l2_value_v4 value = {};
+	struct reply_l2_value_v4 *current;
 
 	if (!skb || !reply_key || !prefer_reply_l2_cache(nat_cfg_flags))
 		return;
@@ -2260,7 +2700,121 @@ static __always_inline void update_reply_l2_cache_v4(struct __sk_buff *skb, cons
 		return;
 	if (mac_addr_is_zero(value.front_mac) || mac_addr_is_zero(value.client_mac))
 		return;
+	/* Every forward packet carries the same addresses; only rewrite changes. */
+	current = bpf_map_lookup_elem(&reply_l2_cache_v4, reply_key);
+	if (current && mac_equal(current->front_mac, value.front_mac) && mac_equal(current->client_mac, value.client_mac))
+		return;
 	bpf_map_update_elem(&reply_l2_cache_v4, reply_key, &value, BPF_ANY);
+}
+
+static __always_inline void build_tc_l2_key_v4(__u32 ifindex, __u32 src_addr, __u32 dst_addr, struct tc_l2_key_v4 *key)
+{
+	key->ifindex = ifindex;
+	key->src_addr = src_addr;
+	key->dst_addr = dst_addr;
+}
+
+static __always_inline void remember_tc_l2_v4(const struct redirect_target_v4 *target, const struct bpf_fib_lookup *fib, __u32 out_ifindex, __u32 tot_len)
+{
+	struct tc_l2_key_v4 key = {};
+	struct tc_l2_value_v4 value = {};
+	struct tc_l2_value_v4 *current;
+
+	build_tc_l2_key_v4(target->ifindex, target->src_addr, target->dst_addr, &key);
+	current = bpf_map_lookup_elem(&tc_l2_cache_v4, &key);
+	if (current && current->out_ifindex == out_ifindex && mac_equal(current->dmac, fib->dmac) && mac_equal(current->smac, fib->smac)) {
+		if (tot_len > current->max_len)
+			current->max_len = tot_len;
+		return;
+	}
+	__builtin_memcpy(value.dmac, fib->dmac, ETH_ALEN);
+	__builtin_memcpy(value.smac, fib->smac, ETH_ALEN);
+	value.out_ifindex = out_ifindex;
+	value.max_len = tot_len;
+	bpf_map_update_elem(&tc_l2_cache_v4, &key, &value, BPF_ANY);
+}
+
+static __always_inline void forget_tc_l2_v4(const struct redirect_target_v4 *target)
+{
+	struct tc_l2_key_v4 key = {};
+
+	build_tc_l2_key_v4(target->ifindex, target->src_addr, target->dst_addr, &key);
+	bpf_map_delete_elem(&tc_l2_cache_v4, &key);
+}
+
+/*
+ * The largest packet this one puts on the wire: a GSO packet goes out as
+ * segments of gso_size behind copies of its headers.
+ */
+static __always_inline __u32 tc_wire_len_v4(struct __sk_buff *skb, const struct packet_ctx *ctx)
+{
+	__u32 gso_size = skb->gso_size;
+
+	if (gso_size == 0)
+		return ctx->tot_len;
+	return (__u32)(ctx->l4_off - ctx->l3_off) + ctx->l4_hdr_len + gso_size;
+}
+
+/*
+ * A first fragment carries the ports the NAT translates by; the later ones of
+ * its datagram (same addresses, protocol and IP ID) carry none. Record where
+ * the first one went, so handle_ipv4_later_fragment sends the rest the same
+ * way, or drops them along with it.
+ */
+static __always_inline void remember_ipv4_fragment(struct __sk_buff *skb, const struct packet_ctx *ctx, __u32 out_ifindex, __u32 src_addr, __u32 dst_addr, __u32 action)
+{
+	struct tc_fragment_key_v4 key = {};
+	struct tc_fragment_value_v4 value = {};
+	__be16 id;
+
+	if ((ctx->ip_flags & FORWARD_IP_FLAG_FIRST_FRAGMENT) == 0)
+		return;
+	if (bpf_skb_load_bytes(skb, ctx->l3_off + offsetof(struct iphdr, id), &id, sizeof(id)) < 0)
+		return;
+	key.ifindex = tc_skb_ifindex(skb);
+	key.src_addr = ctx->src_addr;
+	key.dst_addr = ctx->dst_addr;
+	key.id = id;
+	key.proto = ctx->proto;
+	value.expires_ns = bpf_ktime_get_ns() + FORWARD_TC_FRAGMENT_TTL_NS;
+	value.out_ifindex = out_ifindex;
+	value.src_addr = src_addr;
+	value.dst_addr = dst_addr;
+	value.action = action;
+	bpf_map_update_elem(&tc_fragments_v4, &key, &value, BPF_ANY);
+}
+
+/* The next hop a slow path resolved for this target, if this packet fits it. */
+static __always_inline const struct tc_l2_value_v4 *lookup_tc_l2_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, __u32 ifindex, __u32 src_addr, __u32 dst_addr)
+{
+	struct tc_l2_key_v4 key = {};
+	struct tc_l2_value_v4 *value;
+
+	if (!ctx || ctx->l3_off == 0)
+		return 0;
+	build_tc_l2_key_v4(ifindex, src_addr, dst_addr, &key);
+	value = bpf_map_lookup_elem(&tc_l2_cache_v4, &key);
+	if (!value || !value->out_ifindex)
+		return 0;
+	/* max_len is the largest wire length the FIB accepted for this path. */
+	if (tc_wire_len_v4(skb, ctx) > value->max_len)
+		return 0;
+	return value;
+}
+
+static __always_inline int redirect_tc_l2_v4(struct __sk_buff *skb, const struct tc_l2_value_v4 *value)
+{
+	long act;
+
+	if (rewrite_eth_addrs(skb, value->dmac, value->smac) < 0) {
+		tc_diag_redirect_drop();
+		return TC_ACT_SHOT;
+	}
+	act = bpf_redirect(value->out_ifindex, 0);
+	if (act == TC_ACT_REDIRECT)
+		return (int)act;
+	tc_diag_redirect_drop();
+	return TC_ACT_SHOT;
 }
 
 static __always_inline int redirect_reply_l2_cache_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct flow_key_v4 *reply_key, __u32 ifindex, __u32 nat_cfg_flags)
@@ -2269,6 +2823,9 @@ static __always_inline int redirect_reply_l2_cache_v4(struct __sk_buff *skb, con
 	long act;
 
 	if (!skb || !reply_key || !ifindex || !prefer_reply_l2_cache(nat_cfg_flags))
+		return -1;
+	/* First fragments go through redirect_ifindex_l2, which records them. */
+	if (ctx && (ctx->ip_flags & FORWARD_IP_FLAG_FIRST_FRAGMENT) != 0)
 		return -1;
 	value = bpf_map_lookup_elem(&reply_l2_cache_v4, reply_key);
 	if (!value)
@@ -2288,12 +2845,17 @@ static __always_inline int redirect_reply_l2_cache_v4(struct __sk_buff *skb, con
 	return -1;
 }
 
-static __always_inline int redirect_ifindex(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct redirect_target_v4 *target, __u32 nat_cfg_flags)
+/*
+ * remember: also record a successful FIB result in tc_l2_cache_v4 for the
+ * fast paths, and drop a recorded next hop the FIB no longer confirms.
+ */
+static __always_inline int redirect_ifindex_l2(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct redirect_target_v4 *target, __u32 nat_cfg_flags, int remember)
 {
 	long act;
 
 	if (!ctx || !target || !target->ifindex)
 		return TC_ACT_SHOT;
+	remember_ipv4_fragment(skb, ctx, target->ifindex, target->src_addr, target->dst_addr, FORWARD_TC_FRAGMENT_SEND);
 	if (prefer_redirect_neigh_fast(nat_cfg_flags)) {
 		tc_diag_redirect_neigh_used();
 		act = bpf_redirect_neigh(target->ifindex, 0, 0, 0);
@@ -2304,6 +2866,8 @@ static __always_inline int redirect_ifindex(struct __sk_buff *skb, const struct 
 	}
 	{
 		struct bpf_fib_lookup *fib = lookup_scratch_fib_v4();
+		__u32 wire = tc_wire_len_v4(skb, ctx);
+		__u32 out_ifindex;
 
 		if (!fib)
 			return TC_ACT_SHOT;
@@ -2314,22 +2878,31 @@ static __always_inline int redirect_ifindex(struct __sk_buff *skb, const struct 
 		fib->l4_protocol = ctx->proto;
 		fib->sport = bpf_htons(target->src_port);
 		fib->dport = bpf_htons(target->dst_port);
-		fib->tot_len = ctx->tot_len;
+		/*
+		 * The wire length: for a GSO packet its segments', which the helper
+		 * would not check itself (it lets any GSO packet pass).
+		 */
+		fib->tot_len = wire;
 		fib->ipv4_src = bpf_htonl(target->src_addr);
 		fib->ipv4_dst = bpf_htonl(target->dst_addr);
 		fib->ifindex = target->ifindex;
 
 		act = bpf_fib_lookup(skb, fib, sizeof(*fib), BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_OUTPUT);
 		if (act == BPF_FIB_LKUP_RET_SUCCESS) {
+			out_ifindex = fib->ifindex ? fib->ifindex : target->ifindex;
+			if (remember && ctx->l3_off != 0)
+				remember_tc_l2_v4(target, fib, out_ifindex, wire);
 			if (rewrite_eth_addrs(skb, fib->dmac, fib->smac) < 0) {
 				tc_diag_redirect_drop();
 				return TC_ACT_SHOT;
 			}
-			act = bpf_redirect(fib->ifindex ? fib->ifindex : target->ifindex, 0);
+			act = bpf_redirect(out_ifindex, 0);
 			if (act == TC_ACT_REDIRECT)
 				return (int)act;
 		} else {
 			tc_diag_fib_non_success();
+			if (remember && act != BPF_FIB_LKUP_RET_FRAG_NEEDED)
+				forget_tc_l2_v4(target);
 		}
 	}
 
@@ -2338,6 +2911,100 @@ static __always_inline int redirect_ifindex(struct __sk_buff *skb, const struct 
 	if (act == TC_ACT_REDIRECT)
 		return (int)act;
 	tc_diag_redirect_drop();
+	return TC_ACT_SHOT;
+}
+
+static __always_inline int redirect_ifindex(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct redirect_target_v4 *target, __u32 nat_cfg_flags)
+{
+	return redirect_ifindex_l2(skb, ctx, target, nat_cfg_flags, 0);
+}
+
+/*
+ * An egress NAT packet too big for the uplink cannot go out translated: TC
+ * cannot fragment it, and the uplink drops it without a word, so the
+ * client's path MTU discovery never learns and its connection stalls. This
+ * decides before the NAT touches the packet. One that may not be fragmented
+ * (DF) goes back to the stack untouched, which answers the client with ICMP
+ * fragmentation needed as any router does. One that may be is dropped: the
+ * stack would fragment it, but send it on without the NAT. Packets the FIB
+ * already accepted at this size skip the lookup. Returns FORWARD_TC_MTU_FITS
+ * to go on, or the action for the packet (TC_ACT_OK hands it to the stack).
+ *
+ * fits, if given, receives the largest wire length known to fit when the
+ * packet does: FORWARD_TC_PATH_UNCHECKED when the FIB has no route by the
+ * uplink to judge by (a VPN boundary), which sends any length as the core
+ * would. That finding is kept in tc_l2_cache_v4 as an entry without a next
+ * hop, which fast paths trust; full paths (recheck) look the path up again,
+ * as they refresh the next hops of their flows once per window.
+ */
+static __always_inline int egress_nat_check_mtu_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, __u32 nat_addr, __u16 nat_port, __u32 dst_addr, __u16 dst_port, __u32 *fits, int recheck)
+{
+	struct redirect_target_v4 target = {};
+	struct tc_l2_key_v4 key = {};
+	const struct tc_l2_value_v4 *known;
+	struct bpf_fib_lookup *fib;
+	__u32 wire = tc_wire_len_v4(skb, ctx);
+	long act;
+
+	if (fits)
+		*fits = FORWARD_TC_MIN_PATH_MTU;
+	if (wire <= FORWARD_TC_MIN_PATH_MTU || !rule->out_ifindex)
+		return FORWARD_TC_MTU_FITS;
+	build_tc_l2_key_v4(rule->out_ifindex, nat_addr, dst_addr, &key);
+	known = bpf_map_lookup_elem(&tc_l2_cache_v4, &key);
+	if (known && known->out_ifindex && wire <= known->max_len) {
+		if (fits)
+			*fits = known->max_len;
+		return FORWARD_TC_MTU_FITS;
+	}
+	if (known && !known->out_ifindex && !recheck) {
+		if (fits)
+			*fits = FORWARD_TC_PATH_UNCHECKED;
+		return FORWARD_TC_MTU_FITS;
+	}
+	if (fits)
+		*fits = wire;
+	fib = lookup_scratch_fib_v4();
+	if (!fib)
+		return FORWARD_TC_MTU_FITS;
+	__builtin_memset(fib, 0, sizeof(*fib));
+	fib->family = AF_INET;
+	fib->tos = ctx->tos;
+	fib->l4_protocol = ctx->proto;
+	fib->sport = bpf_htons(nat_port);
+	fib->dport = bpf_htons(dst_port);
+	fib->tot_len = wire;
+	fib->ipv4_src = bpf_htonl(nat_addr);
+	fib->ipv4_dst = bpf_htonl(dst_addr);
+	fib->ifindex = rule->out_ifindex;
+	act = bpf_fib_lookup(skb, fib, sizeof(*fib), BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_OUTPUT);
+	if (act == BPF_FIB_LKUP_RET_SUCCESS) {
+		target.ifindex = rule->out_ifindex;
+		target.src_addr = nat_addr;
+		target.dst_addr = dst_addr;
+		remember_tc_l2_v4(&target, fib, fib->ifindex ? fib->ifindex : rule->out_ifindex, wire);
+		return FORWARD_TC_MTU_FITS;
+	}
+	if (act != BPF_FIB_LKUP_RET_FRAG_NEEDED) {
+		if (fits)
+			*fits = FORWARD_TC_PATH_UNCHECKED;
+		/* No route by the uplink at all, rather than one still resolving. */
+		if (act == BPF_FIB_LKUP_RET_NOT_FWDED && (!known || known->out_ifindex)) {
+			struct tc_l2_value_v4 unchecked = {};
+
+			unchecked.max_len = FORWARD_TC_PATH_UNCHECKED;
+			bpf_map_update_elem(&tc_l2_cache_v4, &key, &unchecked, BPF_ANY);
+		}
+		return FORWARD_TC_MTU_FITS;
+	}
+	if (known && !known->out_ifindex)
+		bpf_map_delete_elem(&tc_l2_cache_v4, &key);
+	if ((ctx->ip_flags & FORWARD_IP_FLAG_DF) != 0) {
+		tc_diag_pmtu_to_stack();
+		return TC_ACT_OK;
+	}
+	tc_diag_oversize_drop();
+	remember_ipv4_fragment(skb, ctx, 0, 0, 0, FORWARD_TC_FRAGMENT_DROP);
 	return TC_ACT_SHOT;
 }
 
@@ -2357,7 +3024,8 @@ static __always_inline int redirect_ifindex_v6(struct __sk_buff *skb, const stru
 	fib->l4_protocol = ctx->proto;
 	fib->sport = bpf_htons(target->src_port);
 	fib->dport = bpf_htons(target->dst_port);
-	fib->tot_len = ctx->tot_len;
+	/* See redirect_ifindex_l2: GSO lengths are checked by the helper itself. */
+	fib->tot_len = skb->gso_size != 0 ? 0 : ctx->tot_len;
 	__builtin_memcpy(fib->ipv6_src, target->src_addr, sizeof(fib->ipv6_src));
 	__builtin_memcpy(fib->ipv6_dst, target->dst_addr, sizeof(fib->ipv6_dst));
 	fib->ifindex = target->ifindex;
@@ -2430,6 +3098,25 @@ static __always_inline int is_local_ipv4(__be32 addr)
 	return present && *present != 0;
 }
 
+/*
+ * Whether egress NAT leaves a packet for addr to the kernel: one for this
+ * host, or for a network directly connected to an interface other than an
+ * egress NAT uplink, which the kernel routes there untranslated.
+ */
+static __always_inline int egress_nat_dst_is_local_v4(__be32 addr)
+{
+	struct local_net_key_v4 key = {
+		.prefixlen = 32,
+		.addr = addr,
+	};
+	__u8 *routed;
+
+	if (is_local_ipv4(addr))
+		return 1;
+	routed = bpf_map_lookup_elem(&local_nets_v4, &key);
+	return routed && *routed != 0;
+}
+
 static __always_inline void build_front_flow_key(struct __sk_buff *skb, const struct packet_ctx *ctx, struct flow_key_v4 *key)
 {
 	key->ifindex = skb->ifindex;
@@ -2453,8 +3140,12 @@ static __always_inline void build_full_cone_front_flow_key(struct __sk_buff *skb
 static __always_inline __u32 resolve_parent_ifindex(__u32 ifindex)
 {
 	__u32 key = ifindex;
-	__u32 *parent = bpf_map_lookup_elem(&if_parent_v4, &key);
+	__u32 hints = lookup_tc_ifindex_hints(ifindex);
+	__u32 *parent;
 
+	if ((hints & (FORWARD_TC_IFINDEX_HINT_KNOWN | FORWARD_TC_IFINDEX_HINT_HAS_PARENT)) == FORWARD_TC_IFINDEX_HINT_KNOWN)
+		return ifindex;
+	parent = bpf_map_lookup_elem(&if_parent_v4, &key);
 	if (parent && *parent != 0)
 		return *parent;
 	return ifindex;
@@ -2873,7 +3564,16 @@ static __always_inline int reserve_nat_port_v6(const struct rule_value_v6 *rule,
 	return -1;
 }
 
-static __attribute__((noinline)) void ensure_nat_port_owner_v4(__u8 bank, const struct nat_port_key_v4 *key, __u32 rule_id, __u64 session_id)
+/*
+ * The NAT port owner helpers are inlined so that the programs make no
+ * BPF-to-BPF call. Before Linux 6.x the verifier's precision tracking gives up
+ * at a call boundary and marks every scalar of the path precise, which defeats
+ * state pruning: on Ubuntu 22.04's 5.15.0-25 kernel, each NAT port probe then
+ * walks the rest of the program again, and forward_ingress_v4_egress_nat
+ * exceeds the 1M-instruction limit. Do not add noinline subprograms to the
+ * forwarding paths.
+ */
+static __always_inline void ensure_nat_port_owner_v4(__u8 bank, const struct nat_port_key_v4 *key, __u32 rule_id, __u64 session_id)
 {
 	struct nat_port_value_v4 value = {
 		.rule_id = rule_id,
@@ -2884,7 +3584,13 @@ static __attribute__((noinline)) void ensure_nat_port_owner_v4(__u8 bank, const 
 		bump_kernel_nat_occupancy();
 }
 
-static __attribute__((noinline)) void ensure_nat_port_owner_v6(__u8 bank, const struct nat_port_key_v6 *key, __u32 rule_id, __u64 session_id)
+/*
+ * The core and plugin-continue programs serve IPv6 too. Clang before 17 once
+ * kept this a call: inlined into IPv6 pipelines that carried two copies of
+ * the IPv6 core, it pushed them past the 16-bit jump range of newer kernels.
+ * Those pipelines now inline the core once (dispatch_forward_pipeline_v6).
+ */
+static __always_inline void ensure_nat_port_owner_v6(__u8 bank, const struct nat_port_key_v6 *key, __u32 rule_id, __u64 session_id)
 {
 	struct nat_port_value_v6 value = {
 		.rule_id = rule_id,
@@ -3017,6 +3723,8 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 {
 	struct flow_key_v4 *flow_key = lookup_scratch_flow_key_v4();
 	struct flow_value_v4 *flow_value = lookup_scratch_flow_v4();
+	/* A checked copy of existing_flow; see copy_flow_v4. */
+	struct flow_value_v4 *existing = lookup_scratch_flow_aux_v4();
 	struct flow_value_v4 *existing_flow;
 	struct flow_key_v4 close_key = {};
 	__u64 now = 0;
@@ -3034,7 +3742,7 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 
 	if (local_dst_mac_mismatch(skb, ctx->rule_wildcard_addr))
 		return TC_ACT_OK;
-	if (!flow_key || !flow_value)
+	if (!flow_key || !flow_value || !existing)
 		return TC_ACT_SHOT;
 	__builtin_memset(flow_key, 0, sizeof(*flow_key));
 	__builtin_memset(flow_value, 0, sizeof(*flow_value));
@@ -3048,17 +3756,17 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 	flow_key->dst_port = ctx->src_port;
 	flow_key->proto = ctx->proto;
 
-	existing_flow = lookup_flow_v4_active_or_old(flow_key, &flow_bank);
+	existing_flow = lookup_flow_v4_copy_active_or_old(flow_key, &flow_bank, existing);
 	if (!existing_flow && flow_out_ifindex != direct_out_ifindex) {
 		flow_key->ifindex = direct_out_ifindex;
-		existing_flow = lookup_flow_v4_active_or_old(flow_key, &flow_bank);
+		existing_flow = lookup_flow_v4_copy_active_or_old(flow_key, &flow_bank, existing);
 		if (!existing_flow)
 			flow_key->ifindex = flow_out_ifindex;
 	}
-	if (existing_flow && !transparent_flow_matches_rule_v4(existing_flow, rule, ctx, skb)) {
-		__u64 stale_session_id = existing_flow->session_id;
-		__u32 stale_rule_id = existing_flow->rule_id;
-		__u16 stale_flags = existing_flow->flags;
+	if (existing_flow && !transparent_flow_matches_rule_v4(existing, rule, ctx, skb)) {
+		__u64 stale_session_id = existing->session_id;
+		__u32 stale_rule_id = existing->rule_id;
+		__u16 stale_flags = existing->flags;
 
 		if (delete_flow_v4_session_in_bank(flow_bank, flow_key, stale_session_id) < 0)
 			return TC_ACT_SHOT;
@@ -3081,6 +3789,8 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 		flow_value->session_id = new_flow_session_id();
 		flow_value->front_addr = bpf_ntohl(ctx->dst_addr);
 		flow_value->front_port = ctx->dst_port;
+		flow_value->client_addr = flow_key->dst_addr;
+		flow_value->client_port = flow_key->dst_port;
 		flow_value->in_ifindex = skb->ifindex;
 		if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
 			flow_value->flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
@@ -3097,16 +3807,18 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 		new_session = 1;
 	} else if (is_datagram_proto(ctx->proto)) {
 		now = bpf_ktime_get_ns();
-		if (forward_flow_idle_expired(now, existing_flow->last_seen_ns, FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto))) {
+		if (forward_flow_idle_expired(now, existing->last_seen_ns, FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto))) {
 			flow_value->rule_id = rule->rule_id;
 			flow_value->rule_revision = rule->revision;
 			flow_value->session_id = new_flow_session_id();
 			flow_value->front_addr = bpf_ntohl(ctx->dst_addr);
 			flow_value->front_port = ctx->dst_port;
+			flow_value->client_addr = flow_key->dst_addr;
+			flow_value->client_port = flow_key->dst_port;
 			flow_value->in_ifindex = skb->ifindex;
-			if (FORWARD_FLOW_TRAFFIC_ENABLED(existing_flow) || FORWARD_RULE_TRAFFIC_ENABLED(rule))
+			if (FORWARD_FLOW_TRAFFIC_ENABLED(existing) || FORWARD_RULE_TRAFFIC_ENABLED(rule))
 				flow_value->flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
-			if ((existing_flow->flags & FORWARD_FLOW_FLAG_COUNTED) != 0) {
+			if ((existing->flags & FORWARD_FLOW_FLAG_COUNTED) != 0) {
 				flow_value->flags |= FORWARD_FLOW_FLAG_COUNTED;
 			} else {
 				flow_value->flags |= FORWARD_FLOW_FLAG_COUNTED;
@@ -3115,8 +3827,8 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 			flow_value->last_seen_ns = now;
 			update_flow = 1;
 			new_session = 1;
-		} else if ((now - existing_flow->last_seen_ns) >= FORWARD_UDP_FLOW_REFRESH_NS) {
-			*flow_value = *existing_flow;
+		} else if ((now - existing->last_seen_ns) >= FORWARD_UDP_FLOW_REFRESH_NS) {
+			*flow_value = *existing;
 			flow_value->last_seen_ns = now;
 			update_flow = 1;
 		}
@@ -3124,22 +3836,22 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 		now = bpf_ktime_get_ns();
 		if (tcp_packet_is_rst(ctx->proto, ctx->tcp_flags)) {
 			close_key = *flow_key;
-			close_session_id = existing_flow->session_id;
-			close_rule_id = existing_flow->rule_id;
-			close_flags = existing_flow->flags;
+			close_session_id = existing->session_id;
+			close_rule_id = existing->rule_id;
+			close_flags = existing->flags;
 			close_complete = 1;
 		} else if (tcp_packet_has_fin(ctx->proto, ctx->tcp_flags)) {
-			*flow_value = *existing_flow;
+			*flow_value = *existing;
 			mark_tcp_flow_closing_v4(flow_value, FORWARD_FLOW_FLAG_FRONT_CLOSING, now);
 			update_flow = 1;
-		} else if (tcp_flow_close_complete(existing_flow->flags, ctx->proto, ctx->tcp_flags)) {
+		} else if (tcp_flow_close_complete(existing->flags, ctx->proto, ctx->tcp_flags)) {
 			close_key = *flow_key;
-			close_session_id = existing_flow->session_id;
-			close_rule_id = existing_flow->rule_id;
-			close_flags = existing_flow->flags;
+			close_session_id = existing->session_id;
+			close_rule_id = existing->rule_id;
+			close_flags = existing->flags;
 			close_complete = 1;
-		} else if (existing_flow->last_seen_ns == 0 || now < existing_flow->last_seen_ns || (now - existing_flow->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
-			*flow_value = *existing_flow;
+		} else if (existing->last_seen_ns == 0 || now < existing->last_seen_ns || (now - existing->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
+			*flow_value = *existing;
 			flow_value->last_seen_ns = now;
 			update_flow = 1;
 		}
@@ -3147,7 +3859,9 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 
 	if (update_flow) {
 		if (existing_flow) {
-			*existing_flow = *flow_value;
+			/* An expired datagram flow is renewed under a new session. */
+			if (flow_v4_session(existing_flow) == existing->session_id)
+				*existing_flow = *flow_value;
 		} else if (update_flow_v4_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, flow_key, flow_value, BPF_ANY) < 0) {
 			return TC_ACT_SHOT;
 		}
@@ -3235,12 +3949,16 @@ static __always_inline int handle_fullnat_forward_existing(struct __sk_buff *skb
 	if (!front_value || !reply_value || !existing_front)
 		return TC_ACT_SHOT;
 	build_front_flow_key(skb, ctx, &front_key);
-	if (!flow_matches_rule_v4(existing_front, rule)) {
-		if (delete_flow_v4_session_in_bank(bank, &front_key, existing_front->session_id) == 0)
+	/* A dispatch snapshot was checked when it was taken. */
+	if (!front_live)
+		*front_value = *existing_front;
+	else if (copy_flow_v4(existing_front, &front_key, front_value) < 0)
+		return TC_ACT_SHOT;
+	if (!flow_matches_rule_v4(front_value, rule)) {
+		if (delete_flow_v4_session_in_bank(bank, &front_key, front_value->session_id) == 0)
 			drop_kernel_flow_occupancy();
 		return TC_ACT_SHOT;
 	}
-	*front_value = *existing_front;
 	__builtin_memset(reply_value, 0, sizeof(*reply_value));
 	if (front_value->nat_addr == 0)
 		front_value->nat_addr = rule->nat_addr;
@@ -3248,8 +3966,8 @@ static __always_inline int handle_fullnat_forward_existing(struct __sk_buff *skb
 
 	build_reply_flow_key_from_front(rule, front_value, ctx->proto, &reply_key);
 	reply_flow = lookup_flow_v4_in_bank(bank, &reply_key);
-	if (is_fullnat_reply_flow(reply_flow) && reply_flow->session_id == front_value->session_id) {
-		*reply_value = *reply_flow;
+	if (copy_flow_v4_session(reply_flow, front_value->session_id, reply_value) == 0 && is_fullnat_reply_flow(reply_value)) {
+		/* reply_value holds the flow's reply entry. */
 	} else {
 		init_fullnat_reply_value(reply_value, front_value, now);
 		if (is_datagram_proto(ctx->proto)) {
@@ -3296,8 +4014,8 @@ static __always_inline int handle_fullnat_forward_existing(struct __sk_buff *skb
 
 	if (update_front || created_reply) {
 		if (front_live && !created_reply) {
-			*existing_front = *front_value;
-		} else if (update_flow_v4_in_bank(bank, &front_key, front_value, BPF_ANY) < 0) {
+			write_flow_v4(existing_front, front_value);
+		} else if (store_flow_v4_in_bank(bank, &front_key, front_value) < 0) {
 			if (created_reply) {
 				if (delete_flow_v4_session_in_bank(bank, &reply_key, reply_value->session_id) == 0)
 					drop_kernel_flow_occupancy();
@@ -3306,9 +4024,9 @@ static __always_inline int handle_fullnat_forward_existing(struct __sk_buff *skb
 		}
 	}
 	if (update_reply) {
-		if (reply_flow) {
-			*reply_flow = *reply_value;
-		} else if (update_flow_v4_in_bank(bank, &reply_key, reply_value, BPF_ANY) < 0) {
+		if (!created_reply) {
+			write_flow_v4(reply_flow, reply_value);
+		} else if (store_flow_v4_in_bank(bank, &reply_key, reply_value) < 0) {
 			return TC_ACT_SHOT;
 		}
 	}
@@ -3365,8 +4083,8 @@ static __always_inline int handle_fullnat_forward_new(struct __sk_buff *skb, con
 		if (delete_nat_port_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &nat_key, session_id) == 0)
 			drop_kernel_nat_occupancy();
 
-		front_flow = lookup_flow_v4_active_or_old(&front_key_local, &flow_bank);
-		if (!is_fullnat_front_flow(front_flow))
+		front_flow = lookup_flow_v4_copy_active_or_old(&front_key_local, &flow_bank, front_value);
+		if (!front_flow || !is_fullnat_front_flow(front_value))
 			return TC_ACT_SHOT;
 		return handle_fullnat_forward_existing(skb, ctx, rule, front_flow, flow_bank);
 	}
@@ -3401,24 +4119,23 @@ static __always_inline int handle_fullnat_forward_new(struct __sk_buff *skb, con
 static __always_inline int handle_fullnat_forward(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule)
 {
 	struct flow_key_v4 front_key = {};
+	struct flow_value_v4 *front_copy = lookup_scratch_flow_v4();
 	struct flow_value_v4 *front_flow;
 	__u8 flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
 
-	if (!ctx || !rule)
+	if (!ctx || !rule || !front_copy)
 		return TC_ACT_SHOT;
 	build_front_flow_key(skb, ctx, &front_key);
-	front_flow = lookup_flow_v4_active_or_old(&front_key, &flow_bank);
-	if (is_fullnat_front_flow(front_flow))
+	front_flow = lookup_flow_v4_copy_active_or_old(&front_key, &flow_bank, front_copy);
+	if (front_flow && is_fullnat_front_flow(front_copy))
 		return handle_fullnat_forward_existing(skb, ctx, rule, front_flow, flow_bank);
 	return handle_fullnat_forward_new(skb, ctx, rule, &front_key);
 }
 
-static __always_inline int redirect_egress_nat_forward(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, const struct flow_value_v4 *front_value, __u32 nat_cfg_flags)
+/* Sends an already translated egress NAT packet towards the rule's uplink. */
+static __always_inline int send_egress_nat_forward(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, __u32 nat_addr, __u16 nat_port, __u32 front_addr, __u16 front_port, __u32 nat_cfg_flags)
 {
 	long act;
-
-	if (rewrite_l4_snat(skb, ctx, front_value->nat_addr, front_value->nat_port) < 0)
-		return TC_ACT_SHOT;
 
 	if ((rule->flags & FORWARD_RULE_FLAG_PREPARED_L2) != 0) {
 		if (!rule->out_ifindex || mac_is_zero(rule->egress_src_mac) || mac_is_zero(rule->egress_dst_mac))
@@ -3427,6 +4144,7 @@ static __always_inline int redirect_egress_nat_forward(struct __sk_buff *skb, co
 			tc_diag_redirect_drop();
 			return TC_ACT_SHOT;
 		}
+		remember_ipv4_fragment(skb, ctx, rule->out_ifindex, nat_addr, front_addr, FORWARD_TC_FRAGMENT_SEND);
 		act = bpf_redirect(rule->out_ifindex, 0);
 		if (act == TC_ACT_REDIRECT)
 			return (int)act;
@@ -3437,47 +4155,369 @@ static __always_inline int redirect_egress_nat_forward(struct __sk_buff *skb, co
 	struct redirect_target_v4 redirect = {};
 
 	redirect.ifindex = rule->out_ifindex;
-	redirect.src_addr = front_value->nat_addr;
-	redirect.dst_addr = front_value->front_addr;
-	redirect.src_port = front_value->nat_port;
-	redirect.dst_port = front_value->front_port;
-	return redirect_ifindex(skb, ctx, &redirect, nat_cfg_flags);
+	redirect.src_addr = nat_addr;
+	redirect.dst_addr = front_addr;
+	redirect.src_port = nat_port;
+	redirect.dst_port = front_port;
+	return redirect_ifindex_l2(skb, ctx, &redirect, nat_cfg_flags, 1);
 }
 
-static __always_inline int handle_egress_nat_forward_existing(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, struct flow_value_v4 *front_flow, __u8 flow_bank)
+/*
+ * The next hop a prepared_l2 rule names itself, as send_egress_nat_forward
+ * uses it, for packets up to max_len (see egress_nat_check_mtu_v4).
+ */
+static __always_inline int egress_nat_prepared_hop_v4(const struct rule_value_v4 *rule, __u32 max_len, struct tc_l2_value_v4 *hop)
+{
+	if (!rule->out_ifindex || mac_is_zero(rule->egress_src_mac) || mac_is_zero(rule->egress_dst_mac))
+		return -1;
+	__builtin_memcpy(hop->dmac, rule->egress_dst_mac, ETH_ALEN);
+	__builtin_memcpy(hop->smac, rule->egress_src_mac, ETH_ALEN);
+	hop->out_ifindex = rule->out_ifindex;
+	hop->max_len = max_len;
+	return 0;
+}
+
+static __always_inline int redirect_egress_nat_forward(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, const struct flow_value_v4 *front_value, __u32 nat_cfg_flags)
+{
+	int action = egress_nat_check_mtu_v4(skb, ctx, rule, front_value->nat_addr, front_value->nat_port,
+		front_value->front_addr, front_value->front_port, 0, 1);
+
+	if (action != FORWARD_TC_MTU_FITS)
+		return action;
+	if (rewrite_l4_snat(skb, ctx, front_value->nat_addr, front_value->nat_port) < 0)
+		return TC_ACT_SHOT;
+	return send_egress_nat_forward(skb, ctx, rule, front_value->nat_addr, front_value->nat_port,
+		front_value->front_addr, front_value->front_port, nat_cfg_flags);
+}
+
+/* Whether a plugin hook runs for packets entering this interface. */
+static __always_inline int tc_flow_cache_plugin_hooked(__u32 ifindex)
+{
+	struct tc_plugin_config_v4 *header;
+	struct tc_plugin_config_v4 *config;
+	struct tc_plugin_if_key_v4 if_key = {};
+	struct tc_plugin_if_value_v4 *scoped;
+	__u32 key = FORWARD_TC_PLUGIN_CONFIG_HEADER_KEY;
+	__u32 bank;
+
+	header = bpf_map_lookup_elem(&tc_plugin_config_v4, &key);
+	if (!header)
+		return 1;
+	bank = header->active_bank & 1;
+	key = FORWARD_TC_PLUGIN_CONFIG_BANK_BASE + bank;
+	config = bpf_map_lookup_elem(&tc_plugin_config_v4, &key);
+	if (!config)
+		return 1;
+	if ((config->pre_forward_count | config->post_lookup_count | config->pre_reply_count |
+		config->post_reply_count | config->post_apply_count | config->post_reply_apply_count) == 0)
+		return 0;
+	if ((config->pre_forward_global_mask | config->post_lookup_global_mask | config->pre_reply_global_mask |
+		config->post_reply_global_mask | config->post_apply_global_mask | config->post_reply_apply_global_mask) != 0)
+		return 1;
+	if_key.ifindex = ifindex;
+	if_key.bank = bank;
+	if_key.attach = FORWARD_TC_PLUGIN_ATTACH_INGRESS;
+	scoped = bpf_map_lookup_elem(&tc_plugin_interfaces_v4, &if_key);
+	if (!scoped)
+		return 0;
+	return (scoped->pre_forward_mask | scoped->post_lookup_mask | scoped->pre_reply_mask |
+		scoped->post_reply_mask | scoped->post_apply_mask | scoped->reply_apply_mask) != 0;
+}
+
+/* The cache state if the core may record packets entering this interface. */
+static __always_inline const struct tc_flow_cache_state_v4 *tc_flow_cache_writable(__u32 ifindex)
+{
+	const struct tc_flow_cache_state_v4 *state;
+	__u32 key = 0;
+
+	state = bpf_map_lookup_elem(&tc_flow_cache_state_v4, &key);
+	if (!state || !state->enabled)
+		return 0;
+	if (tc_flow_cache_plugin_hooked(ifindex))
+		return 0;
+	return state;
+}
+
+/*
+ * The stamp of a fast-path record made in the window that began at
+ * last_seen_ns, under the given generation of tc_flow_cache_state_v4. A
+ * record is current only while its stamp equals this for its entry; it is
+ * never 0, which marks a record being written or retired.
+ */
+static __always_inline __u32 flow_fast_stamp_v4(__u64 last_seen_ns, __u32 generation)
+{
+	return ((__u32)last_seen_ns ^ (generation * 0x9e3779b9U)) | 1;
+}
+
+/*
+ * A live entry as the record writers test it for null. Callers pass
+ * bank == ACTIVE ? entry : 0, and clang 14 then tests a spilled copy of the
+ * bank instead of the pointer. The 5.10 and 5.15 verifiers do not learn
+ * from the select's branch that the bank is not 0, so they also follow the
+ * path where the copy reads 0 with the pointer 0, and rejected the forward
+ * dispatcher, pipelines and core ("R1 invalid mem access 'inv'"). The empty
+ * asm hides where the pointer came from, so the test stays on the pointer.
+ */
+static __always_inline struct flow_value_v4 *flow_fast_live_v4(struct flow_value_v4 *live)
+{
+	asm volatile("" : "+r"(live));
+	return live;
+}
+
+/*
+ * Records in the live flow entry how the fast path sends this packet, so the
+ * dispatcher can send the flow's next packets straight from its flow lookup.
+ * Only untagged TCP and UDP, which that check parses, and only next hops the
+ * FIB resolved, which carry both MAC addresses. It must run before the packet
+ * is rewritten: the record keeps the destination MAC the packet arrived with.
+ *
+ * A current record is left alone even when it names another port or
+ * destination, so a record is only ever written while it is not current:
+ * stamp first goes to 0, then the fields, then the new stamp. A reader that
+ * finds the same current stamp before and after copying the record therefore
+ * copied one writer's fields (on CPUs that keep stores in order; elsewhere a
+ * reader racing a rewrite after a route change may still mix two records for
+ * one packet). live must be the entry of session_id; dst_addr is in host order.
+ */
+static __always_inline void remember_flow_fast_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, struct flow_value_v4 *live, __u64 session_id, const struct tc_l2_value_v4 *l2, __u32 dst_addr)
+{
+	const struct tc_flow_cache_state_v4 *state;
+	const struct ethhdr *eth;
+	__u16 max_len;
+	__u32 stamp;
+
+	live = flow_fast_live_v4(live);
+	if (!live || !l2 || ctx->l3_off != (int)sizeof(struct ethhdr) || ctx->proto == IPPROTO_ICMP)
+		return;
+	state = tc_flow_cache_writable(skb->ifindex);
+	if (!state)
+		return;
+	eth = tc_packet_ptr(skb, 0, sizeof(*eth));
+	if (!eth || flow_v4_session(live) != session_id)
+		return;
+	max_len = l2->max_len > 0xffff ? 0xffff : (__u16)l2->max_len;
+	stamp = flow_fast_stamp_v4(live->last_seen_ns, state->generation);
+	if (live->fast.stamp == stamp) {
+		/*
+		 * The next hop's max_len grows with the longest packet the FIB
+		 * has accepted, so a record made from a short packet sends the
+		 * longer ones here. Raising it is one store, and a reader that
+		 * still sees the old length only sends one more packet here.
+		 */
+		if (max_len > live->fast.max_len && live->fast.out_ifindex == l2->out_ifindex &&
+		    mac_equal(live->fast.dmac, l2->dmac))
+			live->fast.max_len = max_len;
+		return;
+	}
+	live->fast.stamp = 0;
+	FORWARD_COMPILER_BARRIER();
+	live->fast.out_ifindex = l2->out_ifindex;
+	live->fast.in_ifindex = skb->ifindex;
+	live->fast.dst_addr = dst_addr;
+	live->fast.max_len = max_len;
+	__builtin_memcpy(live->fast.dmac, l2->dmac, ETH_ALEN);
+	__builtin_memcpy(live->fast.smac, l2->smac, ETH_ALEN);
+	__builtin_memcpy(live->fast.in_dmac, eth->h_dest, ETH_ALEN);
+	FORWARD_COMPILER_BARRIER();
+	live->fast.stamp = stamp;
+}
+
+/* Whether the record in this (copied) entry is current. */
+static __always_inline int flow_fast_current_v4(const struct flow_value_v4 *flow)
+{
+	const struct tc_flow_cache_state_v4 *state;
+	__u32 state_key = 0;
+
+	state = bpf_map_lookup_elem(&tc_flow_cache_state_v4, &state_key);
+	return state && flow->fast.stamp == flow_fast_stamp_v4(flow->last_seen_ns, state->generation);
+}
+
+static __always_inline void retire_flow_fast_v4(struct flow_value_v4 *live)
+{
+	live = flow_fast_live_v4(live);
+	if (live)
+		live->fast.stamp = 0;
+}
+
+/*
+ * A SYN, FIN or RST takes the core's full path; so must the rest of the
+ * connection in both directions while the core tracks the change. own is
+ * the packet's own live entry, if known; peer names the other direction's
+ * entry in the active bank.
+ */
+static __always_inline void forget_flow_fast_v4(struct flow_value_v4 *own, const struct flow_key_v4 *peer)
+{
+	const struct tc_flow_cache_state_v4 *state;
+	__u32 state_key = 0;
+
+	state = bpf_map_lookup_elem(&tc_flow_cache_state_v4, &state_key);
+	if (!state || !state->enabled)
+		return;
+	retire_flow_fast_v4(own);
+	retire_flow_fast_v4(bpf_map_lookup_elem(&flows_v4, peer));
+}
+
+/* A fast path declined the packet; run the full handler. */
+#define FORWARD_TC_SLOW_PATH (-2)
+
+/* Whether a flow entry was fully processed recently enough to trust its partner. */
+static __always_inline int flow_within_fast_path_window(const struct flow_value_v4 *flow, __u64 now)
+{
+	__u64 seen = flow->last_seen_ns;
+
+	if ((flow->flags & (FORWARD_FLOW_FLAG_FRONT_CLOSING | FORWARD_FLOW_FLAG_REPLY_CLOSING)) != 0)
+		return 0;
+	return seen != 0 && now >= seen && now - seen < FORWARD_TC_FAST_PATH_WINDOW_NS;
+}
+
+static __always_inline int tcp_packet_changes_state(const struct packet_ctx *ctx)
+{
+	return ctx->proto == IPPROTO_TCP &&
+		(ctx->tcp_flags & (FORWARD_TCP_FLAG_FIN | FORWARD_TCP_FLAG_SYN | FORWARD_TCP_FLAG_RST)) != 0;
+}
+
+/*
+ * Established egress NAT traffic whose front entry took the full path within
+ * the fast-path window: translate and send it without the reply entry lookup,
+ * refresh or close tracking, which only SYN/FIN/RST or a stale window need.
+ * front_flow is a checked copy; live, if set, the active-bank entry it was
+ * copied from, which keeps the fast-path record.
+ */
+static __always_inline int try_egress_nat_forward_fast(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, const struct flow_value_v4 *front_flow, struct flow_value_v4 *live, __u64 now, __u32 nat_cfg_flags)
+{
+	const struct tc_l2_value_v4 *l2 = 0;
+	struct tc_l2_value_v4 prepared;
+	__u32 nat_addr;
+	__u32 dst_addr;
+	__u16 dst_port;
+	int full_cone;
+
+	if (!front_flow)
+		return FORWARD_TC_SLOW_PATH;
+	/* The slow path records a first fragment for the rest of its datagram. */
+	if ((ctx->ip_flags & FORWARD_IP_FLAG_FIRST_FRAGMENT) != 0)
+		return FORWARD_TC_SLOW_PATH;
+	nat_addr = front_flow->nat_addr ? front_flow->nat_addr : rule->nat_addr;
+	if (tcp_packet_changes_state(ctx)) {
+		struct flow_key_v4 reply_key = {};
+
+		/* The reply entry is keyed by the reply interface; a full-cone one serves any remote. */
+		reply_key.ifindex = rule->out_ifindex;
+		if (!is_full_cone_flow(front_flow)) {
+			reply_key.src_addr = bpf_ntohl(ctx->dst_addr);
+			reply_key.src_port = ctx->dst_port;
+		}
+		reply_key.dst_addr = nat_addr;
+		reply_key.dst_port = front_flow->nat_port;
+		reply_key.proto = ctx->proto;
+		forget_flow_fast_v4(live, &reply_key);
+		return FORWARD_TC_SLOW_PATH;
+	}
+	if (!flow_within_fast_path_window(front_flow, now))
+		return FORWARD_TC_SLOW_PATH;
+	if (!flow_matches_rule_v4(front_flow, rule))
+		return FORWARD_TC_SLOW_PATH;
+	/* A full-cone front entry is shared by every destination of its source. */
+	full_cone = is_full_cone_flow(front_flow);
+	if (full_cone) {
+		dst_addr = bpf_ntohl(ctx->dst_addr);
+		dst_port = ctx->dst_port;
+	} else {
+		dst_addr = front_flow->front_addr;
+		dst_port = front_flow->front_port;
+	}
+	/*
+	 * Like the slow path: a prepared_l2 rule names its next hop itself, which
+	 * also lets the flow cache record a boundary the FIB has no route by (a
+	 * VPN exit); any other rule takes the next hop its slow path resolved.
+	 */
+	if ((rule->flags & FORWARD_RULE_FLAG_PREPARED_L2) != 0) {
+		__u32 fits = 0;
+		int action = egress_nat_check_mtu_v4(skb, ctx, rule, nat_addr, front_flow->nat_port, dst_addr, dst_port, &fits, 0);
+
+		if (action != FORWARD_TC_MTU_FITS)
+			return action;
+		if (egress_nat_prepared_hop_v4(rule, fits, &prepared) < 0)
+			return FORWARD_TC_SLOW_PATH;
+		l2 = &prepared;
+	} else if (!prefer_redirect_neigh_fast(nat_cfg_flags)) {
+		/* Holds the packet to the wire length the FIB accepted, too. */
+		l2 = lookup_tc_l2_v4(skb, ctx, rule->out_ifindex, nat_addr, dst_addr);
+		if (!l2)
+			return FORWARD_TC_SLOW_PATH;
+	} else {
+		int action = egress_nat_check_mtu_v4(skb, ctx, rule, nat_addr, front_flow->nat_port, dst_addr, dst_port, 0, 0);
+
+		if (action != FORWARD_TC_MTU_FITS)
+			return action;
+	}
+	if (prefer_reply_l2_cache(nat_cfg_flags)) {
+		struct flow_key_v4 reply_key = {};
+
+		reply_key.ifindex = rule->out_ifindex;
+		reply_key.src_addr = front_flow->front_addr;
+		reply_key.src_port = front_flow->front_port;
+		reply_key.dst_addr = nat_addr;
+		reply_key.dst_port = front_flow->nat_port;
+		reply_key.proto = ctx->proto;
+		update_reply_l2_cache_v4(skb, &reply_key, nat_cfg_flags);
+	}
+	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
+		add_rule_traffic_bytes(rule->rule_id, FORWARD_GET_PAYLOAD_LEN(ctx), 0);
+	if (!prefer_reply_l2_cache(nat_cfg_flags) && nat_addr == front_flow->nat_addr)
+		remember_flow_fast_v4(skb, ctx, live, front_flow->session_id, l2, bpf_ntohl(ctx->dst_addr));
+	if (rewrite_l4_snat(skb, ctx, nat_addr, front_flow->nat_port) < 0)
+		return TC_ACT_SHOT;
+	if (l2)
+		return redirect_tc_l2_v4(skb, l2);
+	return send_egress_nat_forward(skb, ctx, rule, nat_addr, front_flow->nat_port,
+		dst_addr, dst_port, nat_cfg_flags);
+}
+
+static __always_inline int handle_egress_nat_forward_existing(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, struct flow_value_v4 *front_flow, __u8 flow_bank, int try_fast)
 {
 	struct flow_key_v4 front_key = {};
 	struct flow_key_v4 reply_key = {};
-	struct flow_value_v4 *front_value = lookup_scratch_flow_v4();
-	struct flow_value_v4 *reply_value = lookup_scratch_flow_aux_v4();
+	struct flow_value_v4 *front_value;
+	struct flow_value_v4 *reply_value;
 	struct flow_value_v4 *reply_flow = 0;
 	__u64 now = bpf_ktime_get_ns();
 	__u8 created_reply = 0;
 	__u8 update_front = 0;
 	__u8 update_reply = 0;
+	__u8 touch_front = 0;
 	__u8 count_udp_now = 0;
 	__u32 nat_cfg_flags = load_kernel_nat_config_flags();
 	int close_complete = 0;
+	int fast;
 
+	front_value = lookup_scratch_flow_v4();
+	reply_value = lookup_scratch_flow_aux_v4();
 	if (!front_value || !reply_value || !front_flow)
 		return TC_ACT_SHOT;
 	build_front_flow_key(skb, ctx, &front_key);
-	if (!flow_matches_rule_v4(front_flow, rule)) {
-		if (delete_flow_v4_session_in_bank(flow_bank, &front_key, front_flow->session_id) == 0)
+	if (copy_flow_v4(front_flow, &front_key, front_value) < 0)
+		return TC_ACT_SHOT;
+	if (try_fast) {
+		fast = try_egress_nat_forward_fast(skb, ctx, rule, front_value,
+			flow_bank == FORWARD_TC_FLOW_BANK_ACTIVE ? front_flow : 0, now, nat_cfg_flags);
+		if (fast != FORWARD_TC_SLOW_PATH)
+			return fast;
+	}
+	if (!flow_matches_rule_v4(front_value, rule)) {
+		if (delete_flow_v4_session_in_bank(flow_bank, &front_key, front_value->session_id) == 0)
 			drop_kernel_flow_occupancy();
 		return TC_ACT_SHOT;
 	}
-	__builtin_memset(front_value, 0, sizeof(*front_value));
 	__builtin_memset(reply_value, 0, sizeof(*reply_value));
 
-	*front_value = *front_flow;
 	if (front_value->nat_addr == 0)
 		front_value->nat_addr = rule->nat_addr;
 
 	build_reply_flow_key_from_front(rule, front_value, ctx->proto, &reply_key);
 	reply_flow = lookup_flow_v4_in_bank(flow_bank, &reply_key);
-	if (is_fullnat_reply_flow(reply_flow) && reply_flow->session_id == front_value->session_id) {
-		*reply_value = *reply_flow;
+	if (copy_flow_v4_session(reply_flow, front_value->session_id, reply_value) == 0 && is_fullnat_reply_flow(reply_value)) {
+		/* reply_value holds the flow's reply entry. */
 	} else {
 		init_fullnat_reply_value(reply_value, front_value, now);
 		if (is_datagram_proto(ctx->proto)) {
@@ -3511,6 +4551,9 @@ static __always_inline int handle_egress_nat_forward_existing(struct __sk_buff *
 			if (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
 				front_value->last_seen_ns = now;
 				update_front = 1;
+			} else if ((now - front_value->last_seen_ns) >= FORWARD_TC_FAST_PATH_WINDOW_NS) {
+				/* Reopens the fast-path window now that the pair was checked. */
+				touch_front = 1;
 			}
 			if (!created_reply && (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
 				reply_value->last_seen_ns = now;
@@ -3520,20 +4563,21 @@ static __always_inline int handle_egress_nat_forward_existing(struct __sk_buff *
 	}
 
 	if (update_front) {
-		if (!created_reply && front_flow) {
-			*front_flow = *front_value;
+		if (!created_reply) {
+			write_flow_v4(front_flow, front_value);
 		} else {
 			build_front_flow_key(skb, ctx, &front_key);
-			if (update_flow_v4_in_bank(flow_bank, &front_key, front_value, BPF_ANY) < 0)
+			if (store_flow_v4_in_bank(flow_bank, &front_key, front_value) < 0)
 				return TC_ACT_SHOT;
 		}
+	} else if (touch_front) {
+		touch_flow_v4(front_flow, front_value->session_id, now);
 	}
 	if (update_reply) {
-		if (!created_reply && reply_flow) {
-			*reply_flow = *reply_value;
-		} else {
-			if (update_flow_v4_in_bank(flow_bank, &reply_key, reply_value, BPF_ANY) < 0)
-				return TC_ACT_SHOT;
+		if (!created_reply) {
+			write_flow_v4(reply_flow, reply_value);
+		} else if (store_flow_v4_in_bank(flow_bank, &reply_key, reply_value) < 0) {
+			return TC_ACT_SHOT;
 		}
 	}
 	if (created_reply || update_front || update_reply) {
@@ -3595,12 +4639,14 @@ static __always_inline int handle_egress_nat_forward_new(struct __sk_buff *skb, 
 		if (delete_nat_port_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &nat_key, session_id) == 0)
 			drop_kernel_nat_occupancy();
 
-		front_flow = lookup_flow_v4_active_or_old(front_key, &flow_bank);
-		if (front_flow && !is_egress_nat_flow(front_flow))
+		/* Another CPU opened the flow meanwhile: carry on with it there. */
+		front_flow = lookup_flow_v4_copy_active_or_old(front_key, &flow_bank, front_value);
+		if (front_flow && !is_egress_nat_flow(front_value))
 			return TC_ACT_OK;
-		if (!is_fullnat_front_flow(front_flow))
+		if (!front_flow || !is_fullnat_front_flow(front_value))
 			return TC_ACT_SHOT;
-		return handle_egress_nat_forward_existing(skb, ctx, rule, front_flow, flow_bank);
+		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_EGRESS_NAT_FORWARD);
+		return TC_ACT_SHOT;
 	}
 	created_front = 1;
 	bump_kernel_flow_occupancy();
@@ -3630,21 +4676,113 @@ static __always_inline int handle_egress_nat_forward_new(struct __sk_buff *skb, 
 	return redirect_egress_nat_forward(skb, ctx, rule, front_value, nat_cfg_flags);
 }
 
+/*
+ * Opens a full-cone mapping: a front entry for the client's endpoint, shared
+ * by every destination, and the reply entry of its NAT port, which takes
+ * replies from any remote.
+ */
+static __always_inline int handle_egress_nat_forward_full_cone_new(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, const struct flow_key_v4 *front_key)
+{
+	struct flow_key_v4 reply_key = {};
+	struct nat_port_key_v4 nat_key = {};
+	struct flow_value_v4 *front_value = lookup_scratch_flow_v4();
+	struct flow_value_v4 *reply_value = lookup_scratch_flow_aux_v4();
+	struct flow_value_v4 *front_flow;
+	__u64 now = bpf_ktime_get_ns();
+	__u64 session_id = new_flow_session_id();
+	__u16 nat_port = 0;
+	__u8 count_udp_now = 0;
+	__u8 flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
+	__u32 nat_cfg_flags = load_kernel_nat_config_flags();
+
+	if (!front_value || !reply_value || !front_key)
+		return TC_ACT_SHOT;
+	if (ctx->proto == IPPROTO_TCP && !is_initial_tcp_syn(ctx))
+		return TC_ACT_SHOT;
+	__builtin_memset(front_value, 0, sizeof(*front_value));
+	__builtin_memset(reply_value, 0, sizeof(*reply_value));
+
+	if (reserve_nat_port_fullcone(rule, ctx, &nat_key, &nat_port, session_id) < 0)
+		return TC_ACT_SHOT;
+
+	init_fullnat_front_value(front_value, rule, ctx, (__u32)skb->ifindex, nat_port, session_id);
+	front_value->front_addr = 0;
+	front_value->front_port = 0;
+	front_value->flags |= FORWARD_FLOW_FLAG_EGRESS_NAT | FORWARD_FLOW_FLAG_FULL_CONE;
+	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
+		front_value->flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
+	if (ctx->closing) {
+		front_value->flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
+		front_value->front_close_seen_ns = now;
+	}
+	front_value->last_seen_ns = now;
+	if (update_flow_v4_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, front_key, front_value, BPF_NOEXIST) < 0) {
+		if (delete_nat_port_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &nat_key, session_id) == 0)
+			drop_kernel_nat_occupancy();
+
+		/* Another CPU opened the mapping meanwhile: carry on with it there. */
+		front_flow = lookup_flow_v4_copy_active_or_old(front_key, &flow_bank, front_value);
+		if (front_flow && !is_egress_nat_flow(front_value))
+			return TC_ACT_OK;
+		if (!front_flow || !is_full_cone_front_flow(front_value) || !flow_matches_rule_v4(front_value, rule))
+			return TC_ACT_SHOT;
+		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_EGRESS_NAT_FORWARD);
+		return TC_ACT_SHOT;
+	}
+	bump_kernel_flow_occupancy();
+
+	build_reply_flow_key_from_front(rule, front_value, ctx->proto, &reply_key);
+	init_fullnat_reply_value(reply_value, front_value, now);
+	if (is_datagram_proto(ctx->proto)) {
+		reply_value->flags |= FORWARD_FLOW_FLAG_COUNTED;
+		count_udp_now = 1;
+	}
+	if (update_flow_v4_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_key, reply_value, BPF_NOEXIST) < 0) {
+		if (delete_flow_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, front_key, session_id) == 0)
+			drop_kernel_flow_occupancy();
+		if (delete_nat_port_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &nat_key, session_id) == 0)
+			drop_kernel_nat_occupancy();
+		return TC_ACT_SHOT;
+	}
+	bump_kernel_flow_occupancy();
+	bump_rule_total_conns(rule->rule_id);
+	if (count_udp_now)
+		bump_rule_datagram_nat(rule->rule_id, ctx->proto);
+	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
+		add_rule_traffic_bytes(rule->rule_id, FORWARD_GET_PAYLOAD_LEN(ctx), 0);
+	update_reply_l2_cache_v4(skb, &reply_key, nat_cfg_flags);
+
+	{
+		int action = egress_nat_check_mtu_v4(skb, ctx, rule, front_value->nat_addr, front_value->nat_port,
+			bpf_ntohl(ctx->dst_addr), ctx->dst_port, 0, 1);
+
+		if (action != FORWARD_TC_MTU_FITS)
+			return action;
+	}
+	if (rewrite_l4_snat(skb, ctx, front_value->nat_addr, front_value->nat_port) < 0)
+		return TC_ACT_SHOT;
+	/* The packet's own destination selects the next hop. */
+	return send_egress_nat_forward(skb, ctx, rule, front_value->nat_addr, front_value->nat_port,
+		bpf_ntohl(ctx->dst_addr), ctx->dst_port, nat_cfg_flags);
+}
+
 static __always_inline int handle_egress_nat_forward_non_full_cone(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule)
 {
 	struct flow_key_v4 front_key = {};
+	struct flow_value_v4 *front_copy = lookup_scratch_flow_v4();
 	struct flow_value_v4 *front_flow;
 	__u8 flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
 
-	if (!ctx || !rule)
+	if (!ctx || !rule || !front_copy)
 		return TC_ACT_SHOT;
 	build_front_flow_key(skb, ctx, &front_key);
-	front_flow = lookup_flow_v4_active_or_old(&front_key, &flow_bank);
-	if (front_flow && !is_egress_nat_flow(front_flow))
+	front_flow = lookup_flow_v4_copy_active_or_old(&front_key, &flow_bank, front_copy);
+	if (front_flow && !is_egress_nat_flow(front_copy))
 		return TC_ACT_OK;
-	if (is_fullnat_front_flow(front_flow))
-		return handle_egress_nat_forward_existing(skb, ctx, rule, front_flow, flow_bank);
-	return handle_egress_nat_forward_new(skb, ctx, rule, &front_key);
+	if (front_flow && is_fullnat_front_flow(front_copy))
+		return handle_egress_nat_forward_existing(skb, ctx, rule, front_flow, flow_bank, 1);
+	bpf_tail_call(skb, &tc_egress_nat_new_chain_v4, FORWARD_TC_EGRESS_NAT_NEW_V4);
+	return TC_ACT_SHOT;
 }
 
 static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule)
@@ -3656,13 +4794,10 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 	struct flow_value_v4 *front_flow;
 	struct flow_value_v4 *reply_flow = 0;
 	__u64 now = bpf_ktime_get_ns();
-	__u64 session_id = new_flow_session_id();
-	__u16 nat_port = 0;
-	__u8 created_front = 0;
 	__u8 created_reply = 0;
 	__u8 update_front = 0;
 	__u8 update_reply = 0;
-	__u8 new_session = 0;
+	__u8 touch_front = 0;
 	__u8 count_udp_now = 0;
 	__u8 flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
 	__u32 nat_cfg_flags = load_kernel_nat_config_flags();
@@ -3674,23 +4809,22 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 	__builtin_memset(reply_value, 0, sizeof(*reply_value));
 
 	build_full_cone_front_flow_key(skb, ctx, &reply_or_nat.flow);
-	front_flow = lookup_flow_v4_active_or_old(&reply_or_nat.flow, &flow_bank);
-	if (is_full_cone_front_flow(front_flow) && !flow_matches_rule_v4(front_flow, rule)) {
-		if (delete_flow_v4_session_in_bank(flow_bank, &reply_or_nat.flow, front_flow->session_id) == 0)
+	front_flow = lookup_flow_v4_copy_active_or_old(&reply_or_nat.flow, &flow_bank, front_value);
+	if (front_flow && is_full_cone_front_flow(front_value) && !flow_matches_rule_v4(front_value, rule)) {
+		if (delete_flow_v4_session_in_bank(flow_bank, &reply_or_nat.flow, front_value->session_id) == 0)
 			drop_kernel_flow_occupancy();
 		return TC_ACT_SHOT;
 	}
-	if (front_flow && !is_egress_nat_flow(front_flow))
+	if (front_flow && !is_egress_nat_flow(front_value))
 		return TC_ACT_OK;
-	if (is_full_cone_front_flow(front_flow)) {
-		*front_value = *front_flow;
+	if (front_flow && is_full_cone_front_flow(front_value)) {
 		if (front_value->nat_addr == 0)
 			front_value->nat_addr = rule->nat_addr;
 
 		build_reply_flow_key_from_front(rule, front_value, ctx->proto, &reply_or_nat.flow);
 		reply_flow = lookup_flow_v4_in_bank(flow_bank, &reply_or_nat.flow);
-		if (is_full_cone_reply_flow(reply_flow) && reply_flow->session_id == front_value->session_id) {
-			*reply_value = *reply_flow;
+		if (copy_flow_v4_session(reply_flow, front_value->session_id, reply_value) == 0 && is_full_cone_reply_flow(reply_value)) {
+			/* reply_value holds the flow's reply entry. */
 		} else {
 			init_fullnat_reply_value(reply_value, front_value, now);
 			if (is_datagram_proto(ctx->proto)) {
@@ -3703,71 +4837,15 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 			bump_kernel_flow_occupancy();
 		}
 	} else {
+		/* A new mapping, which the egress NAT new-flow program opens. */
 		if (ctx->proto == IPPROTO_TCP && !is_initial_tcp_syn(ctx))
 			return TC_ACT_SHOT;
-		if (reserve_nat_port_fullcone(rule, ctx, &reply_or_nat.nat, &nat_port, session_id) < 0)
-			return TC_ACT_SHOT;
-
-		init_fullnat_front_value(front_value, rule, ctx, (__u32)skb->ifindex, nat_port, session_id);
-		front_value->front_addr = 0;
-		front_value->front_port = 0;
-		front_value->flags |= FORWARD_FLOW_FLAG_EGRESS_NAT | FORWARD_FLOW_FLAG_FULL_CONE;
-		if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
-			front_value->flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
-		if (ctx->closing) {
-			front_value->flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
-			front_value->front_close_seen_ns = now;
-		}
-		front_value->last_seen_ns = now;
-		build_full_cone_front_flow_key(skb, ctx, &reply_or_nat.flow);
-		if (update_flow_v4_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_or_nat.flow, front_value, BPF_NOEXIST) < 0) {
-			build_nat_port_key(rule->out_ifindex, front_value->nat_addr, front_value->nat_port, ctx->proto, &reply_or_nat.nat);
-			if (delete_nat_port_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_or_nat.nat, session_id) == 0)
-				drop_kernel_nat_occupancy();
-
-			build_full_cone_front_flow_key(skb, ctx, &reply_or_nat.flow);
-			front_flow = lookup_flow_v4_active_or_old(&reply_or_nat.flow, &flow_bank);
-			if (front_flow && !is_egress_nat_flow(front_flow))
-				return TC_ACT_OK;
-			if (!is_full_cone_front_flow(front_flow) || !flow_matches_rule_v4(front_flow, rule))
-				return TC_ACT_SHOT;
-			*front_value = *front_flow;
-			if (front_value->nat_addr == 0)
-				front_value->nat_addr = rule->nat_addr;
-		} else {
-			created_front = 1;
-			new_session = 1;
-			bump_kernel_flow_occupancy();
-		}
-
-		build_reply_flow_key_from_front(rule, front_value, ctx->proto, &reply_or_nat.flow);
-		reply_flow = lookup_flow_v4_in_bank(flow_bank, &reply_or_nat.flow);
-		if (is_full_cone_reply_flow(reply_flow) && reply_flow->session_id == front_value->session_id) {
-			*reply_value = *reply_flow;
-		} else {
-			init_fullnat_reply_value(reply_value, front_value, now);
-			if (is_datagram_proto(ctx->proto)) {
-				reply_value->flags |= FORWARD_FLOW_FLAG_COUNTED;
-				count_udp_now = 1;
-			}
-			if (update_flow_v4_in_bank(flow_bank, &reply_or_nat.flow, reply_value, BPF_NOEXIST) < 0) {
-				if (created_front) {
-					build_full_cone_front_flow_key(skb, ctx, &reply_or_nat.flow);
-					if (delete_flow_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_or_nat.flow, session_id) == 0)
-						drop_kernel_flow_occupancy();
-					build_nat_port_key(rule->out_ifindex, front_value->nat_addr, front_value->nat_port, ctx->proto, &reply_or_nat.nat);
-					if (delete_nat_port_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_or_nat.nat, session_id) == 0)
-						drop_kernel_nat_occupancy();
-				}
-				return TC_ACT_SHOT;
-			}
-			created_reply = 1;
-			bump_kernel_flow_occupancy();
-		}
+		bpf_tail_call(skb, &tc_egress_nat_new_chain_v4, FORWARD_TC_EGRESS_NAT_NEW_V4);
+		return TC_ACT_SHOT;
 	}
 
 	if (is_datagram_proto(ctx->proto)) {
-		if (!created_front && (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_UDP_FLOW_REFRESH_NS)) {
+		if (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_UDP_FLOW_REFRESH_NS) {
 			front_value->last_seen_ns = now;
 			update_front = 1;
 		}
@@ -3784,9 +4862,12 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 		} else if (close_action == FORWARD_TCP_CLOSE_DELETE) {
 			close_complete = 1;
 		} else {
-			if (!created_front && (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
+			if (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
 				front_value->last_seen_ns = now;
 				update_front = 1;
+			} else if ((now - front_value->last_seen_ns) >= FORWARD_TC_FAST_PATH_WINDOW_NS) {
+				/* Reopens the fast-path window now that the pair was checked. */
+				touch_front = 1;
 			}
 			if (!created_reply && (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
 				reply_value->last_seen_ns = now;
@@ -3796,29 +4877,29 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 	}
 
 	if (update_front) {
-		if (!created_front && !created_reply && front_flow) {
-			*front_flow = *front_value;
+		if (!created_reply && front_flow) {
+			write_flow_v4(front_flow, front_value);
 		} else {
 			build_full_cone_front_flow_key(skb, ctx, &reply_or_nat.flow);
-			if (update_flow_v4_in_bank(flow_bank, &reply_or_nat.flow, front_value, BPF_ANY) < 0)
+			if (store_flow_v4_in_bank(flow_bank, &reply_or_nat.flow, front_value) < 0)
 				return TC_ACT_SHOT;
 		}
+	} else if (touch_front && front_flow) {
+		touch_flow_v4(front_flow, front_value->session_id, now);
 	}
 	if (update_reply) {
-		if (!created_front && !created_reply && reply_flow) {
-			*reply_flow = *reply_value;
+		if (!created_reply && reply_flow) {
+			write_flow_v4(reply_flow, reply_value);
 		} else {
 			build_reply_flow_key_from_front(rule, front_value, ctx->proto, &reply_or_nat.flow);
-			if (update_flow_v4_in_bank(flow_bank, &reply_or_nat.flow, reply_value, BPF_ANY) < 0)
+			if (store_flow_v4_in_bank(flow_bank, &reply_or_nat.flow, reply_value) < 0)
 				return TC_ACT_SHOT;
 		}
 	}
-	if (!created_front && (created_reply || update_front || update_reply)) {
+	if (created_reply || update_front || update_reply) {
 		build_nat_port_key(rule->out_ifindex, front_value->nat_addr, front_value->nat_port, ctx->proto, &reply_or_nat.nat);
 		ensure_nat_port_owner_v4(flow_bank, &reply_or_nat.nat, rule->rule_id, front_value->session_id);
 	}
-	if (new_session)
-		bump_rule_total_conns(rule->rule_id);
 	if (count_udp_now)
 		bump_rule_datagram_nat(rule->rule_id, ctx->proto);
 	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
@@ -3827,16 +4908,19 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 	close_reply_key = reply_or_nat.flow;
 	update_reply_l2_cache_v4(skb, &reply_or_nat.flow, nat_cfg_flags);
 
+	{
+		int action = egress_nat_check_mtu_v4(skb, ctx, rule, front_value->nat_addr, front_value->nat_port,
+			bpf_ntohl(ctx->dst_addr), ctx->dst_port, 0, 1);
+
+		if (action != FORWARD_TC_MTU_FITS)
+			return action;
+	}
 	if (rewrite_l4_snat(skb, ctx, front_value->nat_addr, front_value->nat_port) < 0)
 		return TC_ACT_SHOT;
 
-	reply_or_nat.flow.ifindex = rule->out_ifindex;
-	reply_or_nat.flow.src_addr = front_value->nat_addr;
-	reply_or_nat.flow.src_port = front_value->nat_port;
-	reply_or_nat.flow.dst_addr = bpf_ntohl(ctx->dst_addr);
-	reply_or_nat.flow.dst_port = ctx->dst_port;
 	{
-		int action = redirect_ifindex(skb, ctx, (const struct redirect_target_v4 *)&reply_or_nat.flow, nat_cfg_flags);
+		int action = send_egress_nat_forward(skb, ctx, rule, front_value->nat_addr, front_value->nat_port,
+			bpf_ntohl(ctx->dst_addr), ctx->dst_port, nat_cfg_flags);
 
 		if (close_complete && action == TC_ACT_REDIRECT)
 			delete_fullnat_state(flow_bank, &close_reply_key, reply_value, ctx->proto);
@@ -3874,7 +4958,11 @@ static __always_inline int handle_transparent_reply(struct __sk_buff *skb, const
 
 	if (!flow_value)
 		return TC_ACT_SHOT;
-	*flow_value = *flow;
+	/* A dispatch snapshot was checked when it was taken. */
+	if (!flow_live)
+		*flow_value = *flow;
+	else if (copy_flow_v4(flow, flow_key, flow_value) < 0)
+		return TC_ACT_SHOT;
 
 	if (is_datagram_proto(ctx->proto)) {
 		now = bpf_ktime_get_ns();
@@ -3915,11 +5003,10 @@ static __always_inline int handle_transparent_reply(struct __sk_buff *skb, const
 	}
 
 	if (update_flow) {
-		if (flow_live) {
-			*flow = *flow_value;
-		} else if (update_flow_v4_in_bank(bank, flow_key, flow_value, BPF_ANY) < 0) {
+		if (flow_live)
+			write_flow_v4(flow, flow_value);
+		else if (store_flow_v4_in_bank(bank, flow_key, flow_value) < 0)
 			return TC_ACT_SHOT;
-		}
 	}
 	if (count_tcp_now)
 		bump_rule_tcp_active(flow_value->rule_id);
@@ -3962,27 +5049,114 @@ static __always_inline int handle_transparent_reply(struct __sk_buff *skb, const
 	}
 }
 
+/*
+ * Established NAT reply traffic whose reply entry took the full path within
+ * the fast-path window: translate and send it without the front entry lookup,
+ * refresh or close tracking. The first reply of a TCP flow, SYN/FIN/RST and a
+ * stale window take the full path.
+ */
+static __always_inline int try_fullnat_reply_fast(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct flow_key_v4 *reply_key, const struct flow_value_v4 *flow, __u8 bank, __u64 now, __u32 nat_cfg_flags)
+{
+	const struct tc_l2_value_v4 *l2 = 0;
+	int full_cone = is_full_cone_flow(flow);
+	__u32 ifindex;
+	__u32 src_addr;
+	int action;
+
+	/* The slow path records a first fragment for the rest of its datagram. */
+	if ((ctx->ip_flags & FORWARD_IP_FLAG_FIRST_FRAGMENT) != 0)
+		return FORWARD_TC_SLOW_PATH;
+	if (tcp_packet_changes_state(ctx)) {
+		struct flow_key_v4 front_key = {};
+
+		/* A full-cone front entry serves every destination of its source. */
+		front_key.ifindex = flow->in_ifindex;
+		front_key.src_addr = flow->client_addr;
+		front_key.src_port = flow->client_port;
+		if (!full_cone) {
+			front_key.dst_addr = flow->front_addr;
+			front_key.dst_port = flow->front_port;
+		}
+		front_key.proto = ctx->proto;
+		forget_flow_fast_v4(reply_key ? lookup_flow_v4_in_bank(bank, reply_key) : 0, &front_key);
+		return FORWARD_TC_SLOW_PATH;
+	}
+	if (!flow_within_fast_path_window(flow, now))
+		return FORWARD_TC_SLOW_PATH;
+	if (ctx->proto == IPPROTO_TCP && (flow->flags & FORWARD_FLOW_FLAG_REPLY_SEEN) == 0)
+		return FORWARD_TC_SLOW_PATH;
+	if (ctx->l3_off == 0)
+		return FORWARD_TC_SLOW_PATH;
+	ifindex = resolve_reply_redirect_ifindex(flow);
+	if (!ifindex)
+		return FORWARD_TC_SLOW_PATH;
+	src_addr = full_cone ? bpf_ntohl(ctx->src_addr) : flow->front_addr;
+	if (!prefer_reply_l2_cache(nat_cfg_flags) && !prefer_redirect_neigh_fast(nat_cfg_flags)) {
+		l2 = lookup_tc_l2_v4(skb, ctx, ifindex, src_addr, flow->client_addr);
+		if (!l2)
+			return FORWARD_TC_SLOW_PATH;
+	}
+	if (FORWARD_FLOW_TRAFFIC_ENABLED(flow))
+		add_rule_traffic_bytes(flow->rule_id, 0, FORWARD_GET_PAYLOAD_LEN(ctx));
+	if (is_egress_nat_flow(flow) && bank == FORWARD_TC_FLOW_BANK_ACTIVE && reply_key &&
+		 (!flow_fast_current_v4(flow) || (l2 && l2->max_len > flow->fast.max_len)))
+		remember_flow_fast_v4(skb, ctx, lookup_flow_v4_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, reply_key),
+			flow->session_id, l2, 0);
+	if (!full_cone) {
+		if (rewrite_l4_snat(skb, ctx, flow->front_addr, flow->front_port) < 0)
+			return TC_ACT_SHOT;
+	}
+	if (rewrite_l4_dnat(skb, ctx, flow->client_addr, flow->client_port) < 0)
+		return TC_ACT_SHOT;
+	if (l2)
+		return redirect_tc_l2_v4(skb, l2);
+	action = redirect_reply_l2_cache_v4(skb, ctx, reply_key, ifindex, nat_cfg_flags);
+	if (action == TC_ACT_REDIRECT)
+		return action;
+	{
+		struct redirect_target_v4 redirect = {};
+
+		redirect.ifindex = ifindex;
+		redirect.src_addr = src_addr;
+		redirect.dst_addr = flow->client_addr;
+		redirect.src_port = full_cone ? ctx->src_port : flow->front_port;
+		redirect.dst_port = flow->client_port;
+		return redirect_ifindex_l2(skb, ctx, &redirect, nat_cfg_flags, 1);
+	}
+}
+
 static __always_inline int handle_fullnat_reply(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct flow_key_v4 *reply_key, struct flow_value_v4 *flow, __u8 flow_bank)
 {
 	struct flow_key_v4 front_key = {};
-	struct flow_value_v4 *reply_value = lookup_scratch_flow_v4();
-	struct flow_value_v4 *front_value = lookup_scratch_flow_aux_v4();
+	struct flow_value_v4 *reply_value;
+	struct flow_value_v4 *front_value;
 	struct redirect_target_v4 redirect = {};
 	struct flow_value_v4 *front_flow;
 	__u64 now = bpf_ktime_get_ns();
 	int full_cone = is_full_cone_flow(flow);
 	int update_front = 0;
 	int update_reply = 0;
+	int touch_reply = 0;
 	int count_tcp_now = 0;
 	int recreated_front = 0;
 	int close_complete = 0;
 	__u8 bank = flow_bank & FORWARD_TC_FLOW_BANK_MASK;
 	int flow_live = (flow_bank & FORWARD_TC_FLOW_BANK_DISPATCH_SNAPSHOT) == 0;
 	__u32 nat_cfg_flags = load_kernel_nat_config_flags();
+	int fast;
 
+	reply_value = lookup_scratch_flow_v4();
+	front_value = lookup_scratch_flow_aux_v4();
 	if (!reply_value || !front_value)
 		return TC_ACT_SHOT;
-	*reply_value = *flow;
+	/* A dispatch snapshot was checked when it was taken. */
+	if (!flow_live)
+		*reply_value = *flow;
+	else if (copy_flow_v4(flow, reply_key, reply_value) < 0)
+		return TC_ACT_SHOT;
+	fast = try_fullnat_reply_fast(skb, ctx, reply_key, reply_value, bank, now, nat_cfg_flags);
+	if (fast != FORWARD_TC_SLOW_PATH)
+		return fast;
 	__builtin_memset(front_value, 0, sizeof(*front_value));
 
 	if (is_datagram_proto(ctx->proto)) {
@@ -4003,9 +5177,9 @@ static __always_inline int handle_fullnat_reply(struct __sk_buff *skb, const str
 		build_front_flow_key_from_value(reply_value, ctx->proto, &front_key);
 	}
 	front_flow = lookup_flow_v4_in_bank(bank, &front_key);
-	if ((full_cone ? is_full_cone_front_flow(front_flow) : is_fullnat_front_flow(front_flow)) &&
-		front_flow->session_id == reply_value->session_id) {
-		*front_value = *front_flow;
+	if (copy_flow_v4_session(front_flow, reply_value->session_id, front_value) == 0 &&
+		(full_cone ? is_full_cone_front_flow(front_value) : is_fullnat_front_flow(front_value))) {
+		/* front_value holds the flow's front entry. */
 	} else {
 		*front_value = *reply_value;
 		front_value->flags |= FORWARD_FLOW_FLAG_FRONT_ENTRY;
@@ -4053,6 +5227,9 @@ static __always_inline int handle_fullnat_reply(struct __sk_buff *skb, const str
 			if (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
 				reply_value->last_seen_ns = now;
 				update_reply = 1;
+			} else if ((now - reply_value->last_seen_ns) >= FORWARD_TC_FAST_PATH_WINDOW_NS) {
+				/* Reopens the fast-path window now that the pair was checked. */
+				touch_reply = 1;
 			}
 			if (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
 				front_value->last_seen_ns = now;
@@ -4066,18 +5243,20 @@ static __always_inline int handle_fullnat_reply(struct __sk_buff *skb, const str
 			if (update_flow_v4_in_bank(bank, &front_key, front_value, BPF_NOEXIST) < 0)
 				return TC_ACT_SHOT;
 		} else {
-			*front_flow = *front_value;
+			write_flow_v4(front_flow, front_value);
 		}
 		if (recreated_front)
 			bump_kernel_flow_occupancy();
 	}
 	if (update_reply) {
 		if (recreated_front || !flow_live) {
-			if (update_flow_v4_in_bank(bank, reply_key, reply_value, BPF_ANY) < 0)
+			if (store_flow_v4_in_bank(bank, reply_key, reply_value) < 0)
 				return TC_ACT_SHOT;
 		} else {
-			*flow = *reply_value;
+			write_flow_v4(flow, reply_value);
 		}
+	} else if (touch_reply && !recreated_front) {
+		touch_flow_v4(flow_live ? flow : lookup_flow_v4_in_bank(bank, reply_key), reply_value->session_id, now);
 	}
 	if (count_tcp_now)
 		bump_rule_tcp_active(reply_value->rule_id);
@@ -4113,7 +5292,7 @@ static __always_inline int handle_fullnat_reply(struct __sk_buff *skb, const str
 		redirect.src_port = reply_value->front_port;
 	}
 	{
-		int action = redirect_ifindex(skb, ctx, &redirect, nat_cfg_flags);
+		int action = redirect_ifindex_l2(skb, ctx, &redirect, nat_cfg_flags, 1);
 
 		if (close_complete && action == TC_ACT_REDIRECT)
 			delete_fullnat_state(bank, reply_key, reply_value, ctx->proto);
@@ -4154,14 +5333,16 @@ static __always_inline int handle_fullnat_forward_v6(struct __sk_buff *skb, cons
 		return TC_ACT_SHOT;
 	}
 	if (is_fullnat_front_flow_v6(front_flow)) {
-		*front_value = *front_flow;
+		/* See copy_flow_v6. */
+		if (copy_flow_v6(front_flow, &reply_or_nat.flow, front_value) < 0)
+			return TC_ACT_SHOT;
 		if (ipv6_addr_is_zero(front_value->nat_addr))
 			copy_ipv6_addr(front_value->nat_addr, rule->nat_addr);
 
 		build_reply_flow_key_from_front_v6(rule, front_value, ctx->proto, &reply_or_nat.flow);
 		reply_flow = lookup_flow_v6_in_bank(flow_bank, &reply_or_nat.flow);
-		if (is_fullnat_reply_flow_v6(reply_flow) && reply_flow->session_id == front_value->session_id) {
-			*reply_value = *reply_flow;
+		if (is_fullnat_reply_flow_v6(reply_flow) && copy_flow_v6_session(reply_flow, front_value->session_id, reply_value) == 0) {
+			/* reply_value holds the flow's reply entry. */
 		} else {
 			init_fullnat_reply_value_v6(reply_value, front_value, now);
 			if (is_datagram_proto(ctx->proto)) {
@@ -4183,7 +5364,7 @@ static __always_inline int handle_fullnat_forward_v6(struct __sk_buff *skb, cons
 			return TC_ACT_SHOT;
 
 		init_fullnat_front_value_v6(front_value, rule, ctx, (__u32)skb->ifindex, nat_port, session_id);
-		if ((rule->flags & FORWARD_RULE_FLAG_TRAFFIC_STATS) != 0)
+		if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
 			front_value->flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
 		if (ctx->closing) {
 			front_value->flags |= FORWARD_FLOW_FLAG_FRONT_CLOSING;
@@ -4200,7 +5381,8 @@ static __always_inline int handle_fullnat_forward_v6(struct __sk_buff *skb, cons
 			front_flow = lookup_flow_v6_active_or_old(&reply_or_nat.flow, &flow_bank);
 			if (!is_fullnat_front_flow_v6(front_flow) || !flow_matches_rule_v6(front_flow, rule))
 				return TC_ACT_SHOT;
-			*front_value = *front_flow;
+			if (copy_flow_v6(front_flow, &reply_or_nat.flow, front_value) < 0)
+				return TC_ACT_SHOT;
 			if (ipv6_addr_is_zero(front_value->nat_addr))
 				copy_ipv6_addr(front_value->nat_addr, rule->nat_addr);
 		} else {
@@ -4211,8 +5393,8 @@ static __always_inline int handle_fullnat_forward_v6(struct __sk_buff *skb, cons
 
 		build_reply_flow_key_from_front_v6(rule, front_value, ctx->proto, &reply_or_nat.flow);
 		reply_flow = lookup_flow_v6_in_bank(flow_bank, &reply_or_nat.flow);
-		if (is_fullnat_reply_flow_v6(reply_flow) && reply_flow->session_id == front_value->session_id) {
-			*reply_value = *reply_flow;
+		if (is_fullnat_reply_flow_v6(reply_flow) && copy_flow_v6_session(reply_flow, front_value->session_id, reply_value) == 0) {
+			/* reply_value holds the flow's reply entry. */
 		} else {
 			init_fullnat_reply_value_v6(reply_value, front_value, now);
 			if (is_datagram_proto(ctx->proto)) {
@@ -4266,19 +5448,19 @@ static __always_inline int handle_fullnat_forward_v6(struct __sk_buff *skb, cons
 
 	if (update_front) {
 		if (!created_front && !created_reply && front_flow) {
-			*front_flow = *front_value;
+			write_flow_v6(front_flow, front_value);
 		} else {
 			build_front_flow_key_v6(skb, ctx, &reply_or_nat.flow);
-			if (update_flow_v6_in_bank(flow_bank, &reply_or_nat.flow, front_value, BPF_ANY) < 0)
+			if (store_flow_v6_in_bank(flow_bank, &reply_or_nat.flow, front_value) < 0)
 				return TC_ACT_SHOT;
 		}
 	}
 	if (update_reply) {
 		if (!created_front && !created_reply && reply_flow) {
-			*reply_flow = *reply_value;
+			write_flow_v6(reply_flow, reply_value);
 		} else {
 			build_reply_flow_key_from_front_v6(rule, front_value, ctx->proto, &reply_or_nat.flow);
-			if (update_flow_v6_in_bank(flow_bank, &reply_or_nat.flow, reply_value, BPF_ANY) < 0)
+			if (store_flow_v6_in_bank(flow_bank, &reply_or_nat.flow, reply_value) < 0)
 				return TC_ACT_SHOT;
 		}
 	}
@@ -4290,7 +5472,7 @@ static __always_inline int handle_fullnat_forward_v6(struct __sk_buff *skb, cons
 		bump_rule_total_conns(rule->rule_id);
 	if (count_udp_now)
 		bump_rule_datagram_nat(rule->rule_id, ctx->proto);
-	if ((rule->flags & FORWARD_RULE_FLAG_TRAFFIC_STATS) != 0)
+	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
 		add_rule_traffic_bytes(rule->rule_id, FORWARD_GET_PAYLOAD_LEN(ctx), 0);
 
 	if (rewrite_l4_snat_v6(skb, ctx, front_value->nat_addr, front_value->nat_port) < 0)
@@ -4337,9 +5519,12 @@ static __always_inline int handle_fullnat_reply_v6(struct __sk_buff *skb, const 
 
 	if (!reply_value || !front_value)
 		return TC_ACT_SHOT;
-	__builtin_memset(reply_value, 0, sizeof(*reply_value));
 	__builtin_memset(front_value, 0, sizeof(*front_value));
-	*reply_value = *flow;
+	/* A dispatch snapshot was checked when it was taken. */
+	if (!flow_live)
+		*reply_value = *flow;
+	else if (copy_flow_v6(flow, reply_key, reply_value) < 0)
+		return TC_ACT_SHOT;
 
 	if (is_datagram_proto(ctx->proto)) {
 		if (forward_flow_idle_expired(now, reply_value->last_seen_ns, FORWARD_DATAGRAM_FLOW_IDLE_NS(ctx->proto))) {
@@ -4350,8 +5535,8 @@ static __always_inline int handle_fullnat_reply_v6(struct __sk_buff *skb, const 
 
 	build_front_flow_key_from_value_v6(reply_value, ctx->proto, &front_key);
 	front_flow = lookup_flow_v6_in_bank(bank, &front_key);
-	if (is_fullnat_front_flow_v6(front_flow) && front_flow->session_id == reply_value->session_id) {
-		*front_value = *front_flow;
+	if (copy_flow_v6_session(front_flow, reply_value->session_id, front_value) == 0 && is_fullnat_front_flow_v6(front_value)) {
+		/* front_value holds the flow's front entry. */
 	} else {
 		*front_value = *reply_value;
 		front_value->flags |= FORWARD_FLOW_FLAG_FRONT_ENTRY;
@@ -4410,22 +5595,22 @@ static __always_inline int handle_fullnat_reply_v6(struct __sk_buff *skb, const 
 			if (update_flow_v6_in_bank(bank, &front_key, front_value, BPF_NOEXIST) < 0)
 				return TC_ACT_SHOT;
 		} else {
-			*front_flow = *front_value;
+			write_flow_v6(front_flow, front_value);
 		}
 		if (recreated_front)
 			bump_kernel_flow_occupancy();
 	}
 	if (update_reply) {
 		if (recreated_front || !flow_live) {
-			if (update_flow_v6_in_bank(bank, reply_key, reply_value, BPF_ANY) < 0)
+			if (store_flow_v6_in_bank(bank, reply_key, reply_value) < 0)
 				return TC_ACT_SHOT;
 		} else {
-			*flow = *reply_value;
+			write_flow_v6(flow, reply_value);
 		}
 	}
 	if (count_tcp_now)
 		bump_rule_tcp_active(reply_value->rule_id);
-	if ((reply_value->flags & FORWARD_FLOW_FLAG_TRAFFIC_STATS) != 0)
+	if (FORWARD_FLOW_TRAFFIC_ENABLED(reply_value))
 		add_rule_traffic_bytes(reply_value->rule_id, 0, FORWARD_GET_PAYLOAD_LEN(ctx));
 
 	if (rewrite_l4_snat_v6(skb, ctx, reply_value->front_addr, reply_value->front_port) < 0)
@@ -4461,6 +5646,10 @@ static __always_inline int handle_forward_ingress_v4(struct __sk_buff *skb)
 	__builtin_memset(ctx, 0, sizeof(*ctx));
 
 	if (parse_ipv4_l4(skb, ctx) < 0) {
+		if (tc_packet_may_be_icmp_error_v4(skb))
+			bpf_tail_call(skb, &tc_icmp_error_chain_v4, FORWARD_TC_ICMP_ERROR_FORWARD);
+		if (tc_packet_is_later_fragment_v4(skb))
+			bpf_tail_call(skb, &tc_fragment_chain_v4, FORWARD_TC_FRAGMENT_FORWARD);
 		return TC_ACT_UNSPEC;
 	}
 
@@ -4471,7 +5660,7 @@ static __always_inline int handle_forward_ingress_v4(struct __sk_buff *skb)
 
 	if (is_passthrough_rule(rule))
 		return TC_ACT_OK;
-	if (is_egress_nat_rule(rule) && is_local_ipv4(ctx->dst_addr))
+	if (is_egress_nat_rule(rule) && egress_nat_dst_is_local_v4(ctx->dst_addr))
 		return TC_ACT_OK;
 	if (egress_nat_dst_mac_mismatch(skb, rule))
 		return TC_ACT_OK;
@@ -4507,6 +5696,10 @@ static __always_inline int handle_reply_ingress_v4(struct __sk_buff *skb)
 	__builtin_memset(flow_key, 0, sizeof(*flow_key));
 
 	if (parse_ipv4_l4_any(skb, ctx) < 0) {
+		if (tc_packet_may_be_icmp_error_v4(skb))
+			bpf_tail_call(skb, &tc_icmp_error_chain_v4, FORWARD_TC_ICMP_ERROR_REPLY);
+		if (tc_packet_is_later_fragment_v4(skb))
+			bpf_tail_call(skb, &tc_fragment_chain_v4, FORWARD_TC_FRAGMENT_REPLY);
 		return TC_ACT_UNSPEC;
 	}
 
@@ -4642,6 +5835,13 @@ static __always_inline int prepare_dispatch_forward_ingress_v4(struct __sk_buff 
 		__builtin_memset(plugin_ctx, 0, sizeof(*plugin_ctx));
 
 	if (parse_ipv4_l4(skb, &dispatch->ctx) < 0) {
+		/* Apply-stage plugin hooks still expect the packet back. */
+		if (dispatch->plugin_pipeline_active == 0 || dispatch->plugin_apply_mask == 0) {
+			if (tc_packet_may_be_icmp_error_v4(skb))
+				bpf_tail_call(skb, &tc_icmp_error_chain_v4, FORWARD_TC_ICMP_ERROR_FORWARD);
+			if (tc_packet_is_later_fragment_v4(skb))
+				bpf_tail_call(skb, &tc_fragment_chain_v4, FORWARD_TC_FRAGMENT_FORWARD);
+		}
 		return TC_ACT_UNSPEC;
 	}
 
@@ -4671,25 +5871,60 @@ static __always_inline int dispatch_forward_ingress_v4_core_prepared(struct __sk
 	if (is_passthrough_rule(rule))
 		return finish_forward_pipeline_v4(skb, TC_ACT_OK);
 	if (is_egress_nat_rule(rule)) {
-		if (is_local_ipv4(dispatch->ctx.dst_addr))
-			return finish_forward_pipeline_v4(skb, TC_ACT_OK);
 		if (egress_nat_dst_mac_mismatch(skb, rule))
 			return finish_forward_pipeline_v4(skb, TC_ACT_OK);
+		/* An exit that is down holds back what would leave by it, not
+		 * traffic for this host or its other networks. */
 		if (rule->flags & FORWARD_RULE_FLAG_DROP)
-			return finish_forward_pipeline_v4(skb, TC_ACT_SHOT);
-		if (!is_full_cone_egress_nat_rule(rule)) {
-			/* Keep established egress NAT sessions on the current program across
-			 * hot-restart handoff so they don't depend on a successor-only tail call.
-			 */
-			__builtin_memset(&dispatch->flow_key, 0, sizeof(dispatch->flow_key));
-			dispatch->flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
+			return finish_forward_pipeline_v4(skb,
+				egress_nat_dst_is_local_v4(dispatch->ctx.dst_addr) ? TC_ACT_OK : TC_ACT_SHOT);
+		/* Keep established egress NAT sessions on the current program across
+		 * hot-restart handoff so they don't depend on a successor-only tail call.
+		 * No flow is created towards a local address or network, and one whose
+		 * destination became local later leaves the fast path once its window
+		 * lapses, so the local check can come after it.
+		 *
+		 * Each NAT type dereferences its flow only inside its own branch:
+		 * verifiers before 6.10 lose a pointer's null state when the compiler
+		 * ORs that check into the NAT-type test. The fast path reads the
+		 * checked copy in flow_value (see copy_flow_v4).
+		 */
+		__builtin_memset(&dispatch->flow_key, 0, sizeof(dispatch->flow_key));
+		dispatch->flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
+		if (is_full_cone_egress_nat_rule(rule)) {
+			build_full_cone_front_flow_key(skb, &dispatch->ctx, &dispatch->flow_key);
+			front_flow = lookup_flow_v4_copy_active_or_old(&dispatch->flow_key, &dispatch->flow_bank, &dispatch->flow_value);
+			if (front_flow && is_egress_nat_flow(&dispatch->flow_value) && is_full_cone_front_flow(&dispatch->flow_value)) {
+				int fast = try_egress_nat_forward_fast(skb, &dispatch->ctx, rule, &dispatch->flow_value,
+					dispatch->flow_bank == FORWARD_TC_FLOW_BANK_ACTIVE ? front_flow : 0,
+					bpf_ktime_get_ns(), load_kernel_nat_config_flags());
+
+				if (fast != FORWARD_TC_SLOW_PATH)
+					return finish_forward_pipeline_v4(skb, fast);
+			}
+		} else {
 			build_front_flow_key(skb, &dispatch->ctx, &dispatch->flow_key);
-			front_flow = lookup_flow_v4_active_or_old(&dispatch->flow_key, &dispatch->flow_bank);
-			if (front_flow && !is_egress_nat_flow(front_flow))
-				return finish_forward_pipeline_v4(skb, TC_ACT_OK);
-			if (is_fullnat_front_flow(front_flow))
-				return finish_forward_pipeline_v4(skb, handle_egress_nat_forward_existing(skb, &dispatch->ctx, &dispatch->rule_value, front_flow, dispatch->flow_bank));
+			front_flow = lookup_flow_v4_copy_active_or_old(&dispatch->flow_key, &dispatch->flow_bank, &dispatch->flow_value);
+			if (front_flow) {
+				if (!is_egress_nat_flow(&dispatch->flow_value))
+					return finish_forward_pipeline_v4(skb, TC_ACT_OK);
+				if (is_fullnat_front_flow(&dispatch->flow_value)) {
+					int fast = try_egress_nat_forward_fast(skb, &dispatch->ctx, rule, &dispatch->flow_value,
+						dispatch->flow_bank == FORWARD_TC_FLOW_BANK_ACTIVE ? front_flow : 0,
+						bpf_ktime_get_ns(), load_kernel_nat_config_flags());
+
+					if (fast != FORWARD_TC_SLOW_PATH)
+						return finish_forward_pipeline_v4(skb, fast);
+					if (egress_nat_dst_is_local_v4(dispatch->ctx.dst_addr))
+						return finish_forward_pipeline_v4(skb, TC_ACT_OK);
+					return finish_forward_pipeline_v4(skb, handle_egress_nat_forward_existing(skb, &dispatch->ctx, &dispatch->rule_value, front_flow, dispatch->flow_bank, 0));
+				}
+			}
 		}
+		if (egress_nat_dst_is_local_v4(dispatch->ctx.dst_addr))
+			return finish_forward_pipeline_v4(skb, TC_ACT_OK);
+		if (!front_flow)
+			bpf_tail_call(skb, &tc_egress_nat_new_chain_v4, FORWARD_TC_EGRESS_NAT_NEW_V4);
 		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_EGRESS_NAT_FORWARD);
 		return finish_forward_pipeline_v4(skb, TC_ACT_UNSPEC);
 	}
@@ -4712,8 +5947,8 @@ static __always_inline int dispatch_forward_ingress_v4_core_prepared(struct __sk
 			dispatch->flow_bank = FORWARD_TC_FLOW_BANK_OLD;
 			front_flow = old_flow;
 		}
-		if (is_fullnat_front_flow(front_flow)) {
-			dispatch->flow_value = *front_flow;
+		if (copy_flow_v4(front_flow, &dispatch->flow_key, &dispatch->flow_value) == 0 &&
+			is_fullnat_front_flow(&dispatch->flow_value)) {
 			dispatch->have_flow = 1;
 			return finish_forward_pipeline_v4(skb, handle_forward_ingress_v4_fullnat_existing(skb));
 		}
@@ -4723,10 +5958,220 @@ static __always_inline int dispatch_forward_ingress_v4_core_prepared(struct __sk
 	return finish_forward_pipeline_v4(skb, handle_forward_ingress_v4_transparent(skb));
 }
 
+/*
+ * The flow cache's read side, ahead of the dispatcher's own work: a packet
+ * of an established egress NAT flow whose active-bank entry holds a current
+ * fast-path record (remember_flow_fast_v4) is sent the way the record says,
+ * straight from the flow lookup and before the rule lookup. Any packet the
+ * record does not describe exactly goes on to the dispatcher, which looks
+ * the flow up again, now warm, and may record it. Packets that change TCP
+ * state, ICMP, fragments and tagged frames never qualify.
+ */
+static __always_inline int flow_fast_packet_v4(struct __sk_buff *skb, struct packet_ctx *ctx)
+{
+	if (parse_ipv4_l4(skb, ctx) < 0)
+		return 0;
+	if (ctx->l3_off != (int)sizeof(struct ethhdr) || ctx->proto == IPPROTO_ICMP || tcp_packet_changes_state(ctx))
+		return 0;
+	return (ctx->ip_flags & FORWARD_IP_FLAG_FIRST_FRAGMENT) == 0;
+}
+
+/*
+ * The entry is read in place, not copied: flow_fast_read_begin_v4 notes its
+ * session and its record's stamp, and flow_fast_read_end_v4 finds both again
+ * after everything the fast path uses has been read, so those reads came from
+ * one current record of one flow (see remember_flow_fast_v4).
+ */
+struct flow_fast_read_v4 {
+	__u64 session_id;
+	__u32 stamp;
+};
+
+static __always_inline int flow_fast_read_begin_v4(const struct flow_value_v4 *live, const struct flow_key_v4 *key, const struct tc_flow_cache_state_v4 *state, struct flow_fast_read_v4 *read)
+{
+	read->session_id = flow_v4_session(live);
+	read->stamp = *(const volatile __u32 *)&live->fast.stamp;
+	FORWARD_COMPILER_BARRIER();
+	return read->stamp == flow_fast_stamp_v4(live->last_seen_ns, state->generation) &&
+		flow_v4_names_key(live, key);
+}
+
+static __always_inline int flow_fast_read_end_v4(const struct flow_value_v4 *live, const struct flow_fast_read_v4 *read)
+{
+	FORWARD_COMPILER_BARRIER();
+	return flow_v4_session(live) == read->session_id &&
+		*(const volatile __u32 *)&live->fast.stamp == read->stamp;
+}
+
+/* Whether the packet arrived the way the recorded one did and fits its next hop. */
+static __always_inline int flow_fast_matches_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct flow_fast_v4 *fast)
+{
+	const struct ethhdr *eth;
+
+	if (fast->in_ifindex != skb->ifindex)
+		return 0;
+	eth = tc_packet_ptr(skb, 0, sizeof(*eth));
+	if (!eth || !mac_equal(eth->h_dest, fast->in_dmac))
+		return 0;
+	return tc_wire_len_v4(skb, ctx) <= fast->max_len;
+}
+
+/* The next hop of a record, read before flow_fast_read_end_v4 vouches for it. */
+struct flow_fast_hop_v4 {
+	__u32 out_ifindex;
+	__u8 dmac[ETH_ALEN];
+	__u8 smac[ETH_ALEN];
+};
+
+static __always_inline void read_flow_fast_hop_v4(const struct flow_fast_v4 *fast, struct flow_fast_hop_v4 *hop)
+{
+	hop->out_ifindex = fast->out_ifindex;
+	__builtin_memcpy(hop->dmac, fast->dmac, ETH_ALEN);
+	__builtin_memcpy(hop->smac, fast->smac, ETH_ALEN);
+}
+
+static __always_inline int send_flow_fast_v4(struct __sk_buff *skb, const struct flow_fast_hop_v4 *hop)
+{
+	if (rewrite_eth_addrs(skb, hop->dmac, hop->smac) < 0)
+		return TC_ACT_SHOT;
+	tc_diag_flow_cache_hit();
+	return bpf_redirect(hop->out_ifindex, 0);
+}
+
+
+static __always_inline const struct tc_flow_cache_state_v4 *flow_fast_enabled_v4(void)
+{
+	const struct tc_flow_cache_state_v4 *state;
+	__u32 key = 0;
+
+	state = bpf_map_lookup_elem(&tc_flow_cache_state_v4, &key);
+	return state && state->enabled ? state : 0;
+}
+
+/*
+ * The forward direction: the front entry by its exact key or, where a
+ * full-cone rule receives packets, by its full-cone key.
+ */
+static __always_inline int try_front_flow_fast_v4(struct __sk_buff *skb)
+{
+	const struct tc_flow_cache_state_v4 *state = flow_fast_enabled_v4();
+	struct flow_fast_read_v4 read;
+	struct flow_fast_hop_v4 hop;
+	struct packet_ctx ctx = {};
+	struct flow_key_v4 key = {};
+	const struct flow_value_v4 *flow;
+	__u32 nat_addr;
+	__u16 nat_port;
+	__u32 rule_id;
+	int counted;
+	__u32 hints;
+	int full_cone = 0;
+
+	if (!state)
+		return FORWARD_TC_SLOW_PATH;
+	hints = lookup_tc_ifindex_hints(skb->ifindex);
+	/* Only interfaces where rules receive packets have front entries. */
+	if ((hints & FORWARD_TC_IFINDEX_HINT_KNOWN) != 0 && (hints & FORWARD_TC_IFINDEX_HINT_RULE_FORMS) == 0)
+		return FORWARD_TC_SLOW_PATH;
+	if (!flow_fast_packet_v4(skb, &ctx))
+		return FORWARD_TC_SLOW_PATH;
+	build_front_flow_key(skb, &ctx, &key);
+	flow = bpf_map_lookup_elem(&flows_v4, &key);
+	if (!flow) {
+		if ((hints & (FORWARD_TC_IFINDEX_HINT_KNOWN | FORWARD_TC_IFINDEX_HINT_FULL_CONE)) == FORWARD_TC_IFINDEX_HINT_KNOWN)
+			return FORWARD_TC_SLOW_PATH;
+		build_full_cone_front_flow_key(skb, &ctx, &key);
+		flow = bpf_map_lookup_elem(&flows_v4, &key);
+		full_cone = 1;
+	}
+	if (!flow || !flow_fast_read_begin_v4(flow, &key, state, &read))
+		return FORWARD_TC_SLOW_PATH;
+	if (!is_egress_nat_flow(flow) || !is_fullnat_front_flow(flow) || is_full_cone_flow(flow) != full_cone)
+		return FORWARD_TC_SLOW_PATH;
+	if (!flow_within_fast_path_window(flow, bpf_ktime_get_ns()))
+		return FORWARD_TC_SLOW_PATH;
+	/* A full-cone record only knows the next hop of the destination it was made for. */
+	if (full_cone && flow->fast.dst_addr != bpf_ntohl(ctx.dst_addr))
+		return FORWARD_TC_SLOW_PATH;
+	if (!flow_fast_matches_v4(skb, &ctx, &flow->fast))
+		return FORWARD_TC_SLOW_PATH;
+	nat_addr = flow->nat_addr;
+	nat_port = flow->nat_port;
+	/* A packet sent from the record counts into its rule as the core's would. */
+	counted = FORWARD_FLOW_TRAFFIC_ENABLED(flow);
+	rule_id = flow->rule_id;
+	read_flow_fast_hop_v4(&flow->fast, &hop);
+	if (!flow_fast_read_end_v4(flow, &read))
+		return FORWARD_TC_SLOW_PATH;
+	if (counted)
+		add_rule_traffic_bytes(rule_id, FORWARD_GET_PAYLOAD_LEN(&ctx), 0);
+	if (rewrite_l4_snat(skb, &ctx, nat_addr, nat_port) < 0)
+		return TC_ACT_SHOT;
+	return send_flow_fast_v4(skb, &hop);
+}
+
+/* The reply direction: the reply entry, found the way the dispatcher finds it. */
+static __always_inline int try_reply_flow_fast_v4(struct __sk_buff *skb)
+{
+	const struct tc_flow_cache_state_v4 *state = flow_fast_enabled_v4();
+	struct flow_fast_read_v4 read;
+	struct flow_fast_hop_v4 hop;
+	struct packet_ctx ctx = {};
+	struct flow_key_v4 key = {};
+	const struct flow_value_v4 *flow;
+	__u32 front_addr, client_addr;
+	__u16 front_port, client_port;
+	__u32 rule_id;
+	int counted;
+	int full_cone;
+
+	if (!state || !flow_fast_packet_v4(skb, &ctx))
+		return FORWARD_TC_SLOW_PATH;
+	key.ifindex = skb->ifindex;
+	key.src_addr = bpf_ntohl(ctx.src_addr);
+	key.dst_addr = bpf_ntohl(ctx.dst_addr);
+	key.src_port = ctx.src_port;
+	key.dst_port = ctx.dst_port;
+	key.proto = ctx.proto;
+	flow = lookup_reply_flow_v4_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &key);
+	if (!flow || !flow_fast_read_begin_v4(flow, &key, state, &read))
+		return FORWARD_TC_SLOW_PATH;
+	if (!is_egress_nat_flow(flow) || !is_fullnat_reply_flow(flow))
+		return FORWARD_TC_SLOW_PATH;
+	if (!flow_within_fast_path_window(flow, bpf_ktime_get_ns()))
+		return FORWARD_TC_SLOW_PATH;
+	if (ctx.proto == IPPROTO_TCP && (flow->flags & FORWARD_FLOW_FLAG_REPLY_SEEN) == 0)
+		return FORWARD_TC_SLOW_PATH;
+	if (!flow_fast_matches_v4(skb, &ctx, &flow->fast))
+		return FORWARD_TC_SLOW_PATH;
+	full_cone = is_full_cone_flow(flow);
+	front_addr = flow->front_addr;
+	front_port = flow->front_port;
+	client_addr = flow->client_addr;
+	client_port = flow->client_port;
+	/* A packet sent from the record counts into its rule as the core's would. */
+	counted = FORWARD_FLOW_TRAFFIC_ENABLED(flow);
+	rule_id = flow->rule_id;
+	read_flow_fast_hop_v4(&flow->fast, &hop);
+	if (!flow_fast_read_end_v4(flow, &read))
+		return FORWARD_TC_SLOW_PATH;
+	if (counted)
+		add_rule_traffic_bytes(rule_id, 0, FORWARD_GET_PAYLOAD_LEN(&ctx));
+	if (!full_cone && rewrite_l4_snat(skb, &ctx, front_addr, front_port) < 0)
+		return TC_ACT_SHOT;
+	if (rewrite_l4_dnat(skb, &ctx, client_addr, client_port) < 0)
+		return TC_ACT_SHOT;
+	return send_flow_fast_v4(skb, &hop);
+}
+
 static __always_inline int dispatch_forward_ingress_v4(struct __sk_buff *skb)
 {
-	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
+	struct tc_dispatch_ctx_v4 *dispatch;
+	int fast = try_front_flow_fast_v4(skb);
 
+	if (fast != FORWARD_TC_SLOW_PATH)
+		return fast;
+	dispatch = lookup_tc_dispatch_scratch_v4();
 	if (dispatch)
 		dispatch->plugin_pipeline_active = 0;
 	if (prepare_dispatch_forward_ingress_v4(skb, dispatch, 0) != 0)
@@ -4862,6 +6307,13 @@ static __always_inline int prepare_dispatch_reply_ingress_v4(struct __sk_buff *s
 	__builtin_memset(&dispatch->flow_key, 0, sizeof(dispatch->flow_key));
 
 	if (parse_ipv4_l4_any(skb, &dispatch->ctx) < 0) {
+		/* Apply-stage plugin hooks still expect the packet back. */
+		if (dispatch->plugin_pipeline_active == 0 || dispatch->plugin_apply_mask == 0) {
+			if (tc_packet_may_be_icmp_error_v4(skb))
+				bpf_tail_call(skb, &tc_icmp_error_chain_v4, FORWARD_TC_ICMP_ERROR_REPLY);
+			if (tc_packet_is_later_fragment_v4(skb))
+				bpf_tail_call(skb, &tc_fragment_chain_v4, FORWARD_TC_FRAGMENT_REPLY);
+		}
 		return TC_ACT_UNSPEC;
 	}
 
@@ -4874,13 +6326,11 @@ static __always_inline int prepare_dispatch_reply_ingress_v4(struct __sk_buff *s
 
 	dispatch->flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
 	flow = lookup_reply_flow_v4(&dispatch->flow_key, &dispatch->flow_bank);
-	if (!flow) {
+	if (copy_flow_v4(flow, &dispatch->flow_key, &dispatch->flow_value) < 0)
 		return TC_ACT_UNSPEC;
-	}
 
-	dispatch->flow_value = *flow;
 	dispatch->have_flow = 1;
-	populate_tc_plugin_reply_ctx_v4(skb, &dispatch->ctx, flow, plugin_ctx);
+	populate_tc_plugin_reply_ctx_v4(skb, &dispatch->ctx, &dispatch->flow_value, plugin_ctx);
 	return 0;
 }
 
@@ -4907,8 +6357,12 @@ static __always_inline int dispatch_reply_ingress_v4_core_prepared(struct __sk_b
 
 static __always_inline int dispatch_reply_ingress_v4(struct __sk_buff *skb)
 {
-	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
+	struct tc_dispatch_ctx_v4 *dispatch;
+	int fast = try_reply_flow_fast_v4(skb);
 
+	if (fast != FORWARD_TC_SLOW_PATH)
+		return fast;
+	dispatch = lookup_tc_dispatch_scratch_v4();
 	if (dispatch)
 		dispatch->plugin_pipeline_active = 0;
 	if (prepare_dispatch_reply_ingress_v4(skb, dispatch, 0) != 0)
@@ -5140,7 +6594,10 @@ static __always_inline int dispatch_forward_ingress_v6_core_prepared(struct __sk
 	return finish_forward_pipeline_v6(skb, handle_fullnat_forward_v6(skb, &dispatch->ctx, rule));
 }
 
-static __always_inline int dispatch_forward_ingress_v6(struct __sk_buff *skb)
+/* What the IPv6 forward preparations return when the core is to run next. */
+#define FORWARD_TC_RUN_CORE_V6 (-3)
+
+static __always_inline int prepare_forward_ingress_v6(struct __sk_buff *skb)
 {
 	struct tc_dispatch_ctx_v6 *dispatch = lookup_tc_dispatch_scratch_v6();
 
@@ -5148,10 +6605,10 @@ static __always_inline int dispatch_forward_ingress_v6(struct __sk_buff *skb)
 		dispatch->plugin_pipeline_active = 0;
 	if (prepare_dispatch_forward_ingress_v6(skb, dispatch, 0) != 0)
 		return TC_ACT_UNSPEC;
-	return dispatch_forward_ingress_v6_core_prepared(skb);
+	return FORWARD_TC_RUN_CORE_V6;
 }
 
-static __always_inline int dispatch_forward_ingress_pipeline_core_v6(struct __sk_buff *skb)
+static __always_inline int prepare_forward_ingress_pipeline_core_v6(struct __sk_buff *skb)
 {
 	struct tc_dispatch_ctx_v6 *dispatch = lookup_tc_dispatch_scratch_v6();
 	struct tc_plugin_ctx_v6 *plugin_ctx = 0;
@@ -5174,13 +6631,30 @@ static __always_inline int dispatch_forward_ingress_pipeline_core_v6(struct __sk
 		dispatch->plugin_chain_index = 0;
 		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_POST_LOOKUP_CONTINUE);
 	}
+	return FORWARD_TC_RUN_CORE_V6;
+}
+
+static __always_inline int dispatch_forward_ingress_pipeline_core_v6(struct __sk_buff *skb)
+{
+	int action = prepare_forward_ingress_pipeline_core_v6(skb);
+
+	if (action != FORWARD_TC_RUN_CORE_V6)
+		return action;
 	return dispatch_forward_ingress_v6_core_prepared(skb);
 }
 
+/*
+ * The plugin and plain paths prepare differently but reach the core through
+ * one call, so the core (handle_fullnat_forward_v6 with its NAT port probes)
+ * is inlined once, not once per path. With two copies, clang 14 emitted about
+ * 27.8k instructions here, which 6.12 could not patch within the 16-bit jump
+ * range; one copy is about 14.9k.
+ */
 static __always_inline int dispatch_forward_pipeline_v6(struct __sk_buff *skb, __u32 attach)
 {
 	struct tc_plugin_config_v4 *config = lookup_tc_plugin_config_v4();
 	struct tc_dispatch_ctx_v6 *dispatch = lookup_tc_dispatch_scratch_v6();
+	int action;
 
 	if (dispatch)
 		capture_tc_plugin_dispatch_v6(skb, dispatch, config, 0, attach);
@@ -5190,11 +6664,15 @@ static __always_inline int dispatch_forward_pipeline_v6(struct __sk_buff *skb, _
 		if (dispatch->plugin_pre_mask != 0 &&
 		    !try_tail_call_single_pre_plugin_v6(skb, dispatch, FORWARD_TC_PLUGIN_STAGE_PRE_FORWARD))
 			bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_PLUGIN_PRE_FORWARD_CONTINUE);
-		return dispatch_forward_ingress_pipeline_core_v6(skb);
+		action = prepare_forward_ingress_pipeline_core_v6(skb);
+	} else {
+		if (dispatch && dispatch->plugin_core_enable == 0)
+			return TC_ACT_UNSPEC;
+		action = prepare_forward_ingress_v6(skb);
 	}
-	if (dispatch && dispatch->plugin_core_enable == 0)
-		return TC_ACT_UNSPEC;
-	return dispatch_forward_ingress_v6(skb);
+	if (action != FORWARD_TC_RUN_CORE_V6)
+		return action;
+	return dispatch_forward_ingress_v6_core_prepared(skb);
 }
 
 static __always_inline int dispatch_plugin_pre_forward_continue_v6(struct __sk_buff *skb)
@@ -5256,12 +6734,11 @@ static __always_inline int prepare_dispatch_reply_ingress_v6(struct __sk_buff *s
 	dispatch->flow_key.proto = dispatch->ctx.proto;
 	dispatch->flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
 	flow = lookup_reply_flow_v6(&dispatch->flow_key, &dispatch->flow_bank);
-	if (!flow)
+	if (copy_flow_v6(flow, &dispatch->flow_key, &dispatch->flow_value) < 0)
 		return TC_ACT_UNSPEC;
 
-	dispatch->flow_value = *flow;
 	dispatch->have_flow = 1;
-	populate_tc_plugin_reply_ctx_v6(skb, &dispatch->ctx, flow, plugin_ctx);
+	populate_tc_plugin_reply_ctx_v6(skb, &dispatch->ctx, &dispatch->flow_value, plugin_ctx);
 	return 0;
 }
 
@@ -5424,8 +6901,8 @@ static __always_inline int handle_forward_ingress_v4_fullnat(struct __sk_buff *s
 		dispatch->flow_bank = FORWARD_TC_FLOW_BANK_OLD;
 		front_flow = old_flow;
 	}
-	if (is_fullnat_front_flow(front_flow)) {
-		dispatch->flow_value = *front_flow;
+	if (copy_flow_v4(front_flow, &dispatch->flow_key, &dispatch->flow_value) == 0 &&
+		is_fullnat_front_flow(&dispatch->flow_value)) {
 		dispatch->have_flow = 1;
 		bpf_tail_call(skb, &tc_prog_chain_v4, FORWARD_TC_PROG_V4_FULLNAT_EXISTING);
 		return TC_ACT_UNSPEC;
@@ -5442,11 +6919,41 @@ static __always_inline int handle_forward_ingress_v4_egress_nat(struct __sk_buff
 		return TC_ACT_UNSPEC;
 	if (!is_egress_nat_rule(&dispatch->rule_value))
 		return TC_ACT_UNSPEC;
-	if (is_local_ipv4(dispatch->ctx.dst_addr))
+	if (egress_nat_dst_is_local_v4(dispatch->ctx.dst_addr))
 		return TC_ACT_OK;
 	if (egress_nat_dst_mac_mismatch(skb, &dispatch->rule_value))
 		return TC_ACT_OK;
 	return handle_egress_nat_forward(skb, &dispatch->ctx, &dispatch->rule_value);
+}
+
+/*
+ * Opens egress NAT flows. Probing for a free NAT port is most of what the
+ * verifier walks on this path, since it walks the code after the probe again
+ * for each of the probe's outcomes; kept out of the egress NAT program, which
+ * handles the flows already open, the probes no longer multiply that program.
+ * The dispatcher comes here straight away when it finds no flow, so a new
+ * flow's first packet takes as many tail calls as before and the plugin
+ * hook budget holds.
+ */
+static __always_inline int handle_forward_ingress_v4_egress_nat_new(struct __sk_buff *skb)
+{
+	struct tc_dispatch_ctx_v4 *dispatch = lookup_tc_dispatch_scratch_v4();
+	struct flow_key_v4 front_key = {};
+
+	if (!dispatch || !dispatch->have_rule)
+		return TC_ACT_UNSPEC;
+	if (!is_egress_nat_rule(&dispatch->rule_value))
+		return TC_ACT_UNSPEC;
+	if (egress_nat_dst_is_local_v4(dispatch->ctx.dst_addr))
+		return TC_ACT_OK;
+	if (egress_nat_dst_mac_mismatch(skb, &dispatch->rule_value))
+		return TC_ACT_OK;
+	if (is_full_cone_egress_nat_rule(&dispatch->rule_value)) {
+		build_full_cone_front_flow_key(skb, &dispatch->ctx, &front_key);
+		return handle_egress_nat_forward_full_cone_new(skb, &dispatch->ctx, &dispatch->rule_value, &front_key);
+	}
+	build_front_flow_key(skb, &dispatch->ctx, &front_key);
+	return handle_egress_nat_forward_new(skb, &dispatch->ctx, &dispatch->rule_value, &front_key);
 }
 
 static __always_inline int handle_forward_ingress_v4_fullnat_existing(struct __sk_buff *skb)
@@ -5669,6 +7176,12 @@ int forward_ingress_v4_egress_nat(struct __sk_buff *skb)
 	return finish_forward_pipeline_v4(skb, handle_forward_ingress_v4_egress_nat(skb));
 }
 
+SEC("classifier/forward_ingress_v4_egress_nat_new")
+int forward_ingress_v4_egress_nat_new(struct __sk_buff *skb)
+{
+	return finish_forward_pipeline_v4(skb, handle_forward_ingress_v4_egress_nat_new(skb));
+}
+
 SEC("classifier/forward_ingress_v6")
 int forward_ingress_v6(struct __sk_buff *skb)
 {
@@ -5745,6 +7258,411 @@ int reply_ingress_v6(struct __sk_buff *skb)
 	if (!is_fullnat_reply_flow_v6(flow_v6))
 		return TC_ACT_UNSPEC;
 	return handle_fullnat_reply_v6(skb, ctx_v6, flow_key_v6, flow_v6, flow_bank_v6);
+}
+
+/*
+ * ICMP errors about egress NAT flows. An error quotes the IPv4 header and the
+ * first L4 bytes of the packet it reports, as that packet was where the error
+ * was raised: after the NAT for one a LAN host sent (errors from the WAN),
+ * before the NAT for one it received (errors from LAN hosts). The kernel
+ * cannot match such an error to a flow it never saw, so the translators find
+ * the flow from the quote and undo the NAT on the quoted packet and on the
+ * error, and send it on like the flow's packets. Only untagged Ethernet frames
+ * are translated; anything else continues as before.
+ */
+#define FORWARD_ICMP_ERROR_OUTER_OFF ((__u32)sizeof(struct ethhdr))
+#define FORWARD_ICMP_ERROR_ICMP_OFF (FORWARD_ICMP_ERROR_OUTER_OFF + (__u32)sizeof(struct iphdr))
+#define FORWARD_ICMP_ERROR_INNER_OFF (FORWARD_ICMP_ERROR_ICMP_OFF + (__u32)sizeof(struct icmphdr))
+#define FORWARD_ICMP_ERROR_INNER_L4_OFF (FORWARD_ICMP_ERROR_INNER_OFF + (__u32)sizeof(struct iphdr))
+/* Through the quoted ports, or echo identifier: the shortest error handled. */
+#define FORWARD_ICMP_ERROR_MIN_LEN (FORWARD_ICMP_ERROR_INNER_L4_OFF + 8)
+/* Outer IPv4 length of an error that quotes the inner TCP checksum. */
+#define FORWARD_ICMP_ERROR_TCP_CHECK_LEN ((__u32)(2 * sizeof(struct iphdr) + sizeof(struct icmphdr) + 18))
+/* Everything the translators read: through the quoted TCP checksum. */
+#define FORWARD_ICMP_ERROR_PULL_LEN (FORWARD_ICMP_ERROR_INNER_L4_OFF + 18)
+
+/*
+ * The error's headers through the quoted ports, or NULL. Each header is a
+ * constant offset from this one pointer: given a pointer per header, clang 18
+ * merges their bounds checks into one and re-tests it after spilling the
+ * pointers, and the verifier, unable to tie the two tests together, follows a
+ * path where the check held but a pointer is NULL.
+ */
+static __always_inline void *icmp_error_headers_v4(struct __sk_buff *skb)
+{
+	return tc_packet_ptr(skb, 0, FORWARD_ICMP_ERROR_MIN_LEN);
+}
+
+struct icmp_error_v4 {
+	__be32 outer_src;
+	__be32 outer_dst;
+	__be32 inner_src;
+	__be32 inner_dst;
+	/* Host order. A quoted echo carries its identifier as the source port. */
+	__u16 inner_sport;
+	__u16 inner_dport;
+	__u16 outer_tot_len;
+	__u8 inner_proto;
+	__u8 inner_icmp_type;
+	__u8 tos;
+	__u8 pad[3];
+};
+
+static __always_inline int parse_icmp_error_v4(struct __sk_buff *skb, struct icmp_error_v4 *err)
+{
+	const void *hdrs;
+	const struct ethhdr *eth;
+	const struct iphdr *outer;
+	const struct icmphdr *icmph;
+	const struct iphdr *inner;
+	const __be16 *l4;
+	__u32 pull = FORWARD_ICMP_ERROR_PULL_LEN;
+
+	if (skb->protocol != bpf_htons(ETH_P_IP))
+		return -1;
+	if (skb->len < pull)
+		pull = skb->len;
+	if (bpf_skb_pull_data(skb, pull) < 0)
+		return -1;
+	hdrs = icmp_error_headers_v4(skb);
+	if (!hdrs)
+		return -1;
+	eth = hdrs;
+	outer = hdrs + FORWARD_ICMP_ERROR_OUTER_OFF;
+	icmph = hdrs + FORWARD_ICMP_ERROR_ICMP_OFF;
+	inner = hdrs + FORWARD_ICMP_ERROR_INNER_OFF;
+	l4 = hdrs + FORWARD_ICMP_ERROR_INNER_L4_OFF;
+	if (eth->h_proto != bpf_htons(ETH_P_IP))
+		return -1;
+	if (outer->version != 4 || outer->ihl != 5 || outer->protocol != IPPROTO_ICMP)
+		return -1;
+	if ((bpf_ntohs(outer->frag_off) & FORWARD_IPV4_FRAG_MASK) != 0)
+		return -1;
+	/* The quote must hold the 8 L4 bytes, not Ethernet padding. */
+	if (bpf_ntohs(outer->tot_len) < FORWARD_ICMP_ERROR_MIN_LEN - FORWARD_ICMP_ERROR_OUTER_OFF)
+		return -1;
+	if (!is_icmp_error_type(icmph->type))
+		return -1;
+	if (inner->version != 4 || inner->ihl != 5)
+		return -1;
+	/* Only a first fragment carries the ports. */
+	if ((bpf_ntohs(inner->frag_off) & FORWARD_IPV4_FRAG_OFFSET_MASK) != 0)
+		return -1;
+	if (inner->protocol != IPPROTO_TCP && inner->protocol != IPPROTO_UDP && inner->protocol != IPPROTO_ICMP)
+		return -1;
+
+	err->outer_src = outer->saddr;
+	err->outer_dst = outer->daddr;
+	err->outer_tot_len = bpf_ntohs(outer->tot_len);
+	err->tos = outer->tos;
+	err->inner_src = inner->saddr;
+	err->inner_dst = inner->daddr;
+	err->inner_proto = inner->protocol;
+	if (inner->protocol == IPPROTO_ICMP) {
+		const struct icmphdr *quoted = (const void *)l4;
+
+		err->inner_icmp_type = quoted->type;
+		err->inner_sport = bpf_ntohs(quoted->un.echo.id);
+		err->inner_dport = 0;
+	} else {
+		err->inner_sport = bpf_ntohs(l4[0]);
+		err->inner_dport = bpf_ntohs(l4[1]);
+	}
+	return 0;
+}
+
+/*
+ * Undoes the NAT of one quoted endpoint. With inner_src the quoted source and
+ * the error's destination become addr (and the quoted source port port),
+ * otherwise the quoted destination and the error's source. Every checksum
+ * over a changed field follows: both IPv4 headers, the quoted L4 checksum when
+ * it is quoted, and the ICMP checksum over the whole error.
+ */
+static __always_inline __sum16 icmp_error_quoted_l4_check(__sum16 check, __be32 old_addr, __be32 addr, __be16 old_port, __be16 port)
+{
+	check = csum_replace4_val(check, old_addr, addr);
+	return csum_replace2_val(check, old_port, port);
+}
+
+static __always_inline int translate_icmp_error_v4(struct __sk_buff *skb, const struct icmp_error_v4 *err, int inner_src, __be32 addr, __be16 port)
+{
+	void *hdrs = icmp_error_headers_v4(skb);
+	struct iphdr *outer;
+	struct icmphdr *icmph;
+	struct iphdr *inner;
+	__be16 *l4;
+	__sum16 icmp_check;
+	__sum16 old_check;
+	__sum16 check;
+	__be32 old_addr;
+	__be16 old_port;
+
+	if (!hdrs)
+		return -1;
+	outer = hdrs + FORWARD_ICMP_ERROR_OUTER_OFF;
+	icmph = hdrs + FORWARD_ICMP_ERROR_ICMP_OFF;
+	inner = hdrs + FORWARD_ICMP_ERROR_INNER_OFF;
+	l4 = hdrs + FORWARD_ICMP_ERROR_INNER_L4_OFF;
+	icmp_check = icmph->checksum;
+	if (inner_src) {
+		outer->check = csum_replace4_val(outer->check, outer->daddr, addr);
+		outer->daddr = addr;
+		old_addr = inner->saddr;
+		inner->saddr = addr;
+	} else {
+		outer->check = csum_replace4_val(outer->check, outer->saddr, addr);
+		outer->saddr = addr;
+		old_addr = inner->daddr;
+		inner->daddr = addr;
+	}
+	old_check = inner->check;
+	inner->check = csum_replace4_val(old_check, old_addr, addr);
+	icmp_check = csum_replace4_val(icmp_check, old_addr, addr);
+	icmp_check = csum_replace2_val(icmp_check, old_check, inner->check);
+
+	if (err->inner_proto == IPPROTO_ICMP) {
+		/* A quoted echo request: no pseudo-header, the identifier is the port. */
+		old_port = l4[2];
+		old_check = l4[1];
+		l4[2] = port;
+		l4[1] = csum_replace2_val(old_check, old_port, port);
+		icmp_check = csum_replace2_val(icmp_check, old_port, port);
+		icmp_check = csum_replace2_val(icmp_check, old_check, l4[1]);
+		icmph->checksum = icmp_check;
+		return 0;
+	}
+	if (inner_src) {
+		old_port = l4[0];
+		l4[0] = port;
+	} else {
+		old_port = l4[1];
+		l4[1] = port;
+	}
+	icmp_check = csum_replace2_val(icmp_check, old_port, port);
+	if (err->inner_proto == IPPROTO_UDP) {
+		old_check = l4[3];
+		/* Zero means the sender computed none. */
+		if (old_check != 0) {
+			check = icmp_error_quoted_l4_check(old_check, old_addr, addr, old_port, port);
+			if (check == 0)
+				check = 0xffff;
+			l4[3] = check;
+			icmp_check = csum_replace2_val(icmp_check, old_check, check);
+		}
+	} else if (err->outer_tot_len >= FORWARD_ICMP_ERROR_TCP_CHECK_LEN) {
+		/* Past the shortest error: checked on its own. */
+		__sum16 *tcp_check = tc_packet_ptr(skb, FORWARD_ICMP_ERROR_INNER_L4_OFF + 16, sizeof(*tcp_check));
+
+		if (tcp_check) {
+			old_check = *tcp_check;
+			check = icmp_error_quoted_l4_check(old_check, old_addr, addr, old_port, port);
+			*tcp_check = check;
+			icmp_check = csum_replace2_val(icmp_check, old_check, check);
+		}
+	}
+	icmph->checksum = icmp_check;
+	return 0;
+}
+
+static __always_inline int send_icmp_error_v4(struct __sk_buff *skb, const struct icmp_error_v4 *err, const struct redirect_target_v4 *target)
+{
+	struct packet_ctx ctx = {};
+
+	ctx.l3_off = sizeof(struct ethhdr);
+	ctx.proto = IPPROTO_ICMP;
+	ctx.tos = err->tos;
+	ctx.tot_len = err->outer_tot_len;
+	return redirect_ifindex_l2(skb, &ctx, target, load_kernel_nat_config_flags(), 0);
+}
+
+/* An error from the WAN about a packet a LAN host sent: back to that host. */
+SEC("classifier/icmp_error_reply_v4")
+int icmp_error_reply_v4(struct __sk_buff *skb)
+{
+	struct icmp_error_v4 err = {};
+	struct flow_key_v4 key = {};
+	struct redirect_target_v4 target = {};
+	struct flow_value_v4 copy = {};
+	const struct flow_value_v4 *flow = &copy;
+	__u8 bank = FORWARD_TC_FLOW_BANK_ACTIVE;
+	__u32 client_addr;
+	__u16 client_port;
+
+	if (parse_icmp_error_v4(skb, &err) < 0)
+		return TC_ACT_UNSPEC;
+	/* It reports a packet from the NAT address and returns to it. */
+	if (err.outer_dst != err.inner_src)
+		return TC_ACT_UNSPEC;
+	key.ifindex = skb->ifindex;
+	key.src_addr = bpf_ntohl(err.inner_dst);
+	key.dst_addr = bpf_ntohl(err.inner_src);
+	key.proto = err.inner_proto;
+	if (err.inner_proto == IPPROTO_ICMP) {
+		/* Of ICMP, only the hosts' echo requests have flows. */
+		if (err.inner_icmp_type != ICMP_ECHO)
+			return TC_ACT_UNSPEC;
+		key.src_port = 0;
+		key.dst_port = err.inner_sport;
+	} else {
+		key.src_port = err.inner_dport;
+		key.dst_port = err.inner_sport;
+	}
+	if (copy_flow_v4(lookup_reply_flow_v4(&key, &bank), &key, &copy) < 0)
+		return TC_ACT_UNSPEC;
+	if (!is_egress_nat_flow(flow) || !is_fullnat_reply_flow(flow))
+		return TC_ACT_UNSPEC;
+	if (flow->nat_addr != bpf_ntohl(err.inner_src) || flow->nat_port != err.inner_sport)
+		return TC_ACT_UNSPEC;
+	client_addr = flow->client_addr;
+	client_port = flow->client_port;
+	target.ifindex = resolve_reply_redirect_ifindex(flow);
+	if (!target.ifindex)
+		return TC_ACT_UNSPEC;
+	target.src_addr = bpf_ntohl(err.outer_src);
+	target.dst_addr = client_addr;
+	if (translate_icmp_error_v4(skb, &err, 1, bpf_htonl(client_addr), bpf_htons(client_port)) < 0)
+		return TC_ACT_SHOT;
+	return send_icmp_error_v4(skb, &err, &target);
+}
+
+/* An error from a LAN host about a packet it received: to the remote host. */
+SEC("classifier/icmp_error_forward_v4")
+int icmp_error_forward_v4(struct __sk_buff *skb)
+{
+	struct icmp_error_v4 err = {};
+	struct flow_key_v4 key = {};
+	struct packet_ctx flow_ctx = {};
+	struct redirect_target_v4 target = {};
+	struct flow_value_v4 copy = {};
+	const struct flow_value_v4 *flow = &copy;
+	const struct flow_value_v4 *live;
+	const struct rule_value_v4 *rule;
+	__u8 bank = FORWARD_TC_FLOW_BANK_ACTIVE;
+	__u32 nat_addr;
+	__u16 nat_port;
+	__u32 rule_id;
+
+	if (parse_icmp_error_v4(skb, &err) < 0)
+		return TC_ACT_UNSPEC;
+	/* A host that received an echo reply has nothing to report about it. */
+	if (err.inner_proto == IPPROTO_ICMP)
+		return TC_ACT_UNSPEC;
+	/* The reporting host is the quoted destination. */
+	if (err.outer_src != err.inner_dst)
+		return TC_ACT_UNSPEC;
+	key.ifindex = skb->ifindex;
+	key.src_addr = bpf_ntohl(err.inner_dst);
+	key.dst_addr = bpf_ntohl(err.inner_src);
+	key.src_port = err.inner_dport;
+	key.dst_port = err.inner_sport;
+	key.proto = err.inner_proto;
+	live = lookup_flow_v4_active_or_old(&key, &bank);
+	if (!live) {
+		/* A full-cone front entry is shared by every destination of its source. */
+		key.dst_addr = 0;
+		key.dst_port = 0;
+		live = lookup_flow_v4_active_or_old(&key, &bank);
+	}
+	if (copy_flow_v4(live, &key, &copy) < 0)
+		return TC_ACT_UNSPEC;
+	if (!is_egress_nat_flow(flow) || !is_fullnat_front_flow(flow))
+		return TC_ACT_UNSPEC;
+	nat_addr = flow->nat_addr;
+	nat_port = flow->nat_port;
+	rule_id = flow->rule_id;
+	/* Out through the uplink of the rule the flow's own packets match. */
+	flow_ctx.dst_addr = err.inner_src;
+	flow_ctx.dst_port = err.inner_sport;
+	flow_ctx.proto = err.inner_proto;
+	rule = lookup_rule_v4(skb, &flow_ctx);
+	if (!is_egress_nat_rule(rule) || rule->rule_id != rule_id || !rule->out_ifindex)
+		return TC_ACT_UNSPEC;
+	if (egress_nat_dst_mac_mismatch(skb, rule))
+		return TC_ACT_UNSPEC;
+	target.ifindex = rule->out_ifindex;
+	target.src_addr = nat_addr;
+	target.dst_addr = bpf_ntohl(err.outer_dst);
+	if (translate_icmp_error_v4(skb, &err, 0, bpf_htonl(nat_addr), bpf_htons(nat_port)) < 0)
+		return TC_ACT_SHOT;
+	return send_icmp_error_v4(skb, &err, &target);
+}
+
+/*
+ * Runs before the core on its ingress hooks while the flow cache is enabled.
+ * Anything it does not find, or may not handle, continues to the core.
+ */
+/*
+ * A later fragment of a datagram whose first fragment the NAT translated:
+ * give it the addresses the first one got and send it the same way. The
+ * fragments of other datagrams pass as before. Only Ethernet ingress, like
+ * the ICMP error translators.
+ */
+static __always_inline int handle_ipv4_later_fragment(struct __sk_buff *skb)
+{
+	struct tc_fragment_key_v4 key = {};
+	struct packet_ctx ctx = {};
+	struct redirect_target_v4 target = {};
+	const struct tc_fragment_value_v4 *frag;
+	const struct iphdr *iph;
+	int l3_off = sizeof(struct ethhdr);
+	int check_off = l3_off + offsetof(struct iphdr, check);
+	__be32 new_addr;
+
+	if (skb->protocol != bpf_htons(ETH_P_IP))
+		return TC_ACT_UNSPEC;
+	iph = tc_packet_ptr(skb, l3_off, sizeof(*iph));
+	if (!iph || iph->version != 4 || iph->ihl != 5)
+		return TC_ACT_UNSPEC;
+	if ((bpf_ntohs(iph->frag_off) & FORWARD_IPV4_FRAG_OFFSET_MASK) == 0)
+		return TC_ACT_UNSPEC;
+	key.ifindex = tc_skb_ifindex(skb);
+	key.src_addr = iph->saddr;
+	key.dst_addr = iph->daddr;
+	key.id = iph->id;
+	key.proto = iph->protocol;
+	ctx.tos = iph->tos;
+	ctx.proto = iph->protocol;
+	ctx.tot_len = bpf_ntohs(iph->tot_len);
+	ctx.l3_off = l3_off;
+	ctx.l4_off = l3_off + (int)sizeof(*iph);
+
+	frag = bpf_map_lookup_elem(&tc_fragments_v4, &key);
+	if (!frag || bpf_ktime_get_ns() >= frag->expires_ns)
+		return TC_ACT_UNSPEC;
+	if (frag->action == FORWARD_TC_FRAGMENT_DROP) {
+		tc_diag_oversize_drop();
+		return TC_ACT_SHOT;
+	}
+	target.ifindex = frag->out_ifindex;
+	target.src_addr = frag->src_addr;
+	target.dst_addr = frag->dst_addr;
+
+	new_addr = bpf_htonl(target.src_addr);
+	if (new_addr != key.src_addr) {
+		if (bpf_l3_csum_replace(skb, check_off, key.src_addr, new_addr, sizeof(new_addr)) < 0 ||
+		    bpf_skb_store_bytes(skb, l3_off + offsetof(struct iphdr, saddr), &new_addr, sizeof(new_addr), 0) < 0)
+			return TC_ACT_SHOT;
+	}
+	new_addr = bpf_htonl(target.dst_addr);
+	if (new_addr != key.dst_addr) {
+		if (bpf_l3_csum_replace(skb, check_off, key.dst_addr, new_addr, sizeof(new_addr)) < 0 ||
+		    bpf_skb_store_bytes(skb, l3_off + offsetof(struct iphdr, daddr), &new_addr, sizeof(new_addr), 0) < 0)
+			return TC_ACT_SHOT;
+	}
+	tc_diag_fragment_forwarded();
+	return redirect_ifindex_l2(skb, &ctx, &target, load_kernel_nat_config_flags(), 0);
+}
+
+SEC("classifier/fragment_forward_v4")
+int fragment_forward_v4(struct __sk_buff *skb)
+{
+	return handle_ipv4_later_fragment(skb);
+}
+
+SEC("classifier/fragment_reply_v4")
+int fragment_reply_v4(struct __sk_buff *skb)
+{
+	return handle_ipv4_later_fragment(skb);
 }
 
 char _license[] SEC("license") = "GPL";

@@ -44,7 +44,10 @@ func writeKernelHelperCLIUsage(w io.Writer) {
   veer kfuncs status [--json] [--install-dir DIR]
   veer kfuncs build [--kernel RELEASE] [--kdir DIR] [--vmlinux-btf FILE] [--install-dir DIR] [--force]
 
-status shows whether a veer_kfuncs module is installed for the running kernel.
+status shows whether a veer_kfuncs module is installed for the running kernel,
+and whether the loaded module was built from the installed file's sources
+(srcversion). Veer loads the file only when no module is loaded, and a hot
+restart keeps the loaded module, so a newer file needs a full restart.
 build compiles the module source embedded in this binary and installs it as
 <install-dir>/kernel/<release>/veer_kfuncs.ko. It runs as root and needs make,
 the kernel's compiler and headers, plus pahole and resolve_btfids when the
@@ -71,9 +74,15 @@ type kernelHelperCLIStatus struct {
 	InstallDir          string   `json:"install_dir"`
 	ModulePath          string   `json:"module_path"`
 	ModuleInstalled     bool     `json:"module_installed"`
+	InstalledVersion    string   `json:"installed_version,omitempty"`
+	InstalledSrcVersion string   `json:"installed_srcversion,omitempty"`
 	OtherModuleReleases []string `json:"other_module_releases"`
 	Loaded              bool     `json:"loaded"`
-	NextStep            string   `json:"next_step,omitempty"`
+	LoadedVersion       string   `json:"loaded_version,omitempty"`
+	LoadedSrcVersion    string   `json:"loaded_srcversion,omitempty"`
+	// Set when both srcversions are known.
+	LoadedMatchesInstalled *bool  `json:"loaded_matches_installed,omitempty"`
+	NextStep               string `json:"next_step,omitempty"`
 }
 
 func runKernelHelperStatusCLI(args []string, stdout, stderr io.Writer) error {
@@ -108,14 +117,30 @@ func runKernelHelperStatusCLI(args []string, stdout, stderr io.Writer) error {
 		ModuleInstalled:     install.ModuleInstalled,
 		OtherModuleReleases: append([]string{}, install.OtherReleases...),
 	}
-	if info, err := os.Stat("/sys/module/" + optionalKernelModuleName); err == nil && info.IsDir() {
-		status.Loaded = true
+	var installed kernelHelperModuleBuild
+	if install.ModuleInstalled {
+		if build, err := readKernelHelperModuleBuild(install.ModulePath); err == nil {
+			installed = build
+		} else {
+			fmt.Fprintf(stderr, "read %s: %v\n", install.ModulePath, err)
+		}
+	}
+	status.InstalledVersion, status.InstalledSrcVersion = installed.Version, installed.SrcVersion
+	loaded, isLoaded := loadedKernelHelperModuleBuild(kernelHelperSysModuleDir)
+	status.Loaded = isLoaded
+	status.LoadedVersion, status.LoadedSrcVersion = loaded.Version, loaded.SrcVersion
+	if isLoaded && install.ModuleInstalled {
+		if matches, known := kernelHelperLoadedMatches(loaded, installed); known {
+			status.LoadedMatchesInstalled = &matches
+		}
 	}
 	switch {
 	case !binarySupport:
 		status.NextStep = "this binary was built without veer_kfuncs support; rebuild Veer with VEER_BUILD_KERNEL_MODULE=1"
 	case !install.ModuleInstalled:
 		status.NextStep = kernelHelperBuildCommand(executable, dir)
+	case status.LoadedMatchesInstalled != nil && !*status.LoadedMatchesInstalled:
+		status.NextStep = "the loaded module is not the installed file; " + kernelHelperFullRestartHint
 	}
 	if *asJSON {
 		encoder := json.NewEncoder(stdout)
@@ -135,9 +160,18 @@ func runKernelHelperStatusCLI(args []string, stdout, stderr io.Writer) error {
 	fmt.Fprintf(stdout, "binary support:   %s\n", yesNo(status.BinarySupport))
 	fmt.Fprintf(stdout, "running kernel:   %s\n", status.KernelRelease)
 	fmt.Fprintf(stdout, "module:           %s\n", status.ModulePath)
-	fmt.Fprintf(stdout, "installed:        %s\n", yesNo(status.ModuleInstalled))
+	withBuild := func(present bool, build kernelHelperModuleBuild) string {
+		if !present {
+			return "no"
+		}
+		return "yes (" + build.describe() + ")"
+	}
+	fmt.Fprintf(stdout, "installed:        %s\n", withBuild(status.ModuleInstalled, installed))
 	fmt.Fprintf(stdout, "other kernels:    %s\n", others)
-	fmt.Fprintf(stdout, "loaded:           %s\n", yesNo(status.Loaded))
+	fmt.Fprintf(stdout, "loaded:           %s\n", withBuild(status.Loaded, loaded))
+	if status.LoadedMatchesInstalled != nil {
+		fmt.Fprintf(stdout, "same sources:     %s\n", yesNo(*status.LoadedMatchesInstalled))
+	}
 	if status.NextStep != "" {
 		fmt.Fprintf(stdout, "next step:        %s\n", status.NextStep)
 	}

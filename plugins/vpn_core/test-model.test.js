@@ -1,6 +1,6 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
-const M=require('../../../plugins/vpn_core/ui/model.js');
+const M=require('./ui/model.js');
 const key=Buffer.alloc(32,1).toString('base64');
 
 test('only sing-box forms save an optional source IP and reject CIDRs or malformed addresses',()=>{

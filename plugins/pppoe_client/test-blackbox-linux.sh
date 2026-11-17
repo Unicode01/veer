@@ -22,6 +22,8 @@ fi
 : "${VEER_PPPOE_BLACKBOX_CAPTURE_SNAPLEN:=0}"
 : "${VEER_PPPOE_BLACKBOX_SYSTEMD:=auto}"
 : "${VEER_PPPOE_BLACKBOX_DECAP_MODE:=auto}"
+: "${VEER_PPPOE_BLACKBOX_LAN_TRAFFIC:=1}"
+: "${VEER_PPPOE_BLACKBOX_FLOW_CACHE:=0}"
 
 missing=
 for tool in ip tc clang pppd pppoe-server curl sed grep timeout ss ethtool pkill; do
@@ -110,6 +112,24 @@ case "$VEER_PPPOE_BLACKBOX_DECAP_MODE" in
 		exit 1
 		;;
 esac
+case "$VEER_PPPOE_BLACKBOX_LAN_TRAFFIC" in
+	0|1) ;;
+	*)
+		echo "VEER_PPPOE_BLACKBOX_LAN_TRAFFIC must be 0 or 1" >&2
+		exit 1
+		;;
+esac
+case "$VEER_PPPOE_BLACKBOX_FLOW_CACHE" in
+	0|1) ;;
+	*)
+		echo "VEER_PPPOE_BLACKBOX_FLOW_CACHE must be 0 or 1" >&2
+		exit 1
+		;;
+esac
+if [ "$VEER_PPPOE_BLACKBOX_FLOW_CACHE" = "1" ] && { [ "$VEER_PPPOE_BLACKBOX_LAN_TRAFFIC" != "1" ] || [ "$VEER_PPPOE_BLACKBOX_RUN_IPERF" != "1" ]; }; then
+	echo "VEER_PPPOE_BLACKBOX_FLOW_CACHE=1 needs VEER_PPPOE_BLACKBOX_LAN_TRAFFIC=1 and VEER_PPPOE_BLACKBOX_RUN_IPERF=1: only forwarded LAN traffic uses the flow cache" >&2
+	exit 1
+fi
 
 if [ "$VEER_PPPOE_BLACKBOX_PORT" = "0" ]; then
 	VEER_PPPOE_BLACKBOX_PORT=$((18080 + ($$ % 1000)))
@@ -129,11 +149,14 @@ lan_peer="lanbb1${suffix}"
 lan_peer=$(printf '%.15s' "$lan_peer")
 lan_bridge="brbb${suffix}"
 lan_bridge=$(printf '%.15s' "$lan_bridge")
+client_ns="fwpppcli$suffix"
+ip_forward_restore=
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/veer-pppoe-blackbox.XXXXXX")
 veer_pid=
 veer_unit=
 pppoe_pid=
 iperf_pid=
+sampler_pid=
 capture_pid=
 capture_local_pid=
 capture_pipeline_pid=
@@ -143,6 +166,7 @@ capture_file=
 cleanup() {
 	set +e
 	if [ -n "$iperf_pid" ]; then kill "$iperf_pid" 2>/dev/null || true; fi
+	if [ -n "$sampler_pid" ]; then kill "$sampler_pid" 2>/dev/null || true; fi
 	if [ -n "$capture_pid" ]; then kill "$capture_pid" 2>/dev/null || true; fi
 	if [ -n "$capture_local_pid" ]; then kill "$capture_local_pid" 2>/dev/null || true; fi
 	if [ -n "$capture_pipeline_pid" ]; then kill "$capture_pipeline_pid" 2>/dev/null || true; fi
@@ -158,6 +182,9 @@ cleanup() {
 	pkill -f "[p]ppoe-server .*${wan_peer}" 2>/dev/null || true
 	ip netns pids "$server_ns" 2>/dev/null | xargs -r kill 2>/dev/null || true
 	ip netns del "$server_ns" 2>/dev/null || true
+	ip netns pids "$client_ns" 2>/dev/null | xargs -r kill 2>/dev/null || true
+	ip netns del "$client_ns" 2>/dev/null || true
+	if [ -n "$ip_forward_restore" ]; then sysctl -qw "net.ipv4.ip_forward=$ip_forward_restore" 2>/dev/null || true; fi
 	ip link del "$local_if" 2>/dev/null || true
 	ip link del "$pipeline_if" 2>/dev/null || true
 	ip link del "$lan_bridge" 2>/dev/null || true
@@ -257,6 +284,8 @@ build_veer_binary() {
 }
 
 start_veer() {
+	flow_cache_json=false
+	if [ "$VEER_PPPOE_BLACKBOX_FLOW_CACHE" = "1" ]; then flow_cache_json=true; fi
 	cat >"$work_dir/config.json" <<EOF
 {
   "web_bind": "127.0.0.1",
@@ -265,6 +294,7 @@ start_veer() {
   "plugins_enabled": true,
   "plugins_dataplane_enabled": true,
   "plugins_dir": "$work_dir/plugins",
+  "kernel_tc_flow_cache": $flow_cache_json,
   "default_engine": "auto"
 }
 EOF
@@ -360,6 +390,25 @@ api_get_resource() {
 	api_get_plugin_resource pppoe_client "$api_resource" "$api_key"
 }
 
+# Veer attaches its TC programs through tcx on Linux 6.6 and later, where
+# `tc filter` does not list them; the kernel runtime view names each
+# interface it attached to.
+assert_tc_program_attached() {
+	if tc filter show dev "$1" ingress | grep -q bpf; then
+		return 0
+	fi
+	curl -sS --fail-with-body \
+		-H "Authorization: Bearer $VEER_PPPOE_BLACKBOX_TOKEN" \
+		"http://127.0.0.1:$VEER_PPPOE_BLACKBOX_PORT/api/kernel/runtime" >"$work_dir/kernel-runtime.json"
+	if grep -q '"attachment_api":"tcx"' "$work_dir/kernel-runtime.json" &&
+		grep -Eq "(\"attachment_summary\":\"|, )$1\\(" "$work_dir/kernel-runtime.json"; then
+		return 0
+	fi
+	echo "no TC program attached to $1 ingress" >&2
+	cat "$work_dir/kernel-runtime.json" >&2
+	exit 1
+}
+
 assert_gro_enabled() {
 	if ! ethtool -k "$1" | grep -q '^generic-receive-offload: on'; then
 		echo "expected GRO to remain enabled on $1" >&2
@@ -376,9 +425,22 @@ session_is_up() {
 	grep -q '"tunnel_installed":true' "$1" && grep -q '"up":true' "$1"
 }
 
+# Says whether Veer still runs, for failures where its API stopped answering.
+report_veer_process() {
+	if [ -n "$veer_pid" ] && kill -0 "$veer_pid" 2>/dev/null; then
+		echo "Veer (pid $veer_pid) is still running" >&2
+	else
+		echo "Veer (pid ${veer_pid:-unknown}) is not running" >&2
+	fi
+	if [ -n "$veer_unit" ]; then
+		systemctl status "$veer_unit" --no-pager -l 2>&1 | head -n 20 >&2 || true
+	fi
+}
+
 wait_for_session_up() {
+	: >"$work_dir/session-wait.err"
 	for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-		if api_get_resource sessions last >"$work_dir/session.json" 2>/dev/null; then
+		if api_get_resource sessions last >"$work_dir/session.json" 2>>"$work_dir/session-wait.err"; then
 			if session_is_up "$work_dir/session.json"; then
 				return
 			fi
@@ -387,6 +449,11 @@ wait_for_session_up() {
 	done
 	echo "PPPoE session did not become usable" >&2
 	cat "$work_dir/session.json" 2>/dev/null >&2 || true
+	if [ -s "$work_dir/session-wait.err" ]; then
+		echo "failed session reads:" >&2
+		sort "$work_dir/session-wait.err" | uniq -c >&2
+	fi
+	report_veer_process
 	cat "$work_dir/veer.log" >&2
 	exit 1
 }
@@ -478,6 +545,7 @@ test_automatic_redial() {
 
 dump_dataplane_state() {
 	set +e
+	report_veer_process
 	api_post_action debug_stats '{}' >"$work_dir/debug-stats-action.json" 2>&1
 	api_get_resource sessions debug_stats >"$work_dir/debug-stats.json" 2>&1
 	{
@@ -538,6 +606,216 @@ stop_capture() {
 	capture_local_pid=
 	capture_pipeline_pid=
 	capture_server_pid=
+}
+
+fetch_kernel_runtime() {
+	curl -sS --fail-with-body \
+		-H "Authorization: Bearer $VEER_PPPOE_BLACKBOX_TOKEN" \
+		"http://127.0.0.1:$VEER_PPPOE_BLACKBOX_PORT/api/kernel/runtime" >"$1"
+}
+
+# Runs iperf3 from the LAN host through egress NAT and the PPPoE WAN, in
+# the given direction, and checks the server saw the WAN address.
+lan_iperf() {
+	direction=$1
+	lan_iperf_port=$((57000 + ($$ % 1000)))
+	if [ "$direction" = "download" ]; then
+		lan_iperf_port=$((lan_iperf_port + 1))
+		set -- -R
+	else
+		set --
+	fi
+	ip netns exec "$server_ns" iperf3 -s -B 8.8.8.8 -p "$lan_iperf_port" --one-off >"$work_dir/lan-iperf-$direction-server.log" 2>&1 &
+	iperf_pid=$!
+	sleep 0.3
+	if ! timeout "$((VEER_PPPOE_BLACKBOX_SECONDS + 15))" ip netns exec "$client_ns" iperf3 -c 8.8.8.8 -p "$lan_iperf_port" --connect-timeout 3000 -t "$VEER_PPPOE_BLACKBOX_SECONDS" -P "$VEER_PPPOE_BLACKBOX_PARALLEL" "$@" >"$work_dir/lan-iperf-$direction-client.log" 2>&1; then
+		dump_dataplane_state
+		cat "$work_dir/lan-iperf-$direction-client.log" >&2 || true
+		cat "$work_dir/lan-iperf-$direction-server.log" >&2 || true
+		kill "$iperf_pid" 2>/dev/null || true
+		iperf_pid=
+		exit 1
+	fi
+	echo "LAN $direction through egress NAT:"
+	cat "$work_dir/lan-iperf-$direction-client.log"
+	if [ "$VEER_PPPOE_BLACKBOX_PARALLEL" -gt 1 ]; then
+		zero_intervals=$(grep -Ec '^\[SUM\].*0\.00 Bytes[[:space:]]+0\.00 bits/sec' "$work_dir/lan-iperf-$direction-client.log" || true)
+	else
+		zero_intervals=$(grep -Ec '^\[[[:space:]]*[0-9]+\].*0\.00 Bytes[[:space:]]+0\.00 bits/sec' "$work_dir/lan-iperf-$direction-client.log" || true)
+	fi
+	if [ "$zero_intervals" -gt 1 ]; then
+		dump_dataplane_state
+		echo "LAN $direction iperf3 observed $zero_intervals zero-throughput interval(s)" >&2
+		exit 1
+	fi
+	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		if ! kill -0 "$iperf_pid" 2>/dev/null; then
+			wait "$iperf_pid" || true
+			iperf_pid=
+			break
+		fi
+		sleep 0.2
+	done
+	if [ -n "$iperf_pid" ]; then
+		cat "$work_dir/lan-iperf-$direction-server.log" >&2 || true
+		kill "$iperf_pid" 2>/dev/null || true
+		iperf_pid=
+		echo "LAN $direction iperf3 server did not exit after client completed" >&2
+		exit 1
+	fi
+	if ! grep -q 'Accepted connection from 198\.18\.0\.2' "$work_dir/lan-iperf-$direction-server.log"; then
+		cat "$work_dir/lan-iperf-$direction-server.log" >&2
+		echo "LAN $direction did not reach the server from the WAN address 198.18.0.2" >&2
+		exit 1
+	fi
+}
+
+# Prints the packets the TC core has sent from fast-path records so far.
+flow_cache_hits() {
+	fetch_kernel_runtime "$work_dir/kernel-runtime-hits.json"
+	hits=$(sed -n 's/.*"diag_flow_cache_hit":\([0-9]*\).*/\1/p' "$work_dir/kernel-runtime-hits.json")
+	echo "${hits:-0}"
+}
+
+# Prints the packets received so far on interface $1.
+rx_packets() {
+	cat "/sys/class/net/$1/statistics/rx_packets"
+}
+
+# Prints, per key ifindex, the most IPv4 TCP flow entries seen holding a
+# fast-path record in the samples, which are bpftool dumps of flows_v4. The
+# record is the last 40 bytes of the 104-byte struct flow_value_v4 and is in
+# use while its stamp, its first 4 bytes, is nonzero.
+flow_cache_sample_summary() {
+	python3 -c '
+import json, sys
+peak = {}
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line.startswith("["):
+        continue
+    counts = {}
+    for item in json.loads(line):
+        key = [int(b, 16) for b in item["key"]]
+        value = [int(b, 16) for b in item["value"]]
+        if len(key) != 20 or len(value) != 104:
+            sys.exit("flows_v4 entry has a %d-byte key and a %d-byte value, want 20 and 104" % (len(key), len(value)))
+        if key[16] != 6 or not any(value[64:68]):
+            continue
+        ifindex = key[0] | key[1] << 8 | key[2] << 16 | key[3] << 24
+        counts[ifindex] = counts.get(ifindex, 0) + 1
+    for ifindex, count in counts.items():
+        peak[ifindex] = max(peak.get(ifindex, 0), count)
+for ifindex in sorted(peak):
+    print("%d=%d" % (ifindex, peak[ifindex]))
+' "$1"
+}
+
+# Forwards LAN traffic through egress NAT over the PPPoE session. With the
+# flow cache on, the core must record fast paths in the flow entries of the
+# replies entering the local WAN boundary and of the LAN's packets, none for
+# the interfaces the PPPoE hooks see, and send the download from them.
+run_lan_traffic() {
+	# A router forwards IPv4. Without it bpf_fib_lookup reports forwarding
+	# disabled, and the dataplane falls back to redirect_neigh for every
+	# packet: no fast path, so no flow cache.
+	if [ "$(sysctl -n net.ipv4.ip_forward)" != "1" ]; then
+		ip_forward_restore=$(sysctl -n net.ipv4.ip_forward)
+		sysctl -qw net.ipv4.ip_forward=1
+	fi
+	ip netns add "$client_ns"
+	ip link set "$lan_peer" netns "$client_ns"
+	ip netns exec "$client_ns" ip link set lo up
+	ip netns exec "$client_ns" ip addr add 192.0.2.2/24 dev "$lan_peer"
+	ip netns exec "$client_ns" ip link set "$lan_peer" up
+	ip netns exec "$client_ns" ip route replace default via 192.0.2.1 dev "$lan_peer"
+	if [ "$VEER_PPPOE_BLACKBOX_FLOW_CACHE" = "1" ]; then
+		# The records live in the core's flow entries; the TC engine reports
+		# whether the core writes and uses them.
+		fetch_kernel_runtime "$work_dir/kernel-runtime-flow-cache.json"
+		if ! grep -q '"flow_cache":true' "$work_dir/kernel-runtime-flow-cache.json"; then
+			cat "$work_dir/kernel-runtime-flow-cache.json" >&2
+			echo "the TC engine does not use the flow cache" >&2
+			exit 1
+		fi
+	fi
+	# Echo through egress NAT, which this LAN profile covers along with TCP
+	# and UDP.
+	if ! ip netns exec "$client_ns" ping -c 3 -W 2 8.8.8.8; then
+		dump_dataplane_state
+		exit 1
+	fi
+	if [ "$VEER_PPPOE_BLACKBOX_RUN_IPERF" != "1" ]; then
+		return
+	fi
+	lan_iperf upload
+	if [ "$VEER_PPPOE_BLACKBOX_FLOW_CACHE" != "1" ]; then
+		lan_iperf download
+		return
+	fi
+	local_index=$(cat "/sys/class/net/$local_if/ifindex")
+	lan_index=$(cat "/sys/class/net/$lan_host/ifindex")
+	hits_before=$(flow_cache_hits)
+	local_before=$(rx_packets "$local_if")
+	lan_before=$(rx_packets "$lan_host")
+	sampler_pid=
+	if command -v bpftool >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+		(
+			while :; do
+				bpftool -j map dump name flows_v4 2>/dev/null || true
+				echo
+				sleep 0.5
+			done
+		) >"$work_dir/flow-cache-samples.txt" &
+		sampler_pid=$!
+	fi
+	lan_iperf download
+	if [ -n "$sampler_pid" ]; then
+		kill "$sampler_pid" 2>/dev/null || true
+		wait "$sampler_pid" 2>/dev/null || true
+		sampler_pid=
+	fi
+	hits=$(($(flow_cache_hits) - hits_before))
+	packets=$(($(rx_packets "$local_if") - local_before + $(rx_packets "$lan_host") - lan_before))
+	# The interface counters count before GRO and the hits after it, so the
+	# two are reported side by side rather than compared.
+	echo "flow cache during the LAN download: $hits packets left from fast-path records; $local_if and $lan_host received $packets packets"
+	if [ "$hits" -lt 1000 ]; then
+		dump_dataplane_state
+		echo "flow cache did not carry the LAN download" >&2
+		exit 1
+	fi
+	if [ ! -s "$work_dir/flow-cache-samples.txt" ]; then
+		echo "bpftool or python3 missing: skipping the per-interface record checks" >&2
+		return
+	fi
+	if ! samples=$(flow_cache_sample_summary "$work_dir/flow-cache-samples.txt"); then
+		exit 1
+	fi
+	samples=$(printf '%s\n' "$samples" | tr '\n' ' ')
+	echo "peak TCP flow entries with a fast-path record per key ifindex: ${samples:-none}($local_if=$local_index, $lan_host=$lan_index)"
+	# Replies are recorded under the local WAN boundary, the LAN's packets
+	# under the port they enter.
+	for expected in "$local_index:$local_if" "$lan_index:$lan_host"; do
+		case " $samples" in
+			*" ${expected%%:*}="*) ;;
+			*)
+				echo "flow cache recorded no entry under ${expected#*:}" >&2
+				exit 1
+				;;
+		esac
+	done
+	# A PPPoE hook must see every packet entering its interface.
+	for hooked in "$wan_host" "$pipeline_if"; do
+		[ -e "/sys/class/net/$hooked/ifindex" ] || continue
+		hooked_index=$(cat "/sys/class/net/$hooked/ifindex")
+		case " $samples" in
+			*" $hooked_index="*)
+				echo "flow cache recorded entries under $hooked, where a PPPoE hook runs" >&2
+				exit 1
+				;;
+		esac
+	done
 }
 
 run_blackbox() {
@@ -648,8 +926,8 @@ EOF
 
 	ip -4 addr show dev "$local_if" | grep -q '198.18.0.2/32'
 	ip -4 route show dev "$local_if" | grep -q '8.8.8.8'
-	tc filter show dev "$pipeline_if" ingress | grep -q bpf
-	tc filter show dev "$wan_host" ingress | grep -q bpf
+	assert_tc_program_attached "$pipeline_if"
+	assert_tc_program_attached "$wan_host"
 	api_post_action traffic_stats '{"profile_key":"blackbox"}' >"$work_dir/traffic-before.json"
 	grep -q '"available":true' "$work_dir/traffic-before.json"
 	# Creating the WAN boundary can already send kernel IPv6 control traffic.
@@ -672,7 +950,7 @@ EOF
   "mtu": 1500,
   "wan_ref": "blackbox",
   "wan_egress_interface": $(json_string "$local_if"),
-  "protocol": "tcp+udp",
+  "protocol": "tcp+udp+icmp",
   "auto_egress_nat": true,
   "dhcpv4_enabled": false
 }
@@ -751,6 +1029,9 @@ EOF
 		exit 1
 	fi
 	iperf_pid=
+	fi
+	if [ "$VEER_PPPOE_BLACKBOX_LAN_TRAFFIC" = "1" ]; then
+		run_lan_traffic
 	fi
 	api_post_action traffic_stats '{"profile_key":"blackbox"}' >"$work_dir/traffic-after.json"
 	grep -q '"available":true' "$work_dir/traffic-after.json"

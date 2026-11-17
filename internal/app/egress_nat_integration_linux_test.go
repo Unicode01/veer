@@ -45,6 +45,7 @@ const (
 	egressNATHelperObservedEnv     = "FORWARD_EGRESS_NAT_OBSERVED_FILE"
 	egressNATHelperObservedFmtEnv  = "FORWARD_EGRESS_NAT_OBSERVED_FORMAT"
 	egressNATHelperStreamCyclesEnv = "FORWARD_EGRESS_NAT_STREAM_CYCLES"
+	egressNATHelperStreamEchoEnv   = "FORWARD_EGRESS_NAT_STREAM_ECHO"
 	egressNATTestToken             = dataplanePerfToken
 	egressNATBridgeAddr            = "198.18.0.1"
 	egressNATClientAddr            = "198.18.0.2"
@@ -377,6 +378,185 @@ func TestEgressNATTCActiveTCPRefreshesBothFlowEntries(t *testing.T) {
 	}
 	if observed := strings.TrimSpace(string(data)); observed != egressNATUplinkAddr {
 		t.Fatalf("streaming backend observed source IP %q, want %q", observed, egressNATUplinkAddr)
+	}
+}
+
+// tcL2CacheKeyV4 and tcL2CacheValueV4 mirror tc_l2_key_v4 / tc_l2_value_v4.
+type tcL2CacheKeyV4 struct {
+	IfIndex uint32
+	SrcAddr uint32
+	DstAddr uint32
+}
+
+type tcL2CacheValueV4 struct {
+	DstMAC     [6]byte
+	SrcMAC     [6]byte
+	OutIfIndex uint32
+	MaxLen     uint32
+}
+
+// Established flows send through the next hop their slow path recorded; that
+// record must follow a neighbour change within the fast-path window. Full-cone
+// flows share one front entry per source, so they take the same check.
+func TestEgressNATTCNextHopCacheFollowsNeighbourChange(t *testing.T) {
+	if os.Getenv(egressNATTestEnableEnv) != "1" {
+		t.Skipf("set %s=1 to run Linux egress NAT integration test", egressNATTestEnableEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+	if _, err := exec.LookPath("ip"); err != nil {
+		t.Skip("ip command is required")
+	}
+	for _, natType := range []string{egressNATTypeSymmetric, egressNATTypeFullCone} {
+		t.Run(natType, func(t *testing.T) {
+			testEgressNATTCNextHopCacheFollowsNeighbourChange(t, natType)
+		})
+	}
+}
+
+func testEgressNATTCNextHopCacheFollowsNeighbourChange(t *testing.T, natType string) {
+	t.Setenv(egressNATHelperStreamCyclesEnv, "240")
+	topology := setupEgressNATIntegrationTopology(t)
+	seedEgressNATIntegrationNeighbor(t, topology)
+
+	rt := newTCKernelRuleRuntime(&Config{})
+	defer rt.Close()
+	rule := buildEgressNATSyntheticRule(EgressNAT{
+		ID:              1,
+		ParentInterface: topology.BridgeIF,
+		OutInterface:    topology.UplinkHostIF,
+		OutSourceIP:     egressNATUplinkAddr,
+		Protocol:        "tcp",
+		NATType:         natType,
+		Enabled:         true,
+	}, topology.ChildHostIF, 1, "tcp")
+	results, err := rt.Reconcile([]Rule{rule})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result := results[rule.ID]; !result.Running || result.Engine != kernelEngineTC || result.Error != "" {
+		t.Fatalf("egress NAT result = %+v, want running tc", result)
+	}
+	assertEgressNATTCIfindexHints(t, rt, topology)
+	cache := rt.coll.Maps["tc_l2_cache_v4"]
+	if cache == nil {
+		t.Fatal("TC tc_l2_cache_v4 map is unavailable")
+	}
+	uplink, err := net.InterfaceByName(topology.UplinkHostIF)
+	if err != nil {
+		t.Fatalf("uplink interface: %v", err)
+	}
+	backendMAC, err := net.ParseMAC(mustReadDataplanePerfNetnsMAC(t, topology.BackendNS, topology.BackendNSIF))
+	if err != nil {
+		t.Fatalf("parse backend MAC: %v", err)
+	}
+	backendAddr := binary.BigEndian.Uint32(net.ParseIP(egressNATBackendAddr).To4())
+	clientAddr := binary.BigEndian.Uint32(net.ParseIP(egressNATClientAddr).To4())
+
+	targetAddr := net.JoinHostPort(egressNATBackendAddr, strconv.Itoa(egressNATProbePort))
+	observedFile := filepath.Join(t.TempDir(), "observed-stream.txt")
+	backendCmd, backendLogs := startEgressNATBackendHelperInNamespace(t, topology.BackendNS, "tcp", targetAddr, observedFile)
+	t.Cleanup(func() {
+		if backendCmd != nil && backendCmd.ProcessState == nil {
+			stopDataplanePerfHelper(t, backendCmd)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	clientCmd := exec.CommandContext(ctx, "ip", "netns", "exec", topology.ClientNS, os.Args[0], "-test.run", "TestEgressNATIntegrationHelperProcess", "-test.v=false")
+	clientCmd.Env = append(os.Environ(),
+		egressNATHelperEnv+"=1",
+		egressNATHelperRoleEnv+"="+egressNATHelperRoleClient,
+		egressNATHelperProtocolEnv+"=tcp",
+		egressNATHelperTargetAddrEnv+"="+targetAddr,
+	)
+	var clientLogs bytes.Buffer
+	clientCmd.Stdout = &clientLogs
+	clientCmd.Stderr = &clientLogs
+	if err := clientCmd.Start(); err != nil {
+		t.Fatalf("start streaming client helper: %v", err)
+	}
+	t.Cleanup(func() {
+		if clientCmd.Process != nil && clientCmd.ProcessState == nil {
+			_ = clientCmd.Process.Kill()
+		}
+	})
+
+	// waitFor polls the cache until match reports the wanted entry.
+	waitFor := func(what string, match func(tcL2CacheKeyV4, tcL2CacheValueV4) bool) {
+		t.Helper()
+		deadline := time.Now().Add(2500 * time.Millisecond)
+		for {
+			var key tcL2CacheKeyV4
+			var value tcL2CacheValueV4
+			var seen []string
+			iter := cache.Iterate()
+			for iter.Next(&key, &value) {
+				if match(key, value) {
+					return
+				}
+				seen = append(seen, fmt.Sprintf("%+v=>%s/%d", key, net.HardwareAddr(value.DstMAC[:]), value.OutIfIndex))
+			}
+			if err := iter.Err(); err != nil {
+				t.Fatalf("iterate tc_l2_cache_v4: %v", err)
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: tc_l2_cache_v4 = %v\nclient logs:\n%s\nbackend logs:\n%s", what, seen, clientLogs.String(), backendLogs.String())
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	forwardHop := func(mac net.HardwareAddr) func(tcL2CacheKeyV4, tcL2CacheValueV4) bool {
+		return func(key tcL2CacheKeyV4, value tcL2CacheValueV4) bool {
+			return key.IfIndex == uint32(uplink.Index) && key.DstAddr == backendAddr &&
+				value.OutIfIndex == uint32(uplink.Index) && bytes.Equal(value.DstMAC[:], mac)
+		}
+	}
+
+	waitFor("forward next hop was not recorded", forwardHop(backendMAC))
+	waitFor("reply next hop was not recorded", func(key tcL2CacheKeyV4, value tcL2CacheValueV4) bool {
+		return key.DstAddr == clientAddr && value.OutIfIndex != 0
+	})
+
+	moved := net.HardwareAddr{0x02, 0x00, 0x5e, 0x10, 0x20, 0x30}
+	mustRunDataplanePerfCmd(t, "ip", "neigh", "replace", egressNATBackendAddr, "lladdr", moved.String(), "dev", topology.UplinkHostIF, "nud", "permanent")
+	waitFor("forward next hop did not follow the neighbour change", forwardHop(moved))
+	mustRunDataplanePerfCmd(t, "ip", "neigh", "replace", egressNATBackendAddr, "lladdr", backendMAC.String(), "dev", topology.UplinkHostIF, "nud", "permanent")
+	waitFor("forward next hop did not return to the restored neighbour", forwardHop(backendMAC))
+
+	if err := clientCmd.Wait(); err != nil {
+		t.Fatalf("streaming client helper failed: %v\nclient logs:\n%s\nbackend logs:\n%s", err, clientLogs.String(), backendLogs.String())
+	}
+	waitForEgressNATHelperExit(t, backendCmd, "tcp-stream", backendLogs.String())
+}
+
+// The ingress interface of an egress NAT rule holds only the wildcard rule
+// form, and its parent hint agrees with the reply parent map.
+func assertEgressNATTCIfindexHints(t *testing.T, rt *linuxKernelRuleRuntime, topology egressNATIntegrationTopology) {
+	t.Helper()
+	hintsMap := rt.coll.Maps[kernelTCIfindexHintsMapName]
+	if hintsMap == nil {
+		t.Fatalf("TC %s map is unavailable", kernelTCIfindexHintsMapName)
+	}
+	for _, name := range []string{topology.ChildHostIF, topology.UplinkHostIF} {
+		link, err := net.InterfaceByName(name)
+		if err != nil {
+			t.Fatalf("interface %s: %v", name, err)
+		}
+		var hints uint32
+		if err := hintsMap.Lookup(uint32(link.Index), &hints); err != nil {
+			t.Fatalf("lookup %s[%s]: %v", kernelTCIfindexHintsMapName, name, err)
+		}
+		wantForms := uint32(0)
+		if name == topology.ChildHostIF {
+			wantForms = kernelTCIfindexHintRuleAny
+		}
+		var parent uint32
+		hasParent := rt.coll.Maps[kernelIfParentMapName].Lookup(uint32(link.Index), &parent) == nil
+		if hints&kernelTCIfindexHintKnown == 0 || hints&0xff != wantForms || (hints&kernelTCIfindexHintHasParent != 0) != hasParent {
+			t.Fatalf("%s[%s] = %#x, want known, rule forms %#x, parent %v", kernelTCIfindexHintsMapName, name, hints, wantForms, hasParent)
+		}
 	}
 }
 
@@ -1238,11 +1418,29 @@ func runEgressNATBackendHelper() error {
 			return err
 		}
 		if streamCycles > 0 {
+			// A client that echoes each chunk back gets its data read and
+			// discarded until it closes, so neither side resets the stream.
+			var echoes chan error
+			if egressNATHelperStreamEcho() {
+				echoes = make(chan error, 1)
+				go func() {
+					_, err := io.Copy(io.Discard, conn)
+					echoes <- err
+				}()
+			}
 			for range streamCycles {
 				if _, err := io.Copy(conn, bytes.NewReader(buf[:n])); err != nil {
 					return err
 				}
 				time.Sleep(25 * time.Millisecond)
+			}
+			if echoes != nil {
+				if tcpConn, ok := conn.(*net.TCPConn); ok {
+					if err := tcpConn.CloseWrite(); err != nil {
+						return err
+					}
+				}
+				return <-echoes
 			}
 			return nil
 		}
@@ -1364,12 +1562,18 @@ func runEgressNATClientHelper() error {
 		}
 		buf := make([]byte, len(payload))
 		if streamCycles > 0 {
+			echo := egressNATHelperStreamEcho()
 			for range streamCycles {
 				if _, err := io.ReadFull(conn, buf); err != nil {
 					return err
 				}
 				if !bytes.Equal(buf, payload) {
 					return fmt.Errorf("tcp stream echo mismatch: got %q want %q", string(buf), string(payload))
+				}
+				if echo {
+					if _, err := conn.Write(buf); err != nil {
+						return err
+					}
 				}
 			}
 			return nil
@@ -1382,6 +1586,12 @@ func runEgressNATClientHelper() error {
 		}
 		return nil
 	}
+}
+
+// egressNATHelperStreamEcho reports whether a streaming client sends each
+// chunk it receives back, so the stream carries data both ways.
+func egressNATHelperStreamEcho() bool {
+	return strings.TrimSpace(os.Getenv(egressNATHelperStreamEchoEnv)) == "1"
 }
 
 func egressNATHelperStreamCycles() (int, error) {

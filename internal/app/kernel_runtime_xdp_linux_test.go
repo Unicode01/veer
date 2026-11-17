@@ -618,6 +618,7 @@ func TestXDPRuntimeNATStateForDecisionIncludesPreparedNATMapsWithoutLiveEntries(
 }
 
 func TestNewXDPKernelRuleRuntimeDisablesGenericAttachByDefault(t *testing.T) {
+	stubHostEphemeralPortRange(t, 32768, 60999, nil)
 	rt, ok := newXDPKernelRuleRuntime(nil).(*xdpKernelRuleRuntime)
 	if !ok {
 		t.Fatal("newXDPKernelRuleRuntime(nil) did not return *xdpKernelRuleRuntime")
@@ -625,8 +626,9 @@ func TestNewXDPKernelRuleRuntimeDisablesGenericAttachByDefault(t *testing.T) {
 	if rt.allowGenericAttach {
 		t.Fatal("allowGenericAttach = true, want false by default")
 	}
-	if rt.natPortMin != kernelDefaultNATPortMin || rt.natPortMax != kernelDefaultNATPortMax {
-		t.Fatalf("default nat port range = (%d, %d), want (%d, %d)", rt.natPortMin, rt.natPortMax, kernelDefaultNATPortMin, kernelDefaultNATPortMax)
+	// The default pool less Linux's default ephemeral range.
+	if rt.natPortMin != kernelDefaultNATPortMin || rt.natPortMax != 32767 {
+		t.Fatalf("default nat port range = (%d, %d), want (%d, 32767)", rt.natPortMin, rt.natPortMax, kernelDefaultNATPortMin)
 	}
 
 	rt, ok = newXDPKernelRuleRuntime(&Config{
@@ -648,8 +650,8 @@ func TestNewXDPKernelRuleRuntimeDisablesGenericAttachByDefault(t *testing.T) {
 	if !ok {
 		t.Fatal("newXDPKernelRuleRuntime(nat-range config) did not return *xdpKernelRuleRuntime")
 	}
-	if rt.natPortMin != 31000 || rt.natPortMax != 41000 {
-		t.Fatalf("configured nat port range = (%d, %d), want (31000, 41000)", rt.natPortMin, rt.natPortMax)
+	if rt.natPortMin != 31000 || rt.natPortMax != 32767 {
+		t.Fatalf("configured nat port range = (%d, %d), want (31000, 32767)", rt.natPortMin, rt.natPortMax)
 	}
 }
 

@@ -163,7 +163,7 @@ jobs:
           sh scripts/build-all-ebpf.sh
           go test ./internal/app ./internal/kernelcap ./internal/tproxysetup -count=1
       - name: Verify opt-in WireGuard WAN and core NAT
-        run: sudo env "PATH=$PATH" VEER_RUN_WIREGUARD_TESTS=1 go test ./internal/app -run '^TestWireGuardMeshLinuxIntegration$' -count=1 -v -timeout=5m
+        run: sudo env "PATH=$PATH" VEER_RUN_WIREGUARD_TESTS=1 go test ./internal/app -run '^TestVPNWireGuardLinuxIntegration$' -count=1 -v -timeout=5m
       - name: Verify real deployment unit and namespace persistence
         run: sudo env "PATH=$PATH" bash scripts/verify-service-platform.sh
       - name: Verify native core dataplane
@@ -222,8 +222,44 @@ jobs:
           path: ${{ runner.temp }}/veer-vm-logs
           retention-days: 14
 
-  optional-kernel-module:
+  kernel-load-matrix:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install VM and eBPF build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-x86 busybox-static clang llvm linux-libc-dev
+      - name: Build eBPF objects and the test binary
+        run: |
+          sh scripts/build-ebpf.sh
+          CGO_ENABLED=0 go test -c -o /tmp/veer-kernel-load.test ./internal/app
+      - name: Load the embedded eBPF collections on distribution kernels
+        run: |
+          # The runner user cannot normally open /dev/kvm; use the available KVM device.
+          sudo python3 scripts/verify-kernel-load-matrix.py --test-binary /tmp/veer-kernel-load.test \
+            --output "${RUNNER_TEMP}/kernel-load-logs"
+      - name: Preserve kernel load logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernel-load-matrix
+          path: ${{ runner.temp }}/kernel-load-logs
+          retention-days: 14
+
+  optional-kernel-module:
+    strategy:
+      fail-fast: false
+      matrix:
+        # The module and its packet paths depend on the runner's kernel:
+        # ubuntu-24.04 runs 7.0.0-1017-azure and ubuntu-26.04 7.0.0-1019-azure,
+        # whose BPF JIT oopses on a tail call made in a subprogram (see
+        # verify-kfuncs-packets.py). Check both while ubuntu-latest moves.
+        os: [ubuntu-24.04, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
@@ -233,5 +269,29 @@ jobs:
           cache: true
       - name: Install matching kernel build and network test dependencies
         run: sudo apt-get update && sudo apt-get install -y linux-headers-$(uname -r) build-essential clang llvm pahole kmod iproute2 util-linux iputils-ping ethtool wireguard-tools iperf3 curl tcpdump
-      - name: Verify optional module and both plugin paths
-        run: sudo env "PATH=$PATH" sh scripts/verify-kernel-module.sh
+      # One step per phase: GitHub keeps each step's start and end time even
+      # when the runner stops responding and the job's log is lost. To see a
+      # kernel crash, scripts/verify-kfuncs-guest.sh runs a packet check in a
+      # QEMU guest on the runner's own kernel and keeps its console.
+      - name: Build the module, eBPF objects and test binaries
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh build
+      - name: PPPoE packets through the plugin loader, plain BPF, module not loaded
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh packets-bpf
+      - name: Load the module
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh load
+      - name: Module tests
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh module
+      - name: PPPoE packets through the plugin loader, kfuncs
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh packets-kfuncs
+      - name: PPPoE packets and TC NAT through Veer
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh packets-veer
+      - name: WireGuard
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh wireguard
+      - name: VPN cores on the kfuncs path
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh vpn
+      - name: Unload the module
+        if: always()
+        run: sudo env "PATH=$PATH" VEER_KMOD_WORK="$RUNNER_TEMP/kmod" sh scripts/verify-kernel-module.sh unload
+      - name: Kernel log
+        if: always()
+        run: sudo dmesg | tail -n 200

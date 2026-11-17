@@ -33,6 +33,9 @@ func TestPluginManagedProcessHelper(t *testing.T) {
 		_, _ = io.WriteString(os.Stdout, strings.Repeat("x", 200000))
 	case "fail":
 		os.Exit(9)
+	case "fail-later":
+		time.Sleep(600 * time.Millisecond)
+		os.Exit(9)
 	case "tree":
 		child := exec.Command("/bin/sleep", "60")
 		if child.Start() != nil {
@@ -219,6 +222,50 @@ func TestPluginManagedProcessRestartBudgetAndBoundedLogs(t *testing.T) {
 	}
 }
 
+// A run that lasts pluginProcessStableRun ends a crash streak: a core that
+// fails now and then is restarted each time, while runs that fail at once
+// still exhaust the budget (TestPluginManagedProcessRestartBudgetAndBoundedLogs).
+func TestPluginManagedProcessStableRunRefillsRestartBudget(t *testing.T) {
+	stable := pluginProcessStableRun
+	pluginProcessStableRun = 300 * time.Millisecond
+	t.Cleanup(func() { pluginProcessStableRun = stable })
+	r := &pluginProcessRegistry{}
+	defer r.CloseAll()
+
+	req := managedTestRequest(t, "fail-later")
+	req.Restart = "on-failure"
+	req.MaxRestarts = 1
+	if _, err := r.Start("one", "v1", req, nil); err != nil {
+		t.Fatal(err)
+	}
+	p := r.get("one", "core")
+	// Every run outlasts the stable run, so every failure starts a new streak
+	// and is restarted after the first backoff step.
+	waitManaged(t, p, func(s pluginProcessStatus) bool { return s.Starts >= 3 })
+	if status := r.Stop("one", "core"); status.State != "stopped" {
+		t.Fatalf("stop: %+v", status)
+	}
+
+	req = managedTestRequest(t, "sleep")
+	req.MaxRestarts = 1
+	if _, err := r.Start("one", "v1", req, nil); err != nil {
+		t.Fatal(err)
+	}
+	p = r.get("one", "core")
+	if _, err := p.requestRestart(); err != nil {
+		t.Fatal(err)
+	}
+	waitManaged(t, p, func(s pluginProcessStatus) bool { return s.State == "running" && s.Starts == 2 })
+	if _, err := p.requestRestart(); err == nil {
+		t.Fatal("a short run refilled the restart budget")
+	}
+	time.Sleep(pluginProcessStableRun + 100*time.Millisecond)
+	if _, err := p.requestRestart(); err != nil {
+		t.Fatalf("a stable run did not refill the restart budget: %v", err)
+	}
+	waitManaged(t, p, func(s pluginProcessStatus) bool { return s.State == "running" && s.Starts == 3 })
+}
+
 func TestPluginManagedProcessStopKillsDescendants(t *testing.T) {
 	r := &pluginProcessRegistry{}
 	defer r.CloseAll()
@@ -237,18 +284,39 @@ func TestPluginManagedProcessStopKillsDescendants(t *testing.T) {
 		t.Fatal("child did not start")
 	}
 	r.Stop("one", "core")
-	// A descendant can briefly remain as a zombie (Z) until PID 1 reaps it,
-	// or as a dead task (X) whose /proc entry is being removed.
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", child))
-	if err == nil {
-		stat := string(data)
-		state := ""
-		if i := strings.LastIndex(stat, ") "); i >= 0 && i+3 <= len(stat) {
-			state = stat[i+2 : i+3]
+	// Stop returns once the descendant has exited. It can still be a zombie
+	// until PID 1 reaps it, which managedProcessAlive counts as gone.
+	if managedProcessAlive(child) {
+		stat, _ := os.ReadFile(fmt.Sprintf("/proc/%d/stat", child))
+		t.Fatal("descendant still alive", string(stat))
+	}
+}
+
+func TestPluginManagedProcessGroupRunningIgnoresZombies(t *testing.T) {
+	cmd := exec.Command("/bin/sleep", "60")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pgid := cmd.Process.Pid
+	if !pluginProcessGroupRunning(pgid) {
+		t.Fatal("running group reported as gone")
+	}
+	_ = cmd.Process.Kill()
+	// Not reaped yet: the member stays a zombie of this test.
+	deadline := time.Now().Add(3 * time.Second)
+	for pluginProcessGroupRunning(pgid) {
+		if time.Now().After(deadline) {
+			t.Fatal("killed group still reported as running")
 		}
-		if state != "Z" && state != "X" {
-			t.Fatal("descendant still alive", stat)
-		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := syscall.Kill(-pgid, 0); err != nil {
+		t.Fatal("expected the zombie to keep the group:", err)
+	}
+	_ = cmd.Wait()
+	if pluginProcessGroupRunning(pgid) {
+		t.Fatal("reaped group reported as running")
 	}
 }
 

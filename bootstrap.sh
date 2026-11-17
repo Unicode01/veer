@@ -57,7 +57,7 @@ usage() {
                       设为 1 时为当前内核构建 veer_kfuncs.ko，需当前内核 headers、make 和编译器；
                       配合 VEER_INSTALL_KERNEL_MODULE=1 安装
   VEER_REF             源码构建拉取的 Git ref，默认 main
-  VEER_GO_VERSION      安装的 Go 版本，默认 1.26.10
+  VEER_GO_VERSION      安装的 Go 版本，默认 1.26.11
   VEER_GO_SHA256       自定义 Go 版本/构建的官方 tar.gz SHA-256
   VEER_GO_REGION       Go 下载区域策略: auto/cn/global，默认 auto
   VEER_GO_BASE_URL     显式覆盖 Go 下载源前缀，例如 https://mirror.example.com/golang
@@ -126,7 +126,7 @@ FORWARD_INSTALL_MODE="${VEER_INSTALL_MODE:-auto}"
 FORWARD_VERSION="${VEER_VERSION:-latest}"
 FORWARD_RELEASE_BASE_URL="${VEER_RELEASE_BASE_URL:-}"
 FORWARD_BUILD_KERNEL_MODULE="${VEER_BUILD_KERNEL_MODULE:-0}"
-FORWARD_GO_VERSION="${VEER_GO_VERSION:-${FORWARD_GO_VERSION:-1.26.10}}"
+FORWARD_GO_VERSION="${VEER_GO_VERSION:-${FORWARD_GO_VERSION:-1.26.11}}"
 FORWARD_GO_SHA256="${VEER_GO_SHA256:-${FORWARD_GO_SHA256:-}}"
 FORWARD_GO_REGION="${VEER_GO_REGION:-${FORWARD_GO_REGION:-auto}}"
 FORWARD_GO_BASE_URL="${VEER_GO_BASE_URL:-${FORWARD_GO_BASE_URL:-}}"
@@ -1048,11 +1048,11 @@ expected_go_tarball_sha256() {
     fi
 
     case "${FORWARD_GO_VERSION}/${GO_TARBALL_ARCH}" in
-        1.26.10/amd64)
-            printf '%s\n' 'ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5'
+        1.26.11/amd64)
+            printf '%s\n' '9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec'
             ;;
-        1.26.10/arm64)
-            printf '%s\n' '3f4227ce7b206a513e794f1393adb473a07b46e94d18bd15d1c684bbb7319797'
+        1.26.11/arm64)
+            printf '%s\n' '6c2f29b458b5add0835f18b776f69c8881a6d88428f1484a6da55755e620757e'
             ;;
         *)
             return 1
@@ -1302,6 +1302,37 @@ build_release() {
     ok "构建完成"
 }
 
+# Tells, before deploy.sh restarts the service, whether the new binary can
+# adopt the kernel maps the running daemon preserves, or the hot restart falls
+# back to fresh maps: a cold restart that drops kernel NAT connections and
+# per-rule counters. It only reports; the deploy goes ahead either way.
+check_hot_restart() {
+    local binary="${FORWARD_DEPLOY_DIR}/veer-linux-${GOARCH}"
+    local args=(hot-restart check --install-dir "${INSTALL_DIR:-/opt/veer}")
+    local output=""
+    local line=""
+    local verdict=""
+
+    [[ -x "${binary}" ]] || return 0
+    if array_contains "--no-inherit-stats" "${DEPLOY_ARGS[@]}"; then
+        args+=(--no-inherit-stats)
+    fi
+    if ! output="$("${binary}" "${args[@]}" 2>&1)"; then
+        warn "热更新预检未完成，不影响部署: ${output##*$'\n'}"
+        return 0
+    fi
+    while IFS= read -r line; do
+        printf '        %s\n' "${line}"
+    done <<< "${output}"
+    verdict="$(printf '%s\n' "${output}" | sed -n 's/^verdict: *\([a-z]*\).*/\1/p')"
+    case "${verdict}" in
+        hot) ok "热更新预检: 新版本可接管内核 map，NAT 连接与规则计数会保留" ;;
+        cold) warn "热更新预检: 本次热更新会回退为冷启动，内核 NAT 连接与规则计数将丢失" ;;
+        nothing) info "热更新预检: 没有需要保留的内核状态" ;;
+        *) warn "热更新预检: 无法判断能否接管内核 map，见上方输出" ;;
+    esac
+}
+
 run_deploy() {
     cd "${FORWARD_DEPLOY_DIR}"
     VEER_INSTALL_PLUGINS="${FORWARD_INSTALL_PLUGINS}" bash ./deploy.sh "${DEPLOY_ARGS[@]}"
@@ -1355,6 +1386,8 @@ main() {
         set_step "构建内核扩展"
         build_release_kernel_module
     fi
+    set_step "热更新预检"
+    check_hot_restart
     set_step "执行部署"
     run_deploy
 }

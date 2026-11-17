@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -21,6 +22,14 @@ type settings struct {
 	Interfaces           []string
 	EgressInterfaces     []string
 	Entries              []struct{ Key, Value string }
+	// TCX attaches through tcx, as the Veer core does on Linux 6.6+.
+	TCX bool
+	// TailCalls fill program arrays of the object, so a test program can
+	// tail-call another the way the Veer core reaches plugins.
+	TailCalls []struct {
+		Map, Program string
+		Index        uint32
+	}
 }
 
 func main() {
@@ -67,10 +76,27 @@ func run() error {
 			return e
 		}
 	}
+	for _, t := range c.TailCalls {
+		m, p := coll.Maps[t.Map], coll.Programs[t.Program]
+		if m == nil || p == nil {
+			return fmt.Errorf("tail call map %q or program %q missing from object", t.Map, t.Program)
+		}
+		if e = m.Put(t.Index, p); e != nil {
+			return e
+		}
+	}
 	for _, name := range append(append([]string{}, c.Interfaces...), c.EgressInterfaces...) {
 		link, e := netlink.LinkByName(name)
 		if e != nil {
 			return e
+		}
+		if c.TCX {
+			closer, e := attachTCX(link.Attrs().Index, coll.Programs[c.Program], contains(c.EgressInterfaces, name))
+			if e != nil {
+				return e
+			}
+			defer closer.Close()
+			continue
 		}
 		a := netlink.QdiscAttrs{LinkIndex: link.Attrs().Index, Handle: netlink.MakeHandle(0xffff, 0), Parent: netlink.HANDLE_CLSACT}
 		q := &netlink.GenericQdisc{QdiscAttrs: a, QdiscType: "clsact"}
@@ -94,4 +120,21 @@ func run() error {
 	signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
 	<-ch
 	return nil
+}
+
+func attachTCX(ifindex int, prog *ebpf.Program, egress bool) (link.Link, error) {
+	attach := ebpf.AttachTCXIngress
+	if egress {
+		attach = ebpf.AttachTCXEgress
+	}
+	return link.AttachTCX(link.TCXOptions{Interface: ifindex, Program: prog, Attach: attach})
+}
+
+func contains(items []string, item string) bool {
+	for _, current := range items {
+		if current == item {
+			return true
+		}
+	}
+	return false
 }

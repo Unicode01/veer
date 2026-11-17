@@ -3,6 +3,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/cilium/ebpf"
@@ -290,6 +291,7 @@ func TestValidateKernelCollectionSpecRejectsIncompleteIPv4FullNATSplitSet(t *tes
 			kernelForwardFullNATProgramName:         &ebpf.ProgramSpec{},
 			kernelForwardFullNATExistingProgramName: &ebpf.ProgramSpec{},
 			kernelForwardEgressNATProgramName:       &ebpf.ProgramSpec{},
+			kernelForwardEgressNATNewProgramName:    &ebpf.ProgramSpec{},
 			kernelReplyDispatchProgramName:          &ebpf.ProgramSpec{},
 			kernelReplyTransparentProgramName:       &ebpf.ProgramSpec{},
 			kernelReplyFullNATProgramName:           &ebpf.ProgramSpec{},
@@ -309,12 +311,14 @@ func TestValidateKernelCollectionSpecRejectsIncompleteIPv4FullNATSplitSet(t *tes
 			kernelNATConfigMapName:            &ebpf.MapSpec{},
 			kernelStatsMapName:                &ebpf.MapSpec{},
 			kernelOccupancyMapName:            &ebpf.MapSpec{},
-			kernelTCProgramChainMapName:       &ebpf.MapSpec{},
+			kernelTCProgramChainMapName:       &ebpf.MapSpec{Type: ebpf.ProgramArray, MaxEntries: tcProgramChainV4MaxEntries},
+			kernelTCEgressNATNewChainMapName:  &ebpf.MapSpec{},
 		},
 	}
 
-	if err := validateKernelCollectionSpec(spec); err == nil {
-		t.Fatal("validateKernelCollectionSpec() error = nil, want incomplete IPv4 full-nat split set error")
+	err := validateKernelCollectionSpec(spec)
+	if err == nil || !strings.Contains(err.Error(), "full-nat split") {
+		t.Fatalf("validateKernelCollectionSpec() error = %v, want incomplete IPv4 full-nat split set error", err)
 	}
 }
 

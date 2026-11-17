@@ -163,6 +163,90 @@ func kernelModuleInfoField(data []byte, key string) string {
 	return ""
 }
 
+const kernelHelperSysModuleDir = "/sys/module/" + optionalKernelModuleName
+
+// kernelHelperModuleBuild names the sources a module was built from: its
+// MODULE_VERSION and the srcversion modpost hashes from its source files.
+// The kernel shows both under /sys/module/veer_kfuncs once it is loaded.
+type kernelHelperModuleBuild struct {
+	Version    string
+	SrcVersion string
+}
+
+func (build kernelHelperModuleBuild) describe() string {
+	version, srcversion := build.Version, build.SrcVersion
+	if version == "" {
+		version = "unknown"
+	}
+	if srcversion == "" {
+		srcversion = "unknown"
+	}
+	return "version " + version + ", srcversion " + srcversion
+}
+
+func readKernelHelperModuleBuild(name string) (kernelHelperModuleBuild, error) {
+	file, err := elf.Open(name)
+	if err != nil {
+		return kernelHelperModuleBuild{}, err
+	}
+	defer file.Close()
+	section := file.Section(".modinfo")
+	if section == nil {
+		return kernelHelperModuleBuild{}, errors.New("no .modinfo section")
+	}
+	data, err := section.Data()
+	if err != nil {
+		return kernelHelperModuleBuild{}, err
+	}
+	return kernelHelperModuleBuild{
+		Version:    kernelModuleInfoField(data, "version"),
+		SrcVersion: kernelModuleInfoField(data, "srcversion"),
+	}, nil
+}
+
+// loadedKernelHelperModuleBuild reads the loaded module from its sysfs
+// directory; ok is false when the module is not loaded.
+func loadedKernelHelperModuleBuild(dir string) (build kernelHelperModuleBuild, ok bool) {
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return kernelHelperModuleBuild{}, false
+	}
+	read := func(name string) string {
+		data, _ := os.ReadFile(filepath.Join(dir, name))
+		return strings.TrimSpace(string(data))
+	}
+	return kernelHelperModuleBuild{Version: read("version"), SrcVersion: read("srcversion")}, true
+}
+
+// kernelHelperFullRestartHint says how a newer module file replaces a loaded
+// one: Veer loads the file only when no module is loaded, and a hot restart
+// keeps the loaded module, so the file waits for a full restart that unloads
+// it (only when Veer loaded it and no BPF program still holds it).
+const kernelHelperFullRestartHint = "a hot restart keeps the loaded module; a full restart " +
+	"(systemctl restart veer, which drops kernel NAT and flow state and restarts plugin processes) " +
+	"or a reboot loads the installed one; if it stays loaded after a full restart, stop Veer and rmmod " +
+	optionalKernelModuleName
+
+// kernelHelperLoadedMatches reports whether the loaded module was built from
+// the installed file's sources; known is false when either srcversion is
+// missing.
+func kernelHelperLoadedMatches(loaded, installed kernelHelperModuleBuild) (matches, known bool) {
+	if loaded.SrcVersion == "" || installed.SrcVersion == "" {
+		return false, false
+	}
+	return loaded.SrcVersion == installed.SrcVersion, true
+}
+
+// kernelHelperStaleDetail describes a loaded module built from other sources
+// than the installed file at path, or returns "" when they match or cannot be
+// compared.
+func kernelHelperStaleDetail(loaded, installed kernelHelperModuleBuild, path string) string {
+	if matches, known := kernelHelperLoadedMatches(loaded, installed); matches || !known {
+		return ""
+	}
+	return fmt.Sprintf("the loaded %s (%s) is not %s (%s); %s",
+		optionalKernelModuleName, loaded.describe(), path, installed.describe(), kernelHelperFullRestartHint)
+}
+
 // validateKernelHelperModuleFile checks what finit_module and kfunc
 // registration need before the file replaces an installed module.
 func validateKernelHelperModuleFile(name, release string) error {
@@ -287,6 +371,8 @@ type kernelHelperBuildSystem struct {
 	running  func() (string, error)
 	lookPath func(string) (string, error)
 	run      func(dir string, env []string, stdout, stderr io.Writer) error
+	// loaded reads the loaded module; ok is false when none is loaded.
+	loaded func() (build kernelHelperModuleBuild, ok bool)
 }
 
 func defaultKernelHelperBuildSystem() kernelHelperBuildSystem {
@@ -303,7 +389,35 @@ func defaultKernelHelperBuildSystem() kernelHelperBuildSystem {
 			cmd.Stderr = stderr
 			return cmd.Run()
 		},
+		loaded: func() (kernelHelperModuleBuild, bool) {
+			return loadedKernelHelperModuleBuild(kernelHelperSysModuleDir)
+		},
 	}
+}
+
+// kernelHelperLoadHint tells what the module file at path needs before the
+// running kernel uses it, given the module loaded now.
+func kernelHelperLoadHint(system kernelHelperBuildSystem, path string) string {
+	var loaded kernelHelperModuleBuild
+	isLoaded := false
+	if system.loaded != nil {
+		loaded, isLoaded = system.loaded()
+	}
+	if !isLoaded {
+		return "restart the Veer service to load it; PPPoE sessions move to the single-port boundary on their next redial"
+	}
+	installed, err := readKernelHelperModuleBuild(path)
+	if err != nil {
+		return "a module is already loaded and " + path + " cannot be compared with it (" + err.Error() + "); " + kernelHelperFullRestartHint
+	}
+	matches, known := kernelHelperLoadedMatches(loaded, installed)
+	switch {
+	case matches:
+		return "the loaded module is built from the same sources (srcversion " + loaded.SrcVersion + "); no restart is needed"
+	case !known:
+		return "a module is already loaded and its sources cannot be compared (loaded " + loaded.describe() + ", installed " + installed.describe() + "); " + kernelHelperFullRestartHint
+	}
+	return "the loaded module (" + loaded.describe() + ") is not this build (" + installed.describe() + "); " + kernelHelperFullRestartHint
 }
 
 func buildKernelHelperModule(options kernelHelperBuildOptions, system kernelHelperBuildSystem, stdout, stderr io.Writer) error {
@@ -328,6 +442,9 @@ func buildKernelHelperModule(options kernelHelperBuildOptions, system kernelHelp
 	dest := kernelHelperModulePath(options.InstallDir, release)
 	if kernelHelperRegularFile(dest) && !options.Force {
 		fmt.Fprintf(stdout, "%s is already installed; pass --force to rebuild it\n", dest)
+		if release == running {
+			fmt.Fprintln(stdout, kernelHelperLoadHint(system, dest))
+		}
 		return nil
 	}
 	kdir := options.KDIR
@@ -380,7 +497,7 @@ func buildKernelHelperModule(options kernelHelperBuildOptions, system kernelHelp
 	}
 	fmt.Fprintf(stdout, "installed %s\n", installed)
 	if release == running {
-		fmt.Fprintln(stdout, "restart the Veer service to load it; PPPoE sessions move to the single-port boundary on their next redial")
+		fmt.Fprintln(stdout, kernelHelperLoadHint(system, installed))
 	} else {
 		fmt.Fprintf(stdout, "Veer loads it after the host boots kernel %s\n", release)
 	}

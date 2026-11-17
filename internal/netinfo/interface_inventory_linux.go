@@ -45,9 +45,16 @@ func LoadInterfaceInfos() ([]InterfaceInfo, error) {
 		addrs, err := netlink.AddrList(link, unix.AF_UNSPEC)
 		if err == nil {
 			seen := make(map[string]struct{})
+			seenNetworks := make(map[string]struct{})
 			for _, addr := range addrs {
 				if !isVisibleInterfaceIP(addr.IP) {
 					continue
+				}
+				if address, ok := normalizeHostInterfaceAddress(addr.IP, addr.IPNet); ok && address.Family == ipFamilyIPv4 {
+					if _, dup := seenNetworks[address.CIDR]; !dup {
+						seenNetworks[address.CIDR] = struct{}{}
+						info.IPv4Networks = append(info.IPv4Networks, address.CIDR)
+					}
 				}
 				text := canonicalIPLiteral(addr.IP)
 				if _, ok := seen[text]; ok {
@@ -59,6 +66,9 @@ func LoadInterfaceInfos() ([]InterfaceInfo, error) {
 		}
 		if len(info.Addrs) > 0 {
 			sort.Strings(info.Addrs)
+		}
+		if len(info.IPv4Networks) > 0 {
+			sort.Strings(info.IPv4Networks)
 		}
 		result = append(result, info)
 	}
