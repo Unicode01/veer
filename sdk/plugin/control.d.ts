@@ -1246,12 +1246,13 @@ declare global {
     binarySelect(request: {id: string; version: string}): VeerBinaryStatus;
     /** Selected versions and versions referenced by managed processes cannot be removed. */
     binaryRemove(request: {id: string; version: string}): VeerBinaryStatus;
-    /** Linux main context only. Config is private (0600), {config} expands to its path. */
+    /** Linux main context only. Config is private (0600), {config} expands to its path.
+     * max_restarts bounds consecutive restarts: a run of 10 minutes or more refills it. */
     start(request: {id: string; command: string; args?: string[]; stdin?: string; config?: string;
       restart?: 'never' | 'on-failure'; max_restarts?: number; stop_timeout_ms?: number}): VeerManagedProcessStatus;
     status(id: string): VeerManagedProcessStatus;
     stop(id: string): VeerManagedProcessStatus;
-    /** Health recovery shares max_restarts with failed exits; does not reset its budget. */
+    /** Health recovery shares max_restarts with failed exits; does not reset an exhausted budget. */
     restart(id: string): VeerManagedProcessStatus;
     list(): VeerManagedProcessStatus[];
     /** Output can contain secrets. Never include it in ordinary plugin status. */

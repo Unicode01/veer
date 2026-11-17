@@ -86,7 +86,15 @@ func TestPluginManagedProcessSurvivesHandOffAndIsClaimedWithoutRestart(t *testin
 	}
 	waitManagedOutput(t, old.get("one", "core"), "ready")
 	before := old.get("one", "core").snapshot()
+	// Restarts used in the current crash streak travel with the process.
+	handedOff := old.get("one", "core")
+	handedOff.mu.Lock()
+	handedOff.restarts = 2
+	handedOff.mu.Unlock()
 	records := handOffManagedForTest(t, old)
+	if records[0].Restarts != 2 {
+		t.Fatalf("handoff record restarts = %d, want 2", records[0].Restarts)
+	}
 	if !managedProcessAlive(before.PID) {
 		t.Fatal("closing the old registry stopped a handed-off process")
 	}
@@ -106,6 +114,12 @@ func TestPluginManagedProcessSurvivesHandOffAndIsClaimedWithoutRestart(t *testin
 	adopted := p.snapshot()
 	if adopted.State != "running" || adopted.PID != before.PID || adopted.StartedAt != before.StartedAt || adopted.Starts != before.Starts {
 		t.Fatalf("adopted status %+v, want %+v", adopted, before)
+	}
+	p.mu.Lock()
+	restarts := p.restarts
+	p.mu.Unlock()
+	if restarts != 2 {
+		t.Fatalf("adopted restarts = %d, want 2", restarts)
 	}
 	if _, err := p.requestRestart(); err == nil {
 		t.Fatal("an unclaimed process accepted a restart")

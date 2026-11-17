@@ -19,6 +19,12 @@ import (
 
 const pluginProcessConfigLimit = 1 << 20
 
+// pluginProcessStableRun is how long a run must last to end a crash streak.
+// Only restarts after short runs count against max_restarts, so a core that
+// fails now and then over weeks is restarted each time while a crash loop
+// still exhausts its budget. Tests shorten it.
+var pluginProcessStableRun = 10 * time.Minute
+
 var pluginProcessIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 
 // Managed processes belong to a plugin control generation, not an action's
@@ -87,6 +93,9 @@ type pluginManagedProcess struct {
 	adopted   bool
 	claims    chan pluginProcessClaim
 	handedOff bool
+	// restarts counts the restarts since the last run that lasted
+	// pluginProcessStableRun; only these count against maxRestarts.
+	restarts int
 }
 
 type pluginProcessClaim struct {
@@ -266,8 +275,8 @@ func (h *pluginControlHost) processRestart(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(status.value())
 }
 
-// Explicit health recovery uses the same lifetime budget as failed exits.
-// Repeated reconciliation cannot turn a broken dependency into a restart loop.
+// Explicit health recovery uses the same budget as failed exits. Repeated
+// reconciliation cannot turn a broken dependency into a restart loop.
 func (p *pluginManagedProcess) requestRestart() (pluginProcessStatus, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -277,7 +286,7 @@ func (p *pluginManagedProcess) requestRestart() (pluginProcessStatus, error) {
 	if p.status.State == "restarting" || p.status.State == "backoff" {
 		return p.status, nil
 	}
-	if p.status.Starts > p.maxRestarts {
+	if p.restartsUsedLocked(time.Now()) >= p.maxRestarts {
 		return p.status, fmt.Errorf("restart budget exhausted")
 	}
 	if p.status.State != "running" {
@@ -300,6 +309,16 @@ func (h *pluginControlHost) processIDArg(call goja.FunctionCall) string {
 		h.throwf("invalid process id")
 	}
 	return id
+}
+
+// restartsUsedLocked returns the restarts that count against max_restarts.
+// The current or last run started at status.StartedAt; once it has lasted
+// pluginProcessStableRun, the restarts before it no longer count.
+func (p *pluginManagedProcess) restartsUsedLocked(now time.Time) int {
+	if p.status.StartedAt > 0 && now.Sub(time.UnixMilli(p.status.StartedAt)) >= pluginProcessStableRun {
+		p.restarts = 0
+	}
+	return p.restarts
 }
 
 func (p *pluginManagedProcess) snapshot() pluginProcessStatus {
@@ -537,16 +556,17 @@ func (p *pluginManagedProcess) supervise(req pluginProcessRequest, dir string, r
 		if stopping {
 			p.status.State = "stopped"
 		}
-		restart := !stopping && (requested || (req.Restart == "on-failure" && p.status.ExitCode != 0)) && p.status.Starts <= req.MaxRestarts
+		used := p.restartsUsedLocked(time.Now())
+		restart := !stopping && (requested || (req.Restart == "on-failure" && p.status.ExitCode != 0)) && used < req.MaxRestarts
 		if restart {
 			p.status.State = "backoff"
+			p.restarts++
 		}
-		starts := p.status.Starts
 		p.mu.Unlock()
 		if !restart {
 			return
 		}
-		delay := time.Second << min(starts-1, 4)
+		delay := time.Second << min(used, 4)
 		timer := time.NewTimer(delay)
 		select {
 		case <-p.stop:

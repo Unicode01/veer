@@ -1220,7 +1220,7 @@ if (result.exit_code !== 0 || result.timed_out || result.cancelled || result.tru
 
 常驻外部程序使用 Linux 主控制 VM 的 `process.start({id, command, args, stdin, config, restart, max_restarts, stop_timeout_ms})`，对应 feature 为 `control.process.v1`，同样要求本地 `exec` 权限及关闭远程安装。config 最多 1 MiB，写入私有目录的 0600 文件，argv 中的 `{config}` 替换为文件路径；目录随最终退出清理；Veer 被强杀时遗留的私有目录按进程所有者区分，后续启动自动清理已退出所有者的目录，保留活跃目录和符号链接。持久配置另存加密 Secret（每条上限 2 MiB，计入数据库配额）。
 
-进程 ID 按插件隔离；同代际同配置的 start 幂等，改变配置或代际需先 stop。`process.status(id)`、`list()` 返回状态、PID、启动次数、时间和退出码，不含配置和参数。`process.logs(id)` 显式读取 stdout/stderr 各自最多 64 KiB 的尾部，可能包含凭据，不能直接加入公开状态。restart 默认为 never；on-failure 按 1、2、4、8、16 秒退避，最多重启 max_restarts 次（0–10），耗尽后相同 start 不重置预算。`process.restart(id)` 用于健康检查发现的故障，先优雅停止再退避重启，与失败退出共用同一重启预算。每插件最多 8 项，全局最多 32 项。
+进程 ID 按插件隔离；同代际同配置的 start 幂等，改变配置或代际需先 stop。`process.status(id)`、`list()` 返回状态、PID、启动次数、时间和退出码，不含配置和参数。`process.logs(id)` 显式读取 stdout/stderr 各自最多 64 KiB 的尾部，可能包含凭据，不能直接加入公开状态。restart 默认为 never；on-failure 按 1、2、4、8、16 秒退避，最多连续重启 max_restarts 次（0–10）。一次运行持续 10 分钟以上后，之前的重启不再计入预算，退避也从 1 秒重新开始，所以偶尔崩溃的程序每次都会被拉起，而启动即崩溃的程序仍会耗尽预算；耗尽后进程保持退出，相同 start 不重置预算。`process.restart(id)` 用于健康检查发现的故障，先优雅停止再退避重启，与失败退出共用同一重启预算。热重启交接进程时，已用的预算随进程一起交给新 daemon。每插件最多 8 项，全局最多 32 项。
 
 `process.stop(id)` 先 TERM，默认 1 秒后 KILL（可设 1–3000 ms），并清理同组子进程；这些后代退出（或超过 2 秒）后才返回，有 cgroup 时也等 cgroup 清空。控制 VM 停止、插件停用及运行时关闭都会停止所属进程。每个进程由一个 `veer --plugin-process-keeper` 守护进程托管：keeper 设置父进程死亡信号启动程序、转发输出并上报退出码；Veer 异常退出时 keeper 立即强杀程序，效果与原来的父进程死亡信号相同。完整保护要求 cgroup 限额成功，并通过独立 cgroup 清理后代；keeper 与程序位于同一 cgroup，计入同一限额。CPU/内存/PID 复用插件配置，全局内存/PID 与控制 Host 共用；这些资源限制不表示核心受到低权限 JS 沙箱约束。
 

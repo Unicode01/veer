@@ -48,6 +48,9 @@ type pluginProcessHandoffRecord struct {
 	Socket           string `json:"socket"`
 	Token            string `json:"token"`
 	LimitOwner       string `json:"limit_owner"`
+	// Restarts since the last stable run. A record from a daemon that did
+	// not write it reads as 0, a fresh budget.
+	Restarts int `json:"restarts"`
 }
 
 type pluginProcessHandoffState struct {
@@ -111,7 +114,7 @@ func (r *pluginProcessRegistry) handOff(wait time.Duration) []pluginProcessHando
 		p := entries[key]
 		owner, _, _ := strings.Cut(key, "/")
 		p.mu.Lock()
-		run, status := p.run, p.status
+		run, status, restarts := p.run, p.status, p.restarts
 		restart, stopTimeout := p.restartPolicy, p.stopTimeout
 		p.mu.Unlock()
 		if run == nil || status.State != "running" {
@@ -139,7 +142,7 @@ func (r *pluginProcessRegistry) handOff(wait time.Duration) []pluginProcessHando
 		records = append(records, pluginProcessHandoffRecord{
 			Owner: owner, ID: status.ID, Fingerprint: hex.EncodeToString(p.fingerprint[:]), Command: p.command,
 			Restart: restart, MaxRestarts: p.maxRestarts, StopTimeoutMS: int(stopTimeout / time.Millisecond),
-			Starts: status.Starts, StartedAt: status.StartedAt, KeeperPID: run.keeperPID, KeeperStartTicks: ticks,
+			Starts: status.Starts, Restarts: restarts, StartedAt: status.StartedAt, KeeperPID: run.keeperPID, KeeperStartTicks: ticks,
 			Socket: "veer-keeper-" + name, Token: token, LimitOwner: p.limitOwner,
 		})
 	}
@@ -397,7 +400,7 @@ func (r *pluginProcessRegistry) adoptHandedOffProcess(record pluginProcessHandof
 	p := &pluginManagedProcess{
 		command: record.Command, restartPolicy: record.Restart, stopTimeout: time.Duration(record.StopTimeoutMS) * time.Millisecond,
 		stop: make(chan struct{}), done: make(chan struct{}), restart: make(chan struct{}, 1), claims: make(chan pluginProcessClaim),
-		maxRestarts: record.MaxRestarts, limitOwner: record.LimitOwner, limitConfig: r.cfg, run: run, adopted: true,
+		maxRestarts: record.MaxRestarts, restarts: record.Restarts, limitOwner: record.LimitOwner, limitConfig: r.cfg, run: run, adopted: true,
 		status: pluginProcessStatus{ID: record.ID, State: "running", PID: attached.PID, Starts: record.Starts, ExitCode: -1, StartedAt: record.StartedAt},
 	}
 	copy(p.fingerprint[:], fingerprint)
