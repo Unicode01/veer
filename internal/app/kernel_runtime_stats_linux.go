@@ -125,6 +125,7 @@ type kernelFlowPruneState struct {
 	values            []tcFlowValueV4
 	xdpValues         []xdpFlowValueV4
 	valuesV6          []tcFlowValueV6
+	xdpValuesV6       []xdpFlowValueV6
 	orphanFrontsV4    map[staleKernelFlow]struct{}
 	orphanFrontsV6    map[staleKernelFlowV6]struct{}
 }
@@ -1454,6 +1455,17 @@ func (state *kernelFlowPruneState) ensureXDPBuffers(size int) ([]tcFlowKeyV4, []
 	return state.keys, state.xdpValues
 }
 
+// ensureXDPBuffersV6 is ensureBuffersV6 for the xdp object's IPv6 flows,
+// whose entries have no flow cache record.
+func (state *kernelFlowPruneState) ensureXDPBuffersV6(size int) []xdpFlowValueV6 {
+	if cap(state.xdpValuesV6) < size {
+		state.xdpValuesV6 = make([]xdpFlowValueV6, size)
+	} else {
+		state.xdpValuesV6 = state.xdpValuesV6[:size]
+	}
+	return state.xdpValuesV6
+}
+
 func (state *kernelFlowPruneState) ensureBuffersV6(size int) ([]tcFlowKeyV6, []tcFlowValueV6) {
 	if cap(state.keysV6) < size {
 		state.keysV6 = make([]tcFlowKeyV6, size)
@@ -1772,10 +1784,21 @@ func pruneStaleKernelFlowsBatchV6(rulesMap, flowsMap, natPortsMap *ebpf.Map, now
 	corrections := make(map[uint32]kernelRuleStats)
 	remaining := metrics.Budget
 
+	xdpLayout := int(flowsMap.ValueSize()) == xdpFlowValueV6Size
 	for remaining > 0 {
 		size := min(remaining, kernelFlowMaintenanceBatchSize)
 		keys, values := state.ensureBuffersV6(size)
-		n, err := flowsMap.BatchLookup(&state.batchCursorV6, keys, values, nil)
+		var n int
+		var err error
+		if xdpLayout {
+			raw := state.ensureXDPBuffersV6(size)
+			n, err = flowsMap.BatchLookup(&state.batchCursorV6, keys, raw, nil)
+			for i := 0; i < n; i++ {
+				values[i] = raw[i].tc()
+			}
+		} else {
+			n, err = flowsMap.BatchLookup(&state.batchCursorV6, keys, values, nil)
+		}
 		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			return nil, metrics, err
 		}

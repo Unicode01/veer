@@ -112,6 +112,7 @@ var kernelRuntimeBatchLookupSupport sync.Map
 var kernelRuntimeXDPFlowV4CountBatchPool = newKernelRuntimeMapCountBatchPool[tcFlowKeyV4, xdpFlowValueV4]()
 var kernelRuntimeTCFlowV4CountBatchPool = newKernelRuntimeMapCountBatchPool[tcFlowKeyV4, tcFlowValueV4]()
 var kernelRuntimeTCFlowV6CountBatchPool = newKernelRuntimeMapCountBatchPool[tcFlowKeyV6, tcFlowValueV6]()
+var kernelRuntimeXDPFlowV6CountBatchPool = newKernelRuntimeMapCountBatchPool[tcFlowKeyV6, xdpFlowValueV6]()
 var kernelRuntimeTCNATV4CountBatchPool = newKernelRuntimeMapCountBatchPool[tcNATPortKeyV4, tcNATPortValue]()
 var kernelRuntimeTCNATV6CountBatchPool = newKernelRuntimeMapCountBatchPool[tcNATPortKeyV6, tcNATPortValue]()
 
@@ -1169,6 +1170,9 @@ func countKernelFlowMapEntriesBatch(m *ebpf.Map) (int, bool, error) {
 }
 
 func countKernelFlowMapEntriesBatchV6(m *ebpf.Map) (int, bool, error) {
+	if int(m.ValueSize()) == xdpFlowValueV6Size {
+		return countKernelRuntimeMapEntriesBatch(m, kernelRuntimeXDPFlowV6CountBatchPool)
+	}
 	return countKernelRuntimeMapEntriesBatch(m, kernelRuntimeTCFlowV6CountBatchPool)
 }
 

@@ -235,8 +235,8 @@ type tcFlowValueV4 struct {
 }
 
 // tcFlowFastV4 mirrors struct flow_fast_v4: the flow cache's record of how
-// the core's fast path last sent this direction of the flow. Only the BPF
-// programs read it; user space copies it along with the entry.
+// the core last sent this direction of the flow. Only the BPF programs read
+// it; user space copies it along with the entry.
 type tcFlowFastV4 struct {
 	Stamp      uint32
 	OutIfIndex uint32
@@ -246,7 +246,9 @@ type tcFlowFastV4 struct {
 	DMAC       [6]byte
 	SMAC       [6]byte
 	InDMAC     [6]byte
-	Pad        [4]byte
+	// DstPort and DstAddr name the backend in a port forward's front record.
+	DstPort uint16
+	Pad     [2]byte
 }
 
 type tcNATPortValue struct {

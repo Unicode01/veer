@@ -36,6 +36,10 @@ var kernelTCMapLayoutRules = map[string]kernelMapLayoutRule{
 	// 64-byte flow_value_v4. A zero stamp is never a current record.
 	kernelFlowsMapName:        {prefixes: []uint32{64}, banks: []string{kernelFlowsMapName, kernelTCFlowsOldMapNameV4}},
 	kernelTCFlowsOldMapNameV4: {prefixes: []uint32{64}, banks: []string{kernelFlowsMapName, kernelTCFlowsOldMapNameV4}},
+	// The IPv6 flow cache appended struct flow_fast_v6 to the 112-byte
+	// flow_value_v6 the same way.
+	kernelFlowsMapNameV6:      {prefixes: []uint32{112}, banks: []string{kernelFlowsMapNameV6, kernelTCFlowsOldMapNameV6}},
+	kernelTCFlowsOldMapNameV6: {prefixes: []uint32{112}, banks: []string{kernelFlowsMapNameV6, kernelTCFlowsOldMapNameV6}},
 }
 
 // copies reports whether the rule lets a preserved map with the actual layout

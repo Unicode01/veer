@@ -23,6 +23,18 @@ func TestKernelTCMapLayoutRulesMatchFlowValue(t *testing.T) {
 	if got := unsafe.Offsetof(tcFlowValueV4{}.Fast); got != 64 {
 		t.Fatalf("offsetof(tcFlowValueV4.Fast) = %d, want 64: the 64-byte layout is a prefix only while the record follows it", got)
 	}
+	if got := unsafe.Sizeof(tcFlowValueV6{}); got != 168 {
+		t.Fatalf("sizeof(tcFlowValueV6) = %d; if flow_value_v6 grew by appended fields, add 168 to the prefixes in kernelTCMapLayoutRules", got)
+	}
+	if got := unsafe.Offsetof(tcFlowValueV6{}.Fast); got != 112 {
+		t.Fatalf("offsetof(tcFlowValueV6.Fast) = %d, want 112: the 112-byte layout is a prefix only while the record follows it", got)
+	}
+	valueSize := map[string]uint32{
+		kernelFlowsMapName:        uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		kernelTCFlowsOldMapNameV4: uint32(unsafe.Sizeof(tcFlowValueV4{})),
+		kernelFlowsMapNameV6:      uint32(unsafe.Sizeof(tcFlowValueV6{})),
+		kernelTCFlowsOldMapNameV6: uint32(unsafe.Sizeof(tcFlowValueV6{})),
+	}
 	spec, err := loadEmbeddedKernelCollectionSpec(false)
 	if err != nil {
 		t.Fatalf("loadEmbeddedKernelCollectionSpec() error = %v", err)
@@ -32,8 +44,8 @@ func TestKernelTCMapLayoutRulesMatchFlowValue(t *testing.T) {
 		if mapSpec == nil {
 			t.Fatalf("kernelTCMapLayoutRules names %s, which the tc object does not have", name)
 		}
-		if mapSpec.ValueSize != uint32(unsafe.Sizeof(tcFlowValueV4{})) {
-			t.Fatalf("%s value_size = %d, want sizeof(tcFlowValueV4)", name, mapSpec.ValueSize)
+		if want, ok := valueSize[name]; !ok || mapSpec.ValueSize != want {
+			t.Fatalf("%s value_size = %d, want the size of its Go mirror (%d)", name, mapSpec.ValueSize, want)
 		}
 		for _, prefix := range rule.prefixes {
 			if prefix >= mapSpec.ValueSize {
@@ -212,5 +224,38 @@ func TestKernelMapLayoutCopyRejectsAnotherTarget(t *testing.T) {
 	}
 	if _, err := c.copyInto(map[string]*ebpf.Map{}); err == nil {
 		t.Fatal("copyInto() without the target map = nil error, want an error")
+	}
+}
+
+// Both objects' IPv6 flow entries decode into tcFlowValueV6; the xdp ones
+// carry no flow cache record.
+func TestTCFlowValueV6DecodesBothLayouts(t *testing.T) {
+	t.Parallel()
+
+	want := tcFlowValueV6{RuleID: 7, FrontPort: 443, Flags: kernelFlowFlagFullNAT, SessionID: 99, LastSeenNS: 5}
+	want.FrontAddr[15] = 1
+	want.Fast = tcFlowFastV6{Stamp: 3, OutIfIndex: 4, DstPort: 8443}
+	full := unsafe.Slice((*byte)(unsafe.Pointer(&want)), unsafe.Sizeof(want))
+
+	var got tcFlowValueV6
+	if err := got.UnmarshalBinary(full); err != nil || got != want {
+		t.Fatalf("decode tc entry = %+v, %v; want %+v", got, err, want)
+	}
+	got = tcFlowValueV6{Fast: tcFlowFastV6{Stamp: 1}}
+	if err := got.UnmarshalBinary(full[:xdpFlowValueV6Size]); err != nil {
+		t.Fatalf("decode xdp entry: %v", err)
+	}
+	wantXDP := want
+	wantXDP.Fast = tcFlowFastV6{}
+	if got != wantXDP {
+		t.Fatalf("decode xdp entry = %+v, want %+v without a record", got, wantXDP)
+	}
+	var xdp xdpFlowValueV6
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(&xdp)), xdpFlowValueV6Size), full)
+	if xdp.tc() != wantXDP {
+		t.Fatalf("xdpFlowValueV6.tc() = %+v, want %+v", xdp.tc(), wantXDP)
+	}
+	if err := got.UnmarshalBinary(full[:100]); err == nil {
+		t.Fatal("decode of a 100-byte entry = nil error, want an error")
 	}
 }

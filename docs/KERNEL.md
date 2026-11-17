@@ -94,7 +94,7 @@ PPPoE 保留 live session 的非秘密准备参数。恢复时若模式变化，
 
 热更新时旧进程把 flow、NAT 和 stats map pin 到 `/sys/fs/bpf/forward/hot-restart/<engine>`，新进程用自己的对象逐个比对。任一 map 的类型、key/value 大小或 flags 与新对象不同，或兼容 token 不一致（`kernel_traffic_stats` 开关变化），新进程就放弃交接、改用新 map，日志记为 `... (cold restart)`，内核 NAT 连接和规则计数随之丢失。容量不影响结果：flow/NAT bank 按保留时的大小接管，stats 容量不足时复制内容。
 
-value 只在末尾追加了字段时例外：旧 value 是新布局的前缀，新进程不接管这个 map，而是建一个新布局的 map，把条目逐个复制过去，追加部分填零，日志记为 `copied pinned tc maps: ...`。目前只有 TC 的 `flow_value_v4`：d9041cb 在 64 字节之后追加了 40 字节的 flow cache 记录，从更早的版本升级时，旧进程的 `flows_v4` 按此复制进新进程的 `flows_old_v4`，连接不断。复制在新集合加载后做一次，此时旧程序仍在旧 map 上处理包；新程序挂载后再对一遍，补上这段时间旧程序新建、更新和关闭的条目，新程序已经改过的条目不覆盖。允许复制的 map 和旧 value 大小列在 `kernelTCMapLayoutRules`（`internal/app/kernel_runtime_map_layout_copy_linux.go`）。以后再扩展保留 map 的 value，只能在末尾追加、零值表示“未设置”的字段，并把原大小加入该表；其他改动仍然冷重启。
+value 只在末尾追加了字段时例外：旧 value 是新布局的前缀，新进程不接管这个 map，而是建一个新布局的 map，把条目逐个复制过去，追加部分填零，日志记为 `copied pinned tc maps: ...`。目前有 TC 的两种连接表项：`flow_value_v4` 在 64 字节之后追加了 40 字节的连接缓存记录（d9041cb），`flow_value_v6` 在 112 字节之后追加了 56 字节的 IPv6 连接缓存记录。从更早的版本升级时，旧进程的 `flows_v4`、`flows_v6` 按此复制进新进程的 old bank，连接不断。复制在新集合加载后做一次，此时旧程序仍在旧 map 上处理包；新程序挂载后再对一遍，补上这段时间旧程序新建、更新和关闭的条目，新程序已经改过的条目不覆盖。允许复制的 map 和旧 value 大小列在 `kernelTCMapLayoutRules`（`internal/app/kernel_runtime_map_layout_copy_linux.go`）。以后再扩展保留 map 的 value，只能在末尾追加、零值表示“未设置”的字段，并把原大小加入该表；其他改动仍然冷重启。
 
 重启前用即将安装的二进制预检：
 

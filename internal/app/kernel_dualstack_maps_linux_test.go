@@ -117,8 +117,11 @@ func TestKernelDualstackMapStructSizes(t *testing.T) {
 	if got := unsafe.Sizeof(tcFlowKeyV6{}); got != 44 {
 		t.Fatalf("sizeof(tcFlowKeyV6) = %d, want 44", got)
 	}
-	if got := unsafe.Sizeof(tcFlowValueV6{}); got != 112 {
-		t.Fatalf("sizeof(tcFlowValueV6) = %d, want 112", got)
+	if got := unsafe.Sizeof(tcFlowValueV6{}); got != 168 {
+		t.Fatalf("sizeof(tcFlowValueV6) = %d, want 168", got)
+	}
+	if got := unsafe.Sizeof(xdpFlowValueV6{}); got != 112 {
+		t.Fatalf("sizeof(xdpFlowValueV6) = %d, want 112", got)
 	}
 	if got := unsafe.Sizeof(tcNATPortKeyV6{}); got != 24 {
 		t.Fatalf("sizeof(tcNATPortKeyV6) = %d, want 24", got)

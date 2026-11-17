@@ -555,3 +555,173 @@ func TestEgressNATTCFlowCacheSkipsPluginHookedInterface(t *testing.T) {
 	hooked()
 	stream.wait(t)
 }
+
+// Port forwards in the flow cache. With full NAT, the packets of an
+// established connection leave from fast-path records in both directions,
+// the forward ones translated to the backend their record names. With a
+// transparent rule only the replies do: its flow entry is keyed by the
+// reply, so a forward packet has no entry to be found by before its rule
+// lookup. The records go with the connection.
+func TestPortForwardTCFlowCacheServesEstablishedTCP(t *testing.T) {
+	if os.Getenv(tcRuleMutationIntegrationEnableEnv) != "1" {
+		t.Skipf("set %s=1 to run Linux tc port forward integration tests", tcRuleMutationIntegrationEnableEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+	if _, err := exec.LookPath("ip"); err != nil {
+		t.Skip("ip command is required")
+	}
+	for _, transparent := range []bool{false, true} {
+		name := "fullnat"
+		if transparent {
+			name = "transparent"
+		}
+		t.Run(name, func(t *testing.T) {
+			testPortForwardTCFlowCacheServesEstablishedTCP(t, transparent)
+		})
+	}
+}
+
+func testPortForwardTCFlowCacheServesEstablishedTCP(t *testing.T, transparent bool) {
+	topology := setupDataplanePerfTopology(t)
+	seedDataplanePerfNeighbors(t, topology)
+	backendCmd, backendLogs := startDataplanePerfBackend(t, topology)
+	defer stopDataplanePerfHelper(t, backendCmd)
+
+	enabled := true
+	rt := newTCKernelRuleRuntime(&Config{KernelTCFlowCacheSetting: &enabled})
+	defer rt.Close()
+	rule := Rule{
+		ID:               1,
+		InInterface:      topology.ClientHostIF,
+		InIP:             dataplanePerfFrontAddr,
+		InPort:           dataplanePerfFrontPort,
+		OutInterface:     topology.BackendHostIF,
+		OutIP:            dataplanePerfBackendAddr,
+		OutPort:          dataplanePerfBackendPort,
+		Protocol:         "tcp",
+		Transparent:      transparent,
+		Enabled:          true,
+		EnginePreference: ruleEngineKernel,
+	}
+	results, err := rt.Reconcile([]Rule{rule})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result := results[rule.ID]; !result.Running || result.Engine != kernelEngineTC || result.Error != "" {
+		t.Fatalf("port forward result = %+v, want running tc", result)
+	}
+	flowsMap := rt.coll.Maps[kernelFlowsMapNameV4]
+	diagMap := rt.coll.Maps[kernelDiagMapName]
+	if flowsMap == nil || diagMap == nil {
+		t.Fatal("flow or diag map is unavailable")
+	}
+	front, err := netlink.LinkByName(topology.ClientHostIF)
+	if err != nil {
+		t.Fatalf("resolve %s: %v", topology.ClientHostIF, err)
+	}
+	back, err := netlink.LinkByName(topology.BackendHostIF)
+	if err != nil {
+		t.Fatalf("resolve %s: %v", topology.BackendHostIF, err)
+	}
+
+	target := net.JoinHostPort(dataplanePerfFrontAddr, strconv.Itoa(dataplanePerfFrontPort))
+	client := startTCRuleMutationSteadyClientWithDuration(t, topology.ClientNS, target, 3*time.Second)
+	waitForTCRuleMutationSteadyClientReady(t, client)
+
+	// A full-NAT forward record sits in the front entry, keyed by the
+	// interface packets enter; every reply record in the entry keyed by the
+	// backend's interface.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		records, err := flowFastTCPRecords(flowsMap)
+		if err != nil {
+			t.Fatalf("read flow entries: %v", err)
+		}
+		if len(records[back.Attrs().Index]) > 0 && (transparent || len(records[front.Attrs().Index]) > 0) {
+			if transparent && len(records[front.Attrs().Index]) > 0 {
+				t.Fatalf("a transparent rule recorded entries keyed by %s: %v", topology.ClientHostIF, records)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			logPortForwardFlowCacheState(t, rt)
+			t.Fatalf("fast-path records per key ifindex = %v, want %s=%d and, with full NAT, %s=%d\nbackend logs:\n%s",
+				records, topology.BackendHostIF, back.Attrs().Index, topology.ClientHostIF, front.Attrs().Index, backendLogs.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// The replies leave the backend for the NAT address with full NAT, for
+	// the client itself with a transparent rule.
+	replyDst := dataplanePerfBackendHost
+	if transparent {
+		replyDst = dataplanePerfClientAddr
+	}
+	sent := openIPv4TCPFlowCounter(t, topology.ClientHostIF, dataplanePerfClientAddr, dataplanePerfFrontAddr)
+	replied := openIPv4TCPFlowCounter(t, topology.BackendHostIF, dataplanePerfBackendAddr, replyDst)
+	hitsBefore := flowCacheHitsForTest(t, diagMap)
+	time.Sleep(time.Second)
+	hits := flowCacheHitsForTest(t, diagMap) - hitsBefore
+	forwardPackets, replyPackets := sent.close(t), replied.close(t)
+	t.Logf("within one second %d forward and %d reply packets entered, %d left from fast-path records", forwardPackets, replyPackets, hits)
+	// Each recorded direction still takes the full path for the first packet
+	// of a window and the next one, which records.
+	served := forwardPackets + replyPackets
+	if transparent {
+		served = replyPackets
+	}
+	if served < 50 || hits > served || hits*3 < served*2 {
+		t.Fatalf("%d packets left from fast-path records, want most of the %d the cache serves (forward %d, reply %d)", hits, served, forwardPackets, replyPackets)
+	}
+
+	if stdout, stderr, err := waitForTCRuleMutationSteadyClient(client); err != nil {
+		t.Fatalf("steady client failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		records, err := flowFastTCPRecords(flowsMap)
+		if err != nil {
+			t.Fatalf("read flow entries: %v", err)
+		}
+		if len(records) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("fast-path records outlived the connection: %v", records)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// logPortForwardFlowCacheState logs what the flow cache test failed on: the
+// attachment mode, the cache state, the TCP flow entries and the next hops
+// the full paths kept.
+func logPortForwardFlowCacheState(t *testing.T, rt *linuxKernelRuleRuntime) {
+	t.Helper()
+	t.Logf("attachment mode %q", rt.attachmentMode)
+	var state tcFlowCacheStateV4
+	if err := rt.coll.Maps[kernelTCFlowCacheStateMapName].Lookup(uint32(0), &state); err == nil {
+		t.Logf("cache state %+v", state)
+	}
+	iter := rt.coll.Maps[kernelFlowsMapNameV4].Iterate()
+	var key tcFlowKeyV4
+	var value tcFlowValueV4
+	for iter.Next(&key, &value) {
+		if key.Proto == syscall.IPPROTO_TCP {
+			t.Logf("flow %+v flags=%#x last_seen=%d fast=%+v", key, value.Flags, value.LastSeenNS, value.Fast)
+		}
+	}
+	entries := 0
+	l2iter := rt.coll.Maps["tc_l2_cache_v4"].Iterate()
+	var l2key, l2value []byte
+	for l2iter.Next(&l2key, &l2value) {
+		entries++
+	}
+	t.Logf("tc_l2_cache_v4 entries %d", entries)
+	var values []kernelDiagValueV4
+	if err := rt.coll.Maps[kernelDiagMapName].Lookup(uint32(0), &values); err == nil {
+		t.Logf("diag %+v", aggregateKernelPerCPUDiag(values))
+	}
+}
