@@ -143,6 +143,41 @@ func TestCheckPluginCompatibility(t *testing.T) {
 	}
 }
 
+// Distribution kernel releases carry suffixes that SemVer would read as
+// pre-releases; the kernel constraint compares only their version.
+func TestCheckPluginCompatibilityKernelReleaseSuffixes(t *testing.T) {
+	plugin := relationshipTestPlugin("kernel", "1.0.0")
+	plugin.Compatibility = &PluginCompatibility{Kernel: ">=5.10.0"}
+	for release, want := range map[string]bool{
+		"6.8.0-1070-azure":           true,
+		"7.0.14-8-pve":               true,
+		"5.15.0-25-generic":          true,
+		"6.12.117+deb12-cloud-amd64": true,
+		"5.10.0-32-cloud-amd64":      true,
+		"6.1":                        true,
+		"4.18.0-553.el8_10.x86_64":   false,
+		"5.4.0-216-generic":          false,
+	} {
+		err := checkPluginCompatibility(plugin, pluginHostEnvironment{KernelRelease: release})
+		if (err == nil) != want {
+			t.Fatalf("kernel %s: error = %v, want compatible %t", release, err, want)
+		}
+		if err != nil && !strings.Contains(err.Error(), release) {
+			t.Fatalf("kernel %s: error %q does not name the host release", release, err)
+		}
+	}
+	for release, want := range map[string]string{
+		"6.8.0-1070-azure": "6.8.0",
+		"6.1":              "6.1.0",
+		"7.0.14-8-pve":     "7.0.14",
+		"unknown":          "unknown",
+	} {
+		if got := pluginKernelVersion(release); got != want {
+			t.Fatalf("pluginKernelVersion(%q) = %q, want %q", release, got, want)
+		}
+	}
+}
+
 func TestResolvePluginCatalogRelationshipsAndOrder(t *testing.T) {
 	base := relationshipTestPlugin("base", "1.3.0")
 	middle := relationshipTestPlugin("middle", "2.0.0")
