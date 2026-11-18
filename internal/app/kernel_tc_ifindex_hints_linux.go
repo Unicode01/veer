@@ -19,6 +19,7 @@ const (
 	kernelTCIfindexHintRuleV6Shift        = 4
 	kernelTCIfindexHintHasParent   uint32 = 0x100
 	kernelTCIfindexHintFullCone    uint32 = 0x200
+	kernelTCIfindexHintHairpin     uint32 = 0x400
 	kernelTCIfindexHintKnown       uint32 = 0x80000000
 )
 
@@ -50,8 +51,13 @@ func (h kernelTCIfindexHints) addPreparedRules(prepared []preparedKernelRule) er
 	}
 	for i, key := range batches.v4Keys {
 		h[key.IfIndex] |= kernelTCRuleFormHint(key.DstAddr == 0, key.DstPort == 0)
-		if flags := batches.v4Values[i].Flags; flags&kernelRuleFlagEgressNAT != 0 && flags&kernelRuleFlagFullCone != 0 {
-			h[key.IfIndex] |= kernelTCIfindexHintFullCone
+		if flags := batches.v4Values[i].Flags; flags&kernelRuleFlagEgressNAT != 0 {
+			// Guests behind egress NAT may reach this host's forwards by
+			// hairpin (see kernel_hairpin_linux.go).
+			h[key.IfIndex] |= kernelTCIfindexHintHairpin
+			if flags&kernelRuleFlagFullCone != 0 {
+				h[key.IfIndex] |= kernelTCIfindexHintFullCone
+			}
 		}
 	}
 	for _, key := range batches.v6Keys {

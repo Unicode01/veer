@@ -888,6 +888,8 @@ struct bpf_map_def SEC("maps") tc_flow_cache_state_v4 = {
 #define FORWARD_TC_IFINDEX_HINT_HAS_PARENT 0x100
 /* A full-cone egress NAT rule receives packets here. */
 #define FORWARD_TC_IFINDEX_HINT_FULL_CONE 0x200
+/* An egress NAT rule receives packets here, which may be hairpin traffic. */
+#define FORWARD_TC_IFINDEX_HINT_HAIRPIN 0x400
 #define FORWARD_TC_IFINDEX_HINT_KNOWN 0x80000000U
 
 struct bpf_map_def SEC("maps") tc_ifindex_hints = {
@@ -1212,6 +1214,45 @@ struct bpf_map_def SEC("maps") local_ipv4s_v4 = {
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(__u8),
 	.max_entries = 4096,
+};
+
+/*
+ * Hairpin (NAT loopback): a guest behind egress NAT connecting to a port this
+ * host forwards on one of its own addresses. hairpin_v4 holds those forwards
+ * by address, port and protocol, as full NAT rules: the source becomes an
+ * address of the forward's outbound interface even when the forward itself
+ * is transparent, so the backend answers through this host and not straight
+ * back to a neighbour on its own network. hairpin_addrs_v4 lists the
+ * addresses, so that other egress NAT traffic costs one array lookup; a count
+ * above FORWARD_TC_HAIRPIN_ADDRS means there are more than it holds.
+ */
+#define FORWARD_TC_HAIRPIN_ADDRS 8
+
+struct hairpin_key_v4 {
+	__u32 dst_addr;
+	__u16 dst_port;
+	__u8 proto;
+	__u8 pad;
+};
+
+struct hairpin_addrs_v4 {
+	__u32 count;
+	__u32 addrs[FORWARD_TC_HAIRPIN_ADDRS];
+};
+
+struct bpf_map_def SEC("maps") hairpin_v4 = {
+	.type = BPF_MAP_TYPE_HASH,
+	.key_size = sizeof(struct hairpin_key_v4),
+	.value_size = sizeof(struct rule_value_v4),
+	.max_entries = 65536,
+	.map_flags = BPF_F_NO_PREALLOC,
+};
+
+struct bpf_map_def SEC("maps") hairpin_addrs_v4 = {
+	.type = BPF_MAP_TYPE_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(struct hairpin_addrs_v4),
+	.max_entries = 1,
 };
 
 /* addr in network byte order, as an LPM trie compares it. */
@@ -2673,6 +2714,40 @@ static __always_inline __u32 tc_ifindex_rule_forms(__u32 ifindex, __u32 shift)
 	return (hints >> shift) & FORWARD_TC_IFINDEX_HINT_RULE_FORMS;
 }
 
+/*
+ * The forward a guest's packet reaches by hairpin, or 0. egress is the egress
+ * NAT rule the packet matched; only a packet the guest routes through this
+ * host, addressed to its gateway, qualifies.
+ */
+static __always_inline struct rule_value_v4 *lookup_hairpin_rule_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *egress)
+{
+	struct hairpin_key_v4 key = {};
+	struct hairpin_addrs_v4 *addrs;
+	__u32 dst = bpf_ntohl(ctx->dst_addr);
+	__u32 zero = 0;
+	int found = 0;
+	int i;
+
+	addrs = bpf_map_lookup_elem(&hairpin_addrs_v4, &zero);
+	if (!addrs || addrs->count == 0)
+		return 0;
+	if (addrs->count <= FORWARD_TC_HAIRPIN_ADDRS) {
+#pragma clang loop unroll(full)
+		for (i = 0; i < FORWARD_TC_HAIRPIN_ADDRS; i++) {
+			if ((__u32)i < addrs->count && addrs->addrs[i] == dst)
+				found = 1;
+		}
+		if (!found)
+			return 0;
+	}
+	if (egress_nat_dst_mac_mismatch(skb, egress))
+		return 0;
+	key.dst_addr = dst;
+	key.dst_port = ctx->dst_port;
+	key.proto = ctx->proto;
+	return bpf_map_lookup_elem(&hairpin_v4, &key);
+}
+
 static __always_inline struct rule_value_v4 *lookup_rule_v4(struct __sk_buff *skb, struct packet_ctx *ctx)
 {
 	struct rule_key_v4 key = {
@@ -2681,44 +2756,49 @@ static __always_inline struct rule_value_v4 *lookup_rule_v4(struct __sk_buff *sk
 		.dst_port = ctx->dst_port,
 		.proto = ctx->proto,
 	};
-	struct rule_value_v4 *rule;
-	__u32 forms = tc_ifindex_rule_forms(skb->ifindex, 0);
+	struct rule_value_v4 *rule = 0;
+	struct rule_value_v4 *hairpin;
+	__u32 hints = lookup_tc_ifindex_hints(skb->ifindex);
+	__u32 forms = FORWARD_TC_IFINDEX_HINT_RULE_FORMS;
 
+	if (hints & FORWARD_TC_IFINDEX_HINT_KNOWN)
+		forms = hints & FORWARD_TC_IFINDEX_HINT_RULE_FORMS;
 	ctx->rule_wildcard_addr = 0;
-	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_EXACT) {
+	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_EXACT)
 		rule = bpf_map_lookup_elem(&rules_v4, &key);
-		if (rule)
-			return rule;
-	}
 
-	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY_ADDR) {
+	if (!rule && (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY_ADDR)) {
 		key.dst_addr = 0;
 		rule = bpf_map_lookup_elem(&rules_v4, &key);
-		if (rule) {
+		if (rule)
 			ctx->rule_wildcard_addr = 1;
-			return rule;
-		}
 	}
 
-	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY_PORT) {
+	if (!rule && (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY_PORT)) {
 		key.dst_addr = bpf_ntohl(ctx->dst_addr);
 		key.dst_port = 0;
 		rule = bpf_map_lookup_elem(&rules_v4, &key);
-		if (rule)
-			return rule;
 	}
 
-	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY) {
+	if (!rule && (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY)) {
 		key.dst_addr = 0;
 		key.dst_port = 0;
 		rule = bpf_map_lookup_elem(&rules_v4, &key);
-		if (rule) {
+		if (rule)
 			ctx->rule_wildcard_addr = 1;
-			return rule;
-		}
 	}
 
-	return 0;
+	/* Every packet of a hairpin connection takes the forward, not only its
+	 * first: later ones would otherwise meet the forward's flows on the
+	 * egress NAT path. */
+	if (rule && (hints & FORWARD_TC_IFINDEX_HINT_HAIRPIN) && is_egress_nat_rule(rule)) {
+		hairpin = lookup_hairpin_rule_v4(skb, ctx, rule);
+		if (hairpin) {
+			ctx->rule_wildcard_addr = 0;
+			return hairpin;
+		}
+	}
+	return rule;
 }
 
 static __always_inline struct rule_value_v6 *lookup_rule_v6(struct __sk_buff *skb, struct packet_ctx_v6 *ctx)

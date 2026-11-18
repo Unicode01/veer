@@ -664,6 +664,7 @@ type linuxKernelRuleRuntime struct {
 	degradedSource               string
 	stateLog                     kernelStateLogger
 	vanishedLinkLog              kernelStateLogger
+	hairpinLog                   kernelStateLogger
 	pressureState                kernelRuntimePressureState
 	tcpIdleTimeout               kernelTCPIdleTimeoutState
 	observability                kernelRuntimeObservabilityState
@@ -1521,6 +1522,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		}
 		return results, nil
 	}
+	rt.syncKernelHairpinLocked(coll, prepared)
 	// The hints map starts out unknown, which makes every lookup, so a failure
 	// here leaves the programs correct.
 	if err := narrowKernelTCIfindexHints(coll, prepared); err != nil {
@@ -3302,6 +3304,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 		rt.discardAttachmentsLocked(createdAttachments)
 		return fmt.Errorf("sync kernel reply parent map: %w", err)
 	}
+	rt.syncKernelHairpinLocked(rt.coll, prepared)
 	if err := narrowKernelTCIfindexHints(rt.coll, prepared); err != nil {
 		log.Printf("kernel dataplane reconcile: narrow tc ifindex hints failed: %v", err)
 	}

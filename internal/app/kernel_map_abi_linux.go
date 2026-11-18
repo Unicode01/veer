@@ -82,6 +82,8 @@ func tcKernelMapABIContracts() []kernelMapABIContract {
 		{name: kernelLocalIPv4MapName, key: uint32(0), value: uint8(0)},
 		{name: kernelLocalNetsMapName, key: kernelLocalNetKeyV4{}, value: uint8(0)},
 		{name: kernelLocalMACMapName, key: uint32(0), value: kernelLocalMACValue{}},
+		{name: kernelHairpinMapNameV4, key: tcHairpinKeyV4{}, value: tcRuleValueV4{}},
+		{name: kernelHairpinAddrsMapNameV4, key: uint32(0), value: tcHairpinAddrsV4{}},
 		{name: kernelNATConfigMapName, key: uint32(0), value: tcNATConfigValueV4{}},
 		{name: kernelStatsMapName, key: uint32(0), value: kernelStatsValueV4{}},
 		{name: kernelDiagMapName, key: uint32(0), value: kernelDiagValueV4{}},
