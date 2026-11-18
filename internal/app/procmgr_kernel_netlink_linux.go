@@ -404,6 +404,16 @@ func (pm *ProcessManager) handleIPv6AssignmentLinkUpdate(update netlink.LinkUpda
 		}
 	}
 
+	masterIndex := 0
+	if update.Link != nil && update.Link.Attrs() != nil {
+		masterIndex = update.Link.Attrs().MasterIndex
+	}
+	if pm.noteManagedRuntimeLinkLifecycle(name, int(update.IfInfomsg.Index), masterIndex, update.Header.Type == unix.RTM_DELLINK) {
+		// The interface appeared, went away or moved to another master: the
+		// suppression after a reload only hides echoes of its own changes,
+		// and a restarted guest's tap often comes back within that window.
+		pm.clearManagedNetworkRuntimeReloadSuppression(name)
+	}
 	if !pm.requestManagedNetworkRuntimeReloadForRelevantInterfaces("link_change", relatedNames...) && name != "" {
 		pm.requestManagedNetworkRuntimeReloadForRelevantInterfaces("link_change", name)
 	}

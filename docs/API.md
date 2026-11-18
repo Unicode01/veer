@@ -1521,6 +1521,8 @@ curl -fsS -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8080/debug/pprof/g
 - `runtime_status`
 - `runtime_detail`
 
+目标接口暂时不存在时（例如 guest 停机或重启时它的 tap 被删除），分配进入 `draining`，`runtime_detail` 说明目标接口已不存在。这时它的路由、proxy NDP、RA 和 DHCPv6 都会撤掉，但不算错误，也不影响就绪状态。同名接口重新出现时（guest 重启后），下一次 reload 会恢复这些配置：接口创建事件会触发这次 reload，每 10 秒一次的漂移检查也会兜底。托管网络的一次 reload 留下问题时，会按 5 秒起、最长 1 分钟的退避自动重试，直到成功。
+
 ### 8.2 新增 IPv6 Assignment
 
 `POST /api/ipv6-assignments`

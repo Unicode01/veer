@@ -78,6 +78,19 @@ func (ops *linuxIPv6AssignmentNetOps) SnapshotIPv6AssignmentCounters() map[strin
 	return ops.services.Snapshot()
 }
 
+// IPv6InterfaceGone reports whether no interface is named name, such as the
+// tap of a destroyed guest. A lookup that fails for another reason does not
+// count.
+func (ops *linuxIPv6AssignmentNetOps) IPv6InterfaceGone(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	_, err := netlink.LinkByName(name)
+	var linkNotFound netlink.LinkNotFoundError
+	return errors.As(err, &linkNotFound)
+}
+
 func (ops *linuxIPv6AssignmentNetOps) EnsureIPv6ForwardingEnabled() error {
 	if err := writeLinuxIPv6Sysctl(filepath.Join("/proc/sys/net/ipv6/conf/all", "forwarding"), "1\n"); err != nil {
 		return err

@@ -78,11 +78,22 @@ type IPv6AssignmentNetOps interface {
 	SnapshotIPv6AssignmentCounters() map[string]IPv6RuntimeCounter
 }
 
+// IPv6InterfaceGoneProber is implemented by net ops that can tell an
+// interface that no longer exists from one that failed for another reason.
+type IPv6InterfaceGoneProber interface {
+	// IPv6InterfaceGone reports whether no interface is named name. Only a
+	// definite "not found" counts.
+	IPv6InterfaceGone(name string) bool
+}
+
 type ipv6AssignmentRuntimeEntryState struct {
 	ParentInterface string
 	TargetInterface string
 	AdvertisesRA    bool
 	ServesDHCPv6    bool
+	// TargetGone marks an assignment whose target interface no longer exists
+	// while it is still planned; see Reconcile.
+	TargetGone bool
 }
 
 type IPv6AssignmentRuntime struct {
@@ -158,12 +169,51 @@ func (rt *IPv6AssignmentRuntime) Reconcile(plans []IPv6AssignmentPlan, planIssue
 		appendIPv6RuntimeError(desiredErrors, issue.ID, issue.Detail)
 	}
 
+	// An assignment can still be planned after its target interface is gone,
+	// such as the tap of a guest that was just destroyed while the interface
+	// inventory holds it for a grace period. Nothing can be applied there, so
+	// the assignment goes dormant instead of failing the reconcile: it keeps
+	// its state, and the route, proxy and services it had are removed below
+	// like those of an assignment that went away.
+	prober, _ := rt.ops.(IPv6InterfaceGoneProber)
+	goneInterfaces := make(map[string]bool)
+	// interfaceGone answers from the first check unless recheck is set: after
+	// a failure the interface may have disappeared in between.
+	interfaceGone := func(name string, recheck bool) bool {
+		if prober == nil || strings.TrimSpace(name) == "" {
+			return false
+		}
+		if gone, ok := goneInterfaces[name]; ok && (gone || !recheck) {
+			return gone
+		}
+		gone := prober.IPv6InterfaceGone(name)
+		goneInterfaces[name] = gone
+		return gone
+	}
+	markTargetGone := func(id int64) {
+		state := desiredStates[id]
+		state.TargetGone = true
+		desiredStates[id] = state
+	}
+	targetInterfaces := make(map[string]struct{})
+
 	needsForwarding := false
 	forwardingInterfaces := make(map[string]struct{})
 	parentInterfaces := make(map[string]struct{})
 	for _, plan := range plans {
 		if plan.ID == 0 {
 			continue
+		}
+		if interfaceGone(plan.TargetInterface, false) {
+			desiredStates[plan.ID] = ipv6AssignmentRuntimeEntryState{
+				ParentInterface: plan.ParentInterface,
+				TargetInterface: plan.TargetInterface,
+				TargetGone:      true,
+			}
+			continue
+		}
+		if plan.TargetInterface != "" {
+			targetInterfaces[plan.TargetInterface] = struct{}{}
 		}
 		if plan.NeedsForwarding {
 			needsForwarding = true
@@ -184,7 +234,9 @@ func (rt *IPv6AssignmentRuntime) Reconcile(plans []IPv6AssignmentPlan, planIssue
 		if plan.GatewayCIDR != "" {
 			spec := IPv6AddressSpec{TargetInterface: plan.TargetInterface, CIDR: plan.GatewayCIDR}
 			desiredAddresses[spec] = struct{}{}
-			if err := rt.ops.EnsureIPv6Address(spec); err != nil {
+			if err := rt.ops.EnsureIPv6Address(spec); err != nil && interfaceGone(spec.TargetInterface, true) {
+				markTargetGone(plan.ID)
+			} else if err != nil {
 				msg := fmt.Sprintf("assignment #%d gateway address %s on %s: %v", plan.ID, spec.CIDR, spec.TargetInterface, err)
 				errs = append(errs, msg)
 				appendIPv6RuntimeError(desiredErrors, plan.ID, fmt.Sprintf("gateway address %s on %s: %v", spec.CIDR, spec.TargetInterface, err))
@@ -192,7 +244,9 @@ func (rt *IPv6AssignmentRuntime) Reconcile(plans []IPv6AssignmentPlan, planIssue
 		}
 		route := IPv6RouteSpec{Prefix: plan.AssignedPrefix, TargetInterface: plan.TargetInterface}
 		desiredRoutes[route] = struct{}{}
-		if err := rt.ops.EnsureIPv6Route(route); err != nil {
+		if err := rt.ops.EnsureIPv6Route(route); err != nil && interfaceGone(route.TargetInterface, true) {
+			markTargetGone(plan.ID)
+		} else if err != nil {
 			msg := fmt.Sprintf("assignment #%d route %s via %s: %v", plan.ID, route.Prefix, route.TargetInterface, err)
 			errs = append(errs, msg)
 			appendIPv6RuntimeError(desiredErrors, plan.ID, fmt.Sprintf("route %s via %s: %v", route.Prefix, route.TargetInterface, err))
@@ -255,8 +309,21 @@ func (rt *IPv6AssignmentRuntime) Reconcile(plans []IPv6AssignmentPlan, planIssue
 			}
 		}
 	}
+	// A target that disappeared after its assignment was applied above only
+	// fails the steps that follow; those are skipped for it.
+	targetGoneNow := func(name string) bool {
+		if _, ok := targetInterfaces[name]; !ok || !interfaceGone(name, true) {
+			return false
+		}
+		for id, state := range desiredStates {
+			if state.TargetInterface == name {
+				markTargetGone(id)
+			}
+		}
+		return true
+	}
 	for interfaceName := range forwardingInterfaces {
-		if err := rt.ops.EnsureIPv6ForwardingEnabledOnInterface(interfaceName); err != nil {
+		if err := rt.ops.EnsureIPv6ForwardingEnabledOnInterface(interfaceName); err != nil && !targetGoneNow(interfaceName) {
 			msg := fmt.Sprintf("enable ipv6 forwarding on %s: %v", interfaceName, err)
 			errs = append(errs, msg)
 			appendIPv6RuntimeErrorMatching(desiredErrors, desiredStates, msg, func(state ipv6AssignmentRuntimeEntryState) bool {
@@ -286,7 +353,7 @@ func (rt *IPv6AssignmentRuntime) Reconcile(plans []IPv6AssignmentPlan, planIssue
 		cfg.Prefixes = sortAndDedupe(cfg.Prefixes)
 		cfg.Routes = sortAndDedupe(cfg.Routes)
 		cfg.DNSServers = sortAndDedupe(cfg.DNSServers)
-		if err := rt.ops.EnsureIPv6RA(cfg); err != nil {
+		if err := rt.ops.EnsureIPv6RA(cfg); err != nil && !targetGoneNow(targetInterface) {
 			msg := fmt.Sprintf("advertise ipv6 on %s: %v", targetInterface, err)
 			errs = append(errs, msg)
 			appendIPv6RuntimeErrorMatching(desiredErrors, desiredStates, msg, func(state ipv6AssignmentRuntimeEntryState) bool {
@@ -295,7 +362,7 @@ func (rt *IPv6AssignmentRuntime) Reconcile(plans []IPv6AssignmentPlan, planIssue
 		}
 	}
 	for targetInterface, cfg := range desiredDHCPv6 {
-		if err := rt.ops.EnsureIPv6DHCPv6(cfg); err != nil {
+		if err := rt.ops.EnsureIPv6DHCPv6(cfg); err != nil && !targetGoneNow(targetInterface) {
 			msg := fmt.Sprintf("serve dhcpv6 on %s: %v", targetInterface, err)
 			errs = append(errs, msg)
 			appendIPv6RuntimeErrorMatching(desiredErrors, desiredStates, msg, func(state ipv6AssignmentRuntimeEntryState) bool {
@@ -367,6 +434,43 @@ func (rt *IPv6AssignmentRuntime) Reconcile(plans []IPv6AssignmentPlan, planIssue
 	return errors.New(strings.Join(errs, "; "))
 }
 
+// DormantTargets returns the target interfaces of the assignments the last
+// reconcile left dormant because the interface was gone, sorted.
+func (rt *IPv6AssignmentRuntime) DormantTargets() []string {
+	if rt == nil {
+		return nil
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	var targets []string
+	for _, state := range rt.assignmentStates {
+		if state.TargetGone {
+			targets = append(targets, state.TargetInterface)
+		}
+	}
+	return sortAndDedupe(targets)
+}
+
+// ReturnedDormantTargets returns the dormant targets that exist again, such
+// as the tap of a guest that was restarted. Their assignments need another
+// reconcile to come back.
+func (rt *IPv6AssignmentRuntime) ReturnedDormantTargets() []string {
+	if rt == nil {
+		return nil
+	}
+	prober, ok := rt.ops.(IPv6InterfaceGoneProber)
+	if !ok {
+		return nil
+	}
+	var returned []string
+	for _, target := range rt.DormantTargets() {
+		if !prober.IPv6InterfaceGone(target) {
+			returned = append(returned, target)
+		}
+	}
+	return returned
+}
+
 func (rt *IPv6AssignmentRuntime) SnapshotStats() map[int64]IPv6AssignmentRuntimeStats {
 	if rt == nil || rt.ops == nil {
 		return nil
@@ -420,6 +524,9 @@ func (rt *IPv6AssignmentRuntime) SnapshotStats() map[int64]IPv6AssignmentRuntime
 		switch {
 		case len(errorsByID[id]) > 0:
 			stat.RuntimeStatus = "error"
+		case state.TargetGone:
+			stat.RuntimeStatus = "draining"
+			details = append(details, fmt.Sprintf("target interface %s is gone; the assignment is removed once the interface inventory drops it", state.TargetInterface))
 		case len(componentStatuses) == 0:
 			stat.RuntimeStatus = "running"
 			details = append(details, "route/proxy only")

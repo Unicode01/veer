@@ -66,6 +66,14 @@ type ipv6AssignmentStaleRouteSweeper interface {
 	SweepStaleRoutes(networks []ManagedNetwork, items []IPv6Assignment) error
 }
 
+// ipv6AssignmentDormantTargetReporter is a runtime that leaves an assignment
+// dormant while its target interface is gone and can tell when the target is
+// back, such as the tap of a restarted guest: the assignment then needs a
+// reconcile even though the effective state did not change.
+type ipv6AssignmentDormantTargetReporter interface {
+	ReturnedDormantTargets() []string
+}
+
 func ipv6AssignmentRouteKey(prefix *net.IPNet) string {
 	if prefix == nil {
 		return ""
@@ -256,6 +264,13 @@ func (rt *managedIPv6AssignmentRuntime) Reconcile(items []IPv6Assignment) error 
 		})
 	}
 	return rt.inner.Reconcile(plans, issues)
+}
+
+func (rt *managedIPv6AssignmentRuntime) ReturnedDormantTargets() []string {
+	if rt == nil || rt.inner == nil {
+		return nil
+	}
+	return rt.inner.ReturnedDormantTargets()
 }
 
 func (rt *managedIPv6AssignmentRuntime) SnapshotStats() map[int64]ipv6AssignmentRuntimeStats {

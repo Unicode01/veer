@@ -371,6 +371,81 @@ func (pm *ProcessManager) markManagedNetworkRuntimeReloadCompleted(result string
 	pm.mu.Unlock()
 }
 
+// scheduleManagedNetworkRuntimeRetry queues another reload after one that left
+// issues, backing off while they persist. A step can fail on state that
+// settles by itself, such as an interface that is being recreated, and while
+// the effective state stays the same nothing else asks for a reload. A reload
+// already queued runs anyway and is not delayed.
+func (pm *ProcessManager) scheduleManagedNetworkRuntimeRetry(err error) {
+	if pm == nil {
+		return
+	}
+	pm.mu.Lock()
+	if err == nil || pm.shuttingDown {
+		pm.managedRuntimeReloadRetryDelay = 0
+		pm.mu.Unlock()
+		return
+	}
+	delay := pm.managedRuntimeReloadRetryDelay * 2
+	if delay < managedNetworkReloadRetryMin {
+		delay = managedNetworkReloadRetryMin
+	}
+	if delay > managedNetworkReloadRetryMax {
+		delay = managedNetworkReloadRetryMax
+	}
+	pm.managedRuntimeReloadRetryDelay = delay
+	pending := pm.managedRuntimeReloadPending
+	pm.mu.Unlock()
+	if pending {
+		return
+	}
+	log.Printf("managed network runtime: reload left issues, retrying in %s", delay)
+	pm.requestManagedNetworkRuntimeReloadWithSource(delay, "retry")
+}
+
+// clearManagedNetworkRuntimeReloadSuppression lets events on names through
+// the suppression that follows a reload.
+func (pm *ProcessManager) clearManagedNetworkRuntimeReloadSuppression(names ...string) {
+	if pm == nil {
+		return
+	}
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	for _, name := range names {
+		delete(pm.managedRuntimeReloadSuppressUntil, strings.TrimSpace(name))
+	}
+}
+
+// managedRuntimeLinkInstance identifies one incarnation of an interface name:
+// a guest restart recreates its tap under the same name with a new ifindex.
+type managedRuntimeLinkInstance struct {
+	ifindex     int
+	masterIndex int
+}
+
+// noteManagedRuntimeLinkLifecycle records the instance of interface name and
+// reports whether this event created, removed or re-parented it. Reloads only
+// change existing interfaces, so such an event is never an echo of one.
+func (pm *ProcessManager) noteManagedRuntimeLinkLifecycle(name string, ifindex int, masterIndex int, deleted bool) bool {
+	name = strings.TrimSpace(name)
+	if pm == nil || name == "" {
+		return false
+	}
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if deleted {
+		delete(pm.managedRuntimeLinkInstances, name)
+		return true
+	}
+	if pm.managedRuntimeLinkInstances == nil {
+		pm.managedRuntimeLinkInstances = make(map[string]managedRuntimeLinkInstance)
+	}
+	current := managedRuntimeLinkInstance{ifindex: ifindex, masterIndex: masterIndex}
+	previous, known := pm.managedRuntimeLinkInstances[name]
+	pm.managedRuntimeLinkInstances[name] = current
+	return !known || previous != current
+}
+
 func (pm *ProcessManager) shouldSkipManagedNetworkAddrReload(fingerprint string) bool {
 	if pm == nil || strings.TrimSpace(fingerprint) == "" {
 		return false
@@ -390,9 +465,23 @@ func (pm *ProcessManager) detectManagedNetworkRuntimeDrift() {
 	pending := pm.managedRuntimeReloadPending
 	appliedFingerprint := strings.TrimSpace(pm.managedRuntimeReloadAppliedFingerprint)
 	shuttingDown := pm.shuttingDown
+	ipv6Runtime := pm.ipv6Runtime
 	pm.mu.Unlock()
 
-	if shuttingDown || pending || !hasManagedRuntime || appliedFingerprint == "" {
+	if shuttingDown || pending || !hasManagedRuntime {
+		return
+	}
+	// A guest restart recreates its tap under the same name: the effective
+	// state never changes, so only the runtime knows its dormant assignments
+	// can come back.
+	if reporter, ok := ipv6Runtime.(ipv6AssignmentDormantTargetReporter); ok {
+		if returned := reporter.ReturnedDormantTargets(); len(returned) > 0 {
+			log.Printf("managed network runtime: ipv6 assignment target(s) %s exist again, queueing targeted reload", strings.Join(returned, ","))
+			pm.requestManagedNetworkRuntimeReloadWithSource(0, "drift_check", returned...)
+			return
+		}
+	}
+	if appliedFingerprint == "" {
 		return
 	}
 
@@ -808,6 +897,7 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 			log.Printf("managed network runtime: targeted reload applied %s", reloadSummary)
 		}
 		pm.markManagedNetworkRuntimeReloadCompleted(reloadResult, reloadSummary, reloadErr)
+		pm.scheduleManagedNetworkRuntimeRetry(reloadErr)
 		return nil
 	}
 
@@ -823,6 +913,7 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 		log.Printf("managed network runtime: targeted reload applied %s", reloadSummary)
 	}
 	pm.markManagedNetworkRuntimeReloadCompleted(reloadResult, reloadSummary, reloadErr)
+	pm.scheduleManagedNetworkRuntimeRetry(reloadErr)
 	return nil
 }
 

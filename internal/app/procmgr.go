@@ -94,6 +94,8 @@ const (
 	managedNetworkDriftCheckEvery         = 10 * time.Second
 	managedNetworkSelfEventSuppressFor    = 2 * time.Second
 	managedNetworkLinkChangeSuppressFor   = 10 * time.Second
+	managedNetworkReloadRetryMin          = 5 * time.Second
+	managedNetworkReloadRetryMax          = time.Minute
 	pluginCatalogDriftCheckEvery          = 2 * time.Second
 )
 
@@ -362,6 +364,8 @@ type ProcessManager struct {
 	managedRuntimeReloadDueAt                      time.Time
 	managedRuntimeReloadInterfaces                 map[string]struct{}
 	managedRuntimeReloadSuppressUntil              map[string]time.Time
+	managedRuntimeReloadRetryDelay                 time.Duration
+	managedRuntimeLinkInstances                    map[string]managedRuntimeLinkInstance
 	managedRuntimeReloadLastRequestedAt            time.Time
 	managedRuntimeReloadLastRequestSource          string
 	managedRuntimeReloadLastRequestSummary         string
