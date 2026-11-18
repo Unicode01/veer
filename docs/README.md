@@ -37,12 +37,13 @@ VEER_VERSION=v1.2.3 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode0
 VEER_REF=dev bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
 WEB_BIND=0.0.0.0 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
 WEB_UI_ENABLED=false bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
+WEB_TLS=true bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
 READY_TIMEOUT_SECONDS=180 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
 VEER_INSTALL_PLUGINS=1 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh) -- --no-inherit-stats
 ```
 
-`WEB_BIND=0.0.0.0` 会让管理面接受远程连接，但 Veer 本身只提供 HTTP。仅应在受信管理网或 VPN 内使用；公网访问应保持 Veer 监听回环地址，并由启用 TLS 与访问控制的反向代理转发。对新建非回环配置、首次从回环地址改为远程监听，或在远程监听下显式更换令牌，`deploy.sh` 要求 `web_token`（以及非空的 `plugin_admin_token`）至少包含 24 个字符，一键部署生成的 32 字符随机令牌已满足要求。Veer 运行时为兼容既有及手工管理的配置，只会对远程监听下的短令牌输出安全警告而不会拒绝启动；应安排轮换，但不要在未同步更新 WHMCS/API 客户端时直接更换。
+`WEB_BIND=0.0.0.0` 会让管理面接受远程连接。新安装的管理面默认使用 HTTPS（`web_tls: true`，自签证书）；升级已有安装时保持原样，`config.json` 里没有 `web_tls` 的会写成 `false`，继续用明文 HTTP，需要时用 `WEB_TLS=true` 重新部署或改配置后重启开启，`WEB_TLS=false` 则关闭。明文 HTTP 的管理面仅应在受信管理网或 VPN 内使用。详见下文“管理面 HTTPS”。对新建非回环配置、首次从回环地址改为远程监听，或在远程监听下显式更换令牌，`deploy.sh` 要求 `web_token`（以及非空的 `plugin_admin_token`）至少包含 24 个字符，一键部署生成的 32 字符随机令牌已满足要求。Veer 运行时为兼容既有及手工管理的配置，只会对远程监听下的短令牌输出安全警告而不会拒绝启动；应安排轮换，但不要在未同步更新 WHMCS/API 客户端时直接更换。
 
 `bootstrap.sh` 默认下载最新 [GitHub Release](https://github.com/Unicode01/veer/releases) 中对应架构的 `veer-linux-<arch>.tar.gz`，按同一 release 的 `sha256sums.txt` 校验后，用包内的 `deploy.sh` 安装或热更新；目标机只需运行依赖，不安装 Go、clang 或 Git。安装方式由以下变量控制：
 
@@ -75,7 +76,7 @@ ssh root@server 'cd /tmp && chmod +x deploy.sh && ./deploy.sh'
 
 需要插件时额外上传 `veer-plugins.tar.gz`，并以 `VEER_INSTALL_PLUGINS=1 ./deploy.sh` 部署。安装插件文件与启用插件相互独立，升级时未请求安装不会删除或覆盖现有插件目录。
 
-部署默认把 `/opt/veer/veer` 链接为 `/usr/local/bin/veer`，之后可直接运行 `veer help`、`veer version`、`veer kfuncs status` 和 `veer plugin ...`。已有同名普通文件时不会覆盖，只给出警告；`VEER_LINK_CLI=0` 不创建链接，并移除此前为本安装创建的链接；`VEER_CLI_LINK_DIR` 可改为其他绝对路径目录。RHEL 系列 sudo 的 `secure_path` 默认不含 `/usr/local/bin`，可在 root shell 中运行或写完整路径。`plugin backup/restore` 在当前目录没有 `forward.db` 时，自动使用可执行文件所在安装目录的数据库和配置里的 `plugins_dir`。未知子命令会直接报错退出，不会误启动第二个 daemon。
+部署默认把 `/opt/veer/veer` 链接为 `/usr/local/bin/veer`，之后可直接运行 `veer help`、`veer version`、`veer kfuncs status`、`veer tls fingerprint` 和 `veer plugin ...`。已有同名普通文件时不会覆盖，只给出警告；`VEER_LINK_CLI=0` 不创建链接，并移除此前为本安装创建的链接；`VEER_CLI_LINK_DIR` 可改为其他绝对路径目录。RHEL 系列 sudo 的 `secure_path` 默认不含 `/usr/local/bin`，可在 root shell 中运行或写完整路径。`plugin backup/restore` 在当前目录没有 `forward.db` 时，自动使用可执行文件所在安装目录的数据库和配置里的 `plugins_dir`。未知子命令会直接报错退出，不会误启动第二个 daemon。
 
 部署后默认访问：
 
@@ -248,7 +249,20 @@ Authorization: Bearer <web_token>
 - `kernel_nat_port_min` / `kernel_nat_port_max`：内核 Full NAT / Egress NAT 的端口池，默认 20000–65535。NAT 地址就是宿主自己的地址，宿主连接用的临时端口（`net.ipv4.ip_local_port_range`，Linux 默认 32768–60999）若也被 NAT 占用，回包会被当作 NAT 回程转给内网主机（Full Cone 的回程不看对端），宿主那条连接只能超时。所以内核 NAT 启动时从端口池里去掉宿主的临时端口范围，取剩下较大的一段，默认配置下实际使用 20000–32767；运行时视图 TC/XDP 引擎的 `nat_port_min` / `nat_port_max` 显示实际范围。端口池整个落在临时端口范围内时按配置使用并记录警告。临时端口范围只在启动时读取，修改后重启 Veer 生效；需要更多 NAT 端口时可以调小宿主的临时端口范围，或把端口池配置到它之外
 - `kernel_tc_flow_cache`：TC 连接缓存，默认开启；只跑大量短连接时可设为 `false`，取舍见下文 Dataplane 一节
 - `xdp_generic`：网卡驱动没有原生 XDP 时，允许 XDP 程序（XDP 转发引擎和 XDP 插件）以 generic 模式挂载，默认开启；设为 `false` 只允许原生模式。旧配置 `experimental_features` 里的同名项不再生效，部署脚本会删除它
+- `web_tls`：管理面使用 HTTPS，`deploy.sh` 新安装写为 `true`；配置里没有这一项时按 `false` 处理，所以升级前的配置继续用明文 HTTP。`web_tls_cert_file` / `web_tls_key_file`：自备证书和私钥（PEM，相对路径相对安装目录），两项须同时设置；不设时使用自签证书。见下文“管理面 HTTPS”
 - `experimental_features`：实验特性开关，默认都应保持关闭，按需验证后再开
+
+## 管理面 HTTPS
+
+`web_tls` 为 `true` 时，管理面端口同时接受 HTTPS 和明文 HTTP，按连接的第一个字节区分：
+
+- HTTPS 对所有客户端开放，支持 HTTP/2，最低 TLS 1.2。
+- 明文 HTTP 只服务本机发起的连接（回环地址，或来源就是本机自己的地址），所以 `deploy.sh` 的 `/readyz` 探针、本机 WHMCS、本机反向代理都不用改。
+- 远程的明文请求：GET/HEAD 用 308 跳到 https，其他请求返回 400，不在网络上明文接收令牌。
+
+没有配置 `web_tls_cert_file` 时，Veer 第一次启动在安装目录的 `tls/` 下生成自签证书（ECDSA P-256，有效期 10 年，私钥 0600），包含 localhost、回环地址、主机名、`web_bind` 和当时各网卡的地址。证书生成后保持不变，重启和升级后指纹不变，客户端可以固定它；只在过期、文件损坏或执行 `veer tls regenerate` 时重新生成，指纹随之改变。浏览器首次访问会提示证书不受信任，请与 `veer tls fingerprint` 输出的 SHA-256 指纹（部署结束时也会打印）核对后继续。WHMCS 等远程 API 客户端改用 `https://` 地址；使用自签证书时需开启其跳过证书校验选项，或把证书导入客户端的信任库。
+
+自备证书（例如 ACME 签发）时设置 `web_tls_cert_file` 和 `web_tls_key_file`；文件更新后约 30 秒内自动换用新证书，不用重启。`veer tls regenerate` 只用于自签证书，执行后需重启服务。
 
 ## Dataplane
 

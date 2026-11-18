@@ -126,31 +126,38 @@ type statsListQuery struct {
 
 const maxStatsPageSize = 500
 
-func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) (*http.Server, error) {
+func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) (*apiServer, error) {
 	addr := apiListenAddr(cfg)
-	if apiBindExposesRemoteClients(cfg) {
-		log.Printf("SECURITY WARNING: management API %s is exposed over plaintext HTTP; restrict it to a trusted network or place it behind TLS", addr)
+	var panel *panelTLS
+	if cfg.WebTLSEnabled() {
+		var err error
+		if panel, err = setupPanelTLS(cfg, "."); err != nil {
+			return nil, fmt.Errorf("web TLS: %w", err)
+		}
+	} else if apiBindExposesRemoteClients(cfg) {
+		log.Printf("SECURITY WARNING: management API %s is exposed over plaintext HTTP; set web_tls to true, restrict it to a trusted network, or place it behind TLS", addr)
 	}
 	handler := buildAPIHandler(cfg, db, pm)
-	server := &http.Server{
-		Addr:              addr,
-		Handler:           handler,
-		ReadHeaderTimeout: apiServerReadHeaderTimeout,
-		ReadTimeout:       apiServerReadTimeout,
-		WriteTimeout:      apiServerWriteTimeout,
-		IdleTimeout:       apiServerIdleTimeout,
-		MaxHeaderBytes:    apiServerMaxHeaderBytes,
-	}
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
-	go func() {
-		log.Printf("web server listening on %s", addr)
-		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("http server: %v", err)
+	server := serveAPIListener(listener, handler, panel, func(h http.Handler) *http.Server {
+		return &http.Server{
+			Addr:              addr,
+			Handler:           h,
+			ReadHeaderTimeout: apiServerReadHeaderTimeout,
+			ReadTimeout:       apiServerReadTimeout,
+			WriteTimeout:      apiServerWriteTimeout,
+			IdleTimeout:       apiServerIdleTimeout,
+			MaxHeaderBytes:    apiServerMaxHeaderBytes,
 		}
-	}()
+	})
+	if panel != nil {
+		log.Printf("web server listening on %s over HTTPS (certificate sha256 %s); plain HTTP only from this host", addr, panel.fingerprint)
+	} else {
+		log.Printf("web server listening on %s", addr)
+	}
 	return server, nil
 }
 

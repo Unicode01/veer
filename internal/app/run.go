@@ -64,6 +64,10 @@ func Main(buildNonce string) {
 		exitOnVeerCLIError("hot-restart", err)
 		return
 	}
+	if handled, err := runTLSCLI(os.Args[1:], os.Stdout, os.Stderr); handled {
+		exitOnVeerCLIError("tls", err)
+		return
+	}
 
 	workerMode := flag.Bool("worker", false, "run in worker mode")
 	rangeWorkerMode := flag.Bool("range-worker", false, "run in range worker mode")

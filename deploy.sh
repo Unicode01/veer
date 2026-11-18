@@ -18,6 +18,8 @@
 #   WEB_BIND      Web 监听地址   (默认 127.0.0.1)
 #   WEB_UI_ENABLED 是否启用 Web UI (默认 true)
 #   WEB_PORT      Web 管理端口   (默认 8080)
+#   WEB_TLS       管理面使用 HTTPS（自签证书），对应 config.json 的 web_tls
+#                 (新安装默认 true；已有安装不指定时保持原状，未设置过的写为 false)
 #   WEB_TOKEN     Bearer Token，对应 config.json 的 web_token (默认随机生成；新远程配置至少 24 个字符)
 #   PLUGIN_ADMIN_TOKEN 插件高权限 Token，对应 plugin_admin_token (首次安装默认独立随机生成；新远程配置至少 24 个字符)
 #   VEER_SERVICE_MANAGER 服务管理器，auto/systemd/openrc，默认 auto
@@ -88,6 +90,8 @@ WEB_BIND_EXPLICIT=0
 [[ ${WEB_BIND+x} ]] && WEB_BIND_EXPLICIT=1
 WEB_UI_ENABLED_EXPLICIT=0
 [[ ${WEB_UI_ENABLED+x} ]] && WEB_UI_ENABLED_EXPLICIT=1
+WEB_TLS_EXPLICIT=0
+[[ ${WEB_TLS+x} ]] && WEB_TLS_EXPLICIT=1
 WEB_PORT_EXPLICIT=0
 [[ ${WEB_PORT+x} ]] && WEB_PORT_EXPLICIT=1
 WEB_TOKEN_EXPLICIT=0
@@ -112,6 +116,7 @@ READY_TIMEOUT_SECONDS="${READY_TIMEOUT_SECONDS:-120}"
 WEB_PORT="${WEB_PORT:-8080}"
 WEB_BIND="${WEB_BIND:-127.0.0.1}"
 WEB_UI_ENABLED="${WEB_UI_ENABLED:-true}"
+WEB_TLS="${WEB_TLS:-true}"
 WEB_TOKEN="${WEB_TOKEN:-$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)}"
 PLUGIN_ADMIN_TOKEN="${PLUGIN_ADMIN_TOKEN:-$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)}"
 REMOTE_MANAGEMENT_MINIMUM_TOKEN_CHARACTERS=24
@@ -1089,11 +1094,13 @@ sync_config_file() {
     FORWARD_DEPLOY_DEFAULT_PLUGIN_ADMIN_TOKEN="${PLUGIN_ADMIN_TOKEN}" \
     FORWARD_DEPLOY_EXPLICIT_WEB_BIND="${WEB_BIND_EXPLICIT}" \
     FORWARD_DEPLOY_EXPLICIT_WEB_UI_ENABLED="${WEB_UI_ENABLED_EXPLICIT}" \
+    FORWARD_DEPLOY_EXPLICIT_WEB_TLS="${WEB_TLS_EXPLICIT}" \
     FORWARD_DEPLOY_EXPLICIT_WEB_PORT="${WEB_PORT_EXPLICIT}" \
     FORWARD_DEPLOY_EXPLICIT_WEB_TOKEN="${WEB_TOKEN_EXPLICIT}" \
     FORWARD_DEPLOY_EXPLICIT_PLUGIN_ADMIN_TOKEN="${PLUGIN_ADMIN_TOKEN_EXPLICIT}" \
     FORWARD_DEPLOY_WEB_BIND="${WEB_BIND}" \
     FORWARD_DEPLOY_WEB_UI_ENABLED="${WEB_UI_ENABLED}" \
+    FORWARD_DEPLOY_WEB_TLS="${WEB_TLS}" \
     FORWARD_DEPLOY_WEB_PORT="${WEB_PORT}" \
     FORWARD_DEPLOY_WEB_TOKEN="${WEB_TOKEN}" \
     FORWARD_DEPLOY_PLUGIN_ADMIN_TOKEN="${PLUGIN_ADMIN_TOKEN}" \
@@ -1179,7 +1186,7 @@ def choose_value(key: str, default_value):
         return explicit_values[key]
     if key == "web_bind":
         value = get_current_string(key)
-    elif key == "web_ui_enabled":
+    elif key in ("web_ui_enabled", "web_tls"):
         value = get_current_bool(key)
     elif key == "web_port":
         value = get_current_port(key)
@@ -1201,6 +1208,7 @@ def choose_value(key: str, default_value):
 explicit_keys = {
     "web_bind": os.environ["FORWARD_DEPLOY_EXPLICIT_WEB_BIND"] == "1",
     "web_ui_enabled": os.environ["FORWARD_DEPLOY_EXPLICIT_WEB_UI_ENABLED"] == "1",
+    "web_tls": os.environ.get("FORWARD_DEPLOY_EXPLICIT_WEB_TLS", "0") == "1",
     "web_port": os.environ["FORWARD_DEPLOY_EXPLICIT_WEB_PORT"] == "1",
     "web_token": os.environ["FORWARD_DEPLOY_EXPLICIT_WEB_TOKEN"] == "1",
     "plugin_admin_token": os.environ["FORWARD_DEPLOY_EXPLICIT_PLUGIN_ADMIN_TOKEN"] == "1",
@@ -1209,6 +1217,7 @@ explicit_keys = {
 explicit_values = {
     "web_bind": os.environ["FORWARD_DEPLOY_WEB_BIND"],
     "web_ui_enabled": env_bool("FORWARD_DEPLOY_WEB_UI_ENABLED"),
+    "web_tls": os.environ.get("FORWARD_DEPLOY_WEB_TLS", "true") == "true",
     "web_port": env_int("FORWARD_DEPLOY_WEB_PORT"),
     "web_token": os.environ["FORWARD_DEPLOY_WEB_TOKEN"],
     "plugin_admin_token": os.environ["FORWARD_DEPLOY_PLUGIN_ADMIN_TOKEN"],
@@ -1217,6 +1226,7 @@ explicit_values = {
 hardcoded_defaults = OrderedDict([
     ("web_bind", os.environ["FORWARD_DEPLOY_DEFAULT_WEB_BIND"]),
     ("web_ui_enabled", env_bool("FORWARD_DEPLOY_DEFAULT_WEB_UI_ENABLED")),
+    ("web_tls", True),
     ("web_port", env_int("FORWARD_DEPLOY_DEFAULT_WEB_PORT")),
     ("web_token", os.environ["FORWARD_DEPLOY_DEFAULT_WEB_TOKEN"]),
     ("plugin_admin_token", os.environ["FORWARD_DEPLOY_DEFAULT_PLUGIN_ADMIN_TOKEN"]),
@@ -1290,6 +1300,9 @@ for key, value in template_defaults.items():
     defaults[key] = value
 defaults["web_bind"] = os.environ["FORWARD_DEPLOY_DEFAULT_WEB_BIND"]
 defaults["web_ui_enabled"] = env_bool("FORWARD_DEPLOY_DEFAULT_WEB_UI_ENABLED")
+# New installs serve the panel over HTTPS. A config written before web_tls
+# existed ran plain HTTP, so it gets false and keeps doing so.
+defaults["web_tls"] = not config_exists
 defaults["web_port"] = env_int("FORWARD_DEPLOY_DEFAULT_WEB_PORT")
 defaults["web_token"] = os.environ["FORWARD_DEPLOY_DEFAULT_WEB_TOKEN"]
 defaults["plugin_admin_token"] = os.environ["FORWARD_DEPLOY_DEFAULT_PLUGIN_ADMIN_TOKEN"]
@@ -1398,6 +1411,7 @@ with open(sys.argv[1], "r", encoding="utf-8") as f:
 values = {
     "WEB_BIND": str(data.get("web_bind", "127.0.0.1")),
     "WEB_UI_ENABLED": "true" if data.get("web_ui_enabled", True) else "false",
+    "WEB_TLS": "true" if data.get("web_tls", False) is True else "false",
     "WEB_PORT": str(data.get("web_port", 8080)),
     "WEB_TOKEN": str(data.get("web_token", "")),
 	"PLUGIN_ADMIN_TOKEN": str(data.get("plugin_admin_token", "")),
@@ -1416,6 +1430,9 @@ log_explicit_config_overrides() {
     fi
     if [[ "${WEB_UI_ENABLED_EXPLICIT}" == "1" ]]; then
         overrides="${overrides} web_ui_enabled"
+    fi
+    if [[ "${WEB_TLS_EXPLICIT}" == "1" ]]; then
+        overrides="${overrides} web_tls"
     fi
     if [[ "${WEB_PORT_EXPLICIT}" == "1" ]]; then
         overrides="${overrides} web_port"
@@ -1566,6 +1583,7 @@ check_cgroup_v2
 check_host_network_persistence
 WEB_BIND="$(normalize_bind_value "$WEB_BIND")"
 WEB_UI_ENABLED="$(normalize_bool_json "$WEB_UI_ENABLED")" || fail "WEB_UI_ENABLED 仅支持 true/false/on/off/yes/no/1/0"
+WEB_TLS="$(normalize_bool_json "$WEB_TLS")" || fail "WEB_TLS 仅支持 true/false/on/off/yes/no/1/0"
 validate_port "$WEB_PORT"
 
 # ---------- 识别现有安装 ----------
@@ -1744,8 +1762,8 @@ service_reload_manager
 ok "兼容入口已就绪: ${INSTALL_DIR}/forward, $(service_label "${LEGACY_SERVICE_NAME}")"
 
 # ---------- 防火墙 ----------
-if ! is_loopback_bind "$WEB_BIND"; then
-    warn "管理面 web_bind=${WEB_BIND} 使用明文 HTTP；仅应暴露到受信管理网/VPN，公网访问请在前置代理终止 TLS 并限制来源"
+if ! is_loopback_bind "$WEB_BIND" && [[ "${WEB_TLS}" != "true" ]]; then
+    warn "管理面 web_bind=${WEB_BIND} 使用明文 HTTP；可用 WEB_TLS=true 重新部署启用 HTTPS，或仅暴露到受信管理网/VPN、由前置代理终止 TLS"
 fi
 if command -v ufw &>/dev/null; then
     info "配置 UFW 防火墙规则..."
@@ -1809,20 +1827,32 @@ echo -e "  安装目录:  ${CYAN}${INSTALL_DIR}${NC}"
 echo -e "  配置文件:  ${CYAN}${INSTALL_DIR}/config.json${NC}"
 echo -e "  数据库:    ${CYAN}${INSTALL_DIR}/forward.db${NC}"
 echo ""
+PANEL_SCHEME="http"
+if [[ "${WEB_TLS}" == "true" ]]; then
+    PANEL_SCHEME="https"
+fi
 if [[ "${WEB_UI_ENABLED}" == "true" ]]; then
     if is_loopback_bind "$WEB_BIND"; then
-        echo -e "  管理面板:  ${CYAN}http://$(format_url_host "${WEB_BIND}"):${WEB_PORT}${NC}"
+        echo -e "  管理面板:  ${CYAN}${PANEL_SCHEME}://$(format_url_host "${WEB_BIND}"):${WEB_PORT}${NC}"
     elif [[ "${WEB_BIND}" == "0.0.0.0" || "${WEB_BIND}" == "::" ]]; then
-        echo -e "  管理面板:  ${CYAN}http://<服务器IP>:${WEB_PORT}${NC}"
+        echo -e "  管理面板:  ${CYAN}${PANEL_SCHEME}://<服务器IP>:${WEB_PORT}${NC}"
     else
-        echo -e "  管理面板:  ${CYAN}http://$(format_url_host "${WEB_BIND}"):${WEB_PORT}${NC}"
+        echo -e "  管理面板:  ${CYAN}${PANEL_SCHEME}://$(format_url_host "${WEB_BIND}"):${WEB_PORT}${NC}"
     fi
 else
     echo -e "  Web UI:    ${YELLOW}disabled${NC}"
     if [[ "${WEB_BIND}" == "0.0.0.0" || "${WEB_BIND}" == "::" ]]; then
-        echo -e "  API Base:  ${CYAN}http://<服务器IP>:${WEB_PORT}/api${NC}"
+        echo -e "  API Base:  ${CYAN}${PANEL_SCHEME}://<服务器IP>:${WEB_PORT}/api${NC}"
     else
-        echo -e "  API Base:  ${CYAN}http://$(format_url_host "${WEB_BIND}"):${WEB_PORT}/api${NC}"
+        echo -e "  API Base:  ${CYAN}${PANEL_SCHEME}://$(format_url_host "${WEB_BIND}"):${WEB_PORT}/api${NC}"
+    fi
+fi
+if [[ "${WEB_TLS}" == "true" ]]; then
+    if PANEL_TLS_FINGERPRINT="$("${INSTALL_DIR}/veer" tls fingerprint --install-dir "${INSTALL_DIR}" 2>/dev/null)"; then
+        echo -e "  证书指纹:  ${CYAN}SHA-256 ${PANEL_TLS_FINGERPRINT}${NC}"
+        if [[ -z "$(grep -E '"web_tls_cert_file"[[:space:]]*:[[:space:]]*"[^"]+' "${INSTALL_DIR}/config.json" 2>/dev/null || true)" ]]; then
+            echo -e "             ${YELLOW}自签证书：浏览器首次访问会提示不受信任，请核对指纹后继续${NC}"
+        fi
     fi
 fi
 echo -e "  就绪探针:  ${CYAN}${API_READY_URL}${NC}"

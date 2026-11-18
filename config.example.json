@@ -1,6 +1,7 @@
 {
   "web_bind": "127.0.0.1",
   "web_ui_enabled": true,
+  "web_tls": true,
   "web_port": 8080,
   "web_token": "change-me-to-a-secure-token",
   "plugin_admin_token": "",

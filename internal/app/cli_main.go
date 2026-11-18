@@ -20,11 +20,12 @@ func writeVeerUsage(w io.Writer) {
   veer plugin <command>    plugin development, packaging, state backup and repositories
   veer kfuncs <command>    optional kernel helper module status and rebuild
   veer hot-restart check   tell whether the next hot restart keeps kernel NAT state
+  veer tls <command>       panel certificate fingerprint and renewal
   veer version [--json]    show build information
   veer help                show this help
 
-Run "veer plugin help", "veer kfuncs help" or "veer hot-restart help" for
-command details.
+Run "veer plugin help", "veer kfuncs help", "veer hot-restart help" or
+"veer tls help" for command details.
 `)
 }
 

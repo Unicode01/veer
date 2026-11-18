@@ -40,6 +40,7 @@ def run_scenario(
     web_token_explicit: bool = False,
     plugin_admin_token: str = STRONG_ADMIN_TOKEN,
     plugin_admin_token_explicit: bool = False,
+    web_tls: Optional[bool] = None,
     expected_exit: int = 0,
     expected_error_field: str = "",
 ) -> Optional[dict]:
@@ -66,6 +67,8 @@ def run_scenario(
             "FORWARD_DEPLOY_WEB_PORT": "8080",
             "FORWARD_DEPLOY_WEB_TOKEN": web_token,
             "FORWARD_DEPLOY_PLUGIN_ADMIN_TOKEN": plugin_admin_token,
+            "FORWARD_DEPLOY_EXPLICIT_WEB_TLS": "0" if web_tls is None else "1",
+            "FORWARD_DEPLOY_WEB_TLS": "false" if web_tls is False else "true",
             "PYTHONUTF8": "1",
         }
     )
@@ -90,6 +93,11 @@ def run_scenario(
     return json.loads(config_path.read_text(encoding="utf-8"))
 
 
+def result_new_tls(script: str, root: Path) -> Optional[bool]:
+    result = run_scenario(script, root, "new-tls-default", None)
+    return None if result is None else result.get("web_tls")
+
+
 def main() -> None:
     script = load_embedded_config_script()
     compile(script, "deploy.sh:sync_config_file", "exec")
@@ -111,6 +119,27 @@ def main() -> None:
         assert result is not None
         assert result["web_token"] == "short-token"
         assert result["plugin_admin_token"] == "short-admin"
+        # A config from before web_tls keeps plain HTTP; a new one gets HTTPS.
+        assert result["web_tls"] is False, result.get("web_tls")
+        assert result_new_tls(script, root) is True
+
+        local = {"web_bind": "127.0.0.1", "web_token": STRONG_WEB_TOKEN, "plugin_admin_token": STRONG_ADMIN_TOKEN}
+        result = run_scenario(script, root, "existing-keeps-tls-on", dict(local, web_tls=True))
+        assert result is not None and result["web_tls"] is True
+        result = run_scenario(script, root, "existing-opts-into-tls", local, web_tls=True)
+        assert result is not None and result["web_tls"] is True
+        result = run_scenario(script, root, "existing-turns-tls-off", dict(local, web_tls=True), web_tls=False)
+        assert result is not None and result["web_tls"] is False
+        result = run_scenario(script, root, "new-without-tls", None, web_tls=False)
+        assert result is not None and result["web_tls"] is False
+        run_scenario(
+            script,
+            root,
+            "existing-tls-not-bool",
+            dict(local, web_tls="yes"),
+            expected_exit=1,
+            expected_error_field="web_tls",
+        )
 
         result = run_scenario(
             script,
