@@ -1102,6 +1102,7 @@
       'status.running': '运行中',
       'status.stopped': '已停止',
       'status.overridden': '已由子接口覆盖',
+      'status.idle': '等待子接口',
       'errors.operationFailed': '操作失败: {{message}}',
       'errors.deleteFailed': '删除失败: {{message}}',
       'errors.saveFailed': '保存失败: {{message}}',
@@ -2303,6 +2304,7 @@
       'status.running': 'Running',
       'status.stopped': 'Stopped',
       'status.overridden': 'Covered by child rules',
+      'status.idle': 'Waiting for child interfaces',
       'errors.operationFailed': 'Operation failed: {{message}}',
       'errors.deleteFailed': 'Delete failed: {{message}}',
       'errors.saveFailed': 'Save failed: {{message}}',
@@ -2710,6 +2712,7 @@
     if (status === 'draining') return { badge: 'draining', text: app.t('status.draining') };
     if (status === 'running') return { badge: 'running', text: app.t('status.running') };
     if (status === 'overridden') return { badge: 'kernel', text: app.t('status.overridden') };
+    if (status === 'idle') return { badge: 'stopped', text: app.t('status.idle') };
     return { badge: 'stopped', text: app.t('status.stopped') };
   };
 

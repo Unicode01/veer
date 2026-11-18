@@ -532,6 +532,7 @@
     if (status === 'draining') return { badge: 'draining', text: '更新中' };
     if (status === 'running') return { badge: 'running', text: '运行中' };
     if (status === 'overridden') return { badge: 'kernel', text: '已由子接口覆盖' };
+    if (status === 'idle') return { badge: 'stopped', text: '等待子接口' };
     return { badge: 'stopped', text: '已停止' };
   };
 

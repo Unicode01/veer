@@ -498,7 +498,7 @@ func (pm *ProcessManager) isReadyLocked(now time.Time) bool {
 		if !ok {
 			return false
 		}
-		if egressNATPlanIsFullyOverridden(plan) {
+		if egressNATPlanHasNothingToApply(plan) {
 			continue
 		}
 		if !plan.KernelEligible || plan.EffectiveEngine != ruleEngineKernel || !pm.kernelEgressNATs[id] || strings.TrimSpace(pm.kernelEgressNATEngines[id]) == "" {
@@ -3256,6 +3256,9 @@ func (pm *ProcessManager) egressNATRuntimeStatus(id int64, enabled bool) string 
 	if ok && egressNATPlanIsFullyOverridden(plan) {
 		return "overridden"
 	}
+	if ok && egressNATPlanIsWaitingForChildren(plan) {
+		return "idle"
+	}
 	if ok && egressNATPlanIsUnavailable(plan) {
 		return "error"
 	}
@@ -3272,6 +3275,18 @@ func egressNATPlanIsUnavailable(plan ruleDataplanePlan) bool {
 func egressNATPlanIsFullyOverridden(plan ruleDataplanePlan) bool {
 	return plan.KernelEligible && plan.EffectiveEngine == ruleEngineKernel &&
 		plan.KernelReason == egressNATFullyOverriddenReason && plan.FallbackReason == ""
+}
+
+func egressNATPlanIsWaitingForChildren(plan ruleDataplanePlan) bool {
+	return plan.KernelEligible && plan.EffectiveEngine == ruleEngineKernel &&
+		plan.KernelReason == egressNATWaitingForChildrenReason && plan.FallbackReason == ""
+}
+
+// egressNATPlanHasNothingToApply covers the NATs that need no kernel entries:
+// every child is covered by a more specific NAT, or there is no child yet.
+// Readiness does not wait for them.
+func egressNATPlanHasNothingToApply(plan ruleDataplanePlan) bool {
+	return egressNATPlanIsFullyOverridden(plan) || egressNATPlanIsWaitingForChildren(plan)
 }
 
 func (pm *ProcessManager) buildEgressNATStatus(item EgressNAT, status string) EgressNATStatus {

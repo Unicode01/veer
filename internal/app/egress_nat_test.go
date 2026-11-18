@@ -804,3 +804,49 @@ func TestEnabledEgressNATIDsExcludesDisabledItems(t *testing.T) {
 		t.Fatalf("enabledEgressNATIDs() = %+v, want IDs 1 and 3", ids)
 	}
 }
+
+// A managed bridge before its first guest has no child interface for its
+// egress NAT. That is an idle NAT, not a failed one: /readyz must not wait
+// for it, or deploy.sh would time out and roll back on such a host.
+func TestEgressNATWithoutChildInterfacesIsIdleAndReady(t *testing.T) {
+	planner := newRuleDataplanePlanner(stubKernelSupportRuntime{available: true, supported: true}, ruleEngineKernel)
+	snapshot := newEgressNATInterfaceSnapshot([]InterfaceInfo{
+		{Name: "vmbr1", Kind: "bridge"}, {Name: "vmbr0", Kind: "bridge"},
+	}, nil)
+	item := EgressNAT{ID: 9, ParentInterface: "vmbr1", OutInterface: "vmbr0", Protocol: "tcp+udp+icmp", Enabled: true}
+	nextID := int64(1)
+	candidates, plans := buildEgressNATKernelCandidatesWithSnapshot([]EgressNAT{item}, planner, 0, 0, &nextID, snapshot)
+	plan := plans[item.ID]
+	if len(candidates) != 0 || !egressNATPlanIsWaitingForChildren(plan) {
+		t.Fatalf("no children: candidates=%v plan=%+v, want an idle plan", candidates, plan)
+	}
+
+	pm := &ProcessManager{
+		ready:                  true,
+		enabledEgressNATs:      map[int64]bool{item.ID: true},
+		egressNATPlans:         map[int64]ruleDataplanePlan{item.ID: plan},
+		kernelEgressNATs:       map[int64]bool{},
+		kernelEgressNATEngines: map[int64]string{},
+	}
+	if ready, _, _ := pm.readinessReconcileSnapshot(); !ready {
+		t.Fatal("an egress NAT waiting for child interfaces keeps the daemon unready")
+	}
+	if got := pm.egressNATRuntimeStatus(item.ID, true); got != "idle" {
+		t.Fatalf("status = %q, want idle", got)
+	}
+
+	// Once a guest's tap joins the bridge the NAT has work, and readiness
+	// waits for its kernel entries again.
+	snapshot = newEgressNATInterfaceSnapshot([]InterfaceInfo{
+		{Name: "vmbr1", Kind: "bridge"}, {Name: "vmbr0", Kind: "bridge"},
+		{Name: "tap101i0", Parent: "vmbr1", Kind: "tun"},
+	}, nil)
+	candidates, plans = buildEgressNATKernelCandidatesWithSnapshot([]EgressNAT{item}, planner, 0, 0, &nextID, snapshot)
+	if len(candidates) == 0 || egressNATPlanHasNothingToApply(plans[item.ID]) {
+		t.Fatalf("with a child: candidates=%v plan=%+v, want kernel entries", candidates, plans[item.ID])
+	}
+	pm.egressNATPlans[item.ID] = plans[item.ID]
+	if ready, _, _ := pm.readinessReconcileSnapshot(); ready {
+		t.Fatal("ready before the NAT's kernel entries are applied")
+	}
+}
