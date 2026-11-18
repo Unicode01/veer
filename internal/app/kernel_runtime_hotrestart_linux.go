@@ -1170,6 +1170,19 @@ func pinnedKernelHotRestartMapSource(engine string) kernelHotRestartMapSource {
 	}
 }
 
+// kernelNATMapNames are every NAT map a runtime can hold: the port classes
+// and the mappings on shared ports, of both banks.
+var kernelNATMapNames = []string{
+	kernelNatPortsMapName,
+	kernelNatPortsMapNameV6,
+	kernelTCNatPortsOldMapNameV4,
+	kernelTCNatPortsOldMapNameV6,
+	kernelNatPeersMapNameV4,
+	kernelNatPeersMapNameV6,
+	kernelTCNatPeersOldMapNameV4,
+	kernelTCNatPeersOldMapNameV6,
+}
+
 // kernelTCHotRestartPreservedMapNames lists the maps a tc runtime pins for its
 // successor. present reports whether the running collection has a map.
 func kernelTCHotRestartPreservedMapNames(present func(string) bool, migrationFlags uint32, skipStats bool) []string {
@@ -1181,12 +1194,12 @@ func kernelTCHotRestartPreservedMapNames(present func(string) bool, migrationFla
 			}
 		}
 	}
-	add(kernelFlowsMapNameV6, kernelNatPortsMapNameV6)
+	add(kernelNatPeersMapNameV4, kernelFlowsMapNameV6, kernelNatPortsMapNameV6, kernelNatPeersMapNameV6)
 	if migrationFlags&tcFlowMigrationFlagV4Old != 0 {
-		add(kernelTCFlowsOldMapNameV4, kernelTCNatPortsOldMapNameV4)
+		add(kernelTCFlowsOldMapNameV4, kernelTCNatPortsOldMapNameV4, kernelTCNatPeersOldMapNameV4)
 	}
 	if migrationFlags&tcFlowMigrationFlagV6Old != 0 {
-		add(kernelTCFlowsOldMapNameV6, kernelTCNatPortsOldMapNameV6)
+		add(kernelTCFlowsOldMapNameV6, kernelTCNatPortsOldMapNameV6, kernelTCNatPeersOldMapNameV6)
 	}
 	if !skipStats {
 		names = append(names, kernelStatsMapName)
@@ -1198,25 +1211,29 @@ func kernelTCHotRestartPreservedMapNames(present func(string) bool, migrationFla
 // its successor. keepNAT is set when any NAT map holds entries.
 func kernelXDPHotRestartPreservedMapNames(present func(string) bool, migrationFlags uint32, keepNAT bool, skipStats bool) []string {
 	names := []string{kernelFlowsMapName}
-	if present(kernelFlowsMapNameV6) {
-		names = append(names, kernelFlowsMapNameV6)
+	add := func(candidates ...string) {
+		for _, name := range candidates {
+			if present(name) {
+				names = append(names, name)
+			}
+		}
 	}
+	add(kernelFlowsMapNameV6)
 	if keepNAT {
 		names = append(names, kernelNatPortsMapName)
-		if present(kernelNatPortsMapNameV6) {
-			names = append(names, kernelNatPortsMapNameV6)
-		}
+		add(kernelNatPeersMapNameV4, kernelNatPortsMapNameV6, kernelNatPeersMapNameV6)
 	}
 	if migrationFlags&xdpFlowMigrationFlagV4Old != 0 {
 		names = append(names, kernelXDPFlowsOldMapNameV4)
 		if keepNAT {
 			names = append(names, kernelTCNatPortsOldMapNameV4)
+			add(kernelTCNatPeersOldMapNameV4)
 		}
 	}
 	if migrationFlags&xdpFlowMigrationFlagV6Old != 0 {
 		names = append(names, kernelXDPFlowsOldMapNameV6)
-		if keepNAT && present(kernelTCNatPortsOldMapNameV6) {
-			names = append(names, kernelTCNatPortsOldMapNameV6)
+		if keepNAT {
+			add(kernelTCNatPortsOldMapNameV6, kernelTCNatPeersOldMapNameV6)
 		}
 	}
 	if !skipStats {
@@ -1234,10 +1251,14 @@ func kernelTCHotRestartFlexibleCapacityMaps() map[string]bool {
 		kernelFlowsMapNameV6:         true,
 		kernelNatPortsMapName:        true,
 		kernelNatPortsMapNameV6:      true,
+		kernelNatPeersMapNameV4:      true,
+		kernelNatPeersMapNameV6:      true,
 		kernelTCFlowsOldMapNameV4:    true,
 		kernelTCFlowsOldMapNameV6:    true,
 		kernelTCNatPortsOldMapNameV4: true,
 		kernelTCNatPortsOldMapNameV6: true,
+		kernelTCNatPeersOldMapNameV4: true,
+		kernelTCNatPeersOldMapNameV6: true,
 	}
 }
 
@@ -1251,8 +1272,12 @@ func kernelXDPHotRestartFlexibleCapacityMaps() map[string]bool {
 		kernelXDPFlowsOldMapNameV6:   true,
 		kernelNatPortsMapName:        true,
 		kernelNatPortsMapNameV6:      true,
+		kernelNatPeersMapNameV4:      true,
+		kernelNatPeersMapNameV6:      true,
 		kernelTCNatPortsOldMapNameV4: true,
 		kernelTCNatPortsOldMapNameV6: true,
+		kernelTCNatPeersOldMapNameV4: true,
+		kernelTCNatPeersOldMapNameV6: true,
 	}
 }
 
@@ -1385,6 +1410,12 @@ func buildTCKernelHotRestartMapState(desired kernelMapCapacities, source kernelH
 		state.replacements[kernelTCNatPortsOldMapNameV6] = natOldMapV6
 	}
 
+	peers, err := loadKernelHotRestartNATPeerMaps(source, state)
+	if err != nil {
+		state.close()
+		return nil, fmt.Errorf("load pinned tc nat peer maps: %w", err)
+	}
+
 	if !skipStats {
 		statsMap, ok, err := source.load(kernelStatsMapName)
 		if err != nil {
@@ -1453,23 +1484,27 @@ func buildTCKernelHotRestartMapState(desired kernelMapCapacities, source kernelH
 		delete(state.replacements, kernelNatPortsMapName)
 		delete(state.replacements, kernelFlowsMapNameV6)
 		delete(state.replacements, kernelNatPortsMapNameV6)
+		peers.retireActive(state)
 		if flowsMap != nil && natMap != nil {
 			state.replacements[kernelTCFlowsOldMapNameV4] = flowsMap
 			state.replacements[kernelTCNatPortsOldMapNameV4] = natMap
+			peers.adoptAsOld(state, kernelNatPeersMapNameV4, kernelTCNatPeersOldMapNameV4)
 			state.tcFlowMigrationFlags |= tcFlowMigrationFlagV4Old
 		}
 		if flowsMapV6 != nil && natMapV6 != nil {
 			state.replacements[kernelTCFlowsOldMapNameV6] = flowsMapV6
 			state.replacements[kernelTCNatPortsOldMapNameV6] = natMapV6
+			peers.adoptAsOld(state, kernelNatPeersMapNameV6, kernelTCNatPeersOldMapNameV6)
 			state.tcFlowMigrationFlags |= tcFlowMigrationFlagV6Old
 		}
+		peers.closeUnused()
 	} else {
 		for _, m := range []*ebpf.Map{flowsMap, flowsMapV6} {
 			if capacity := kernelRuntimeMapCapacity(m); capacity > 0 && capacity < state.actualCapacities.Flows {
 				state.actualCapacities.Flows = capacity
 			}
 		}
-		for _, m := range []*ebpf.Map{natMap, natMapV6} {
+		for _, m := range []*ebpf.Map{natMap, natMapV6, peers.maps[kernelNatPeersMapNameV4], peers.maps[kernelNatPeersMapNameV6]} {
 			if capacity := kernelRuntimeMapCapacity(m); capacity > 0 && capacity < state.actualCapacities.NATPorts {
 				state.actualCapacities.NATPorts = capacity
 			}
@@ -1496,6 +1531,58 @@ func buildTCKernelHotRestartMapState(desired kernelMapCapacities, source kernelH
 		)
 	}
 	return state, nil
+}
+
+// kernelHotRestartNATPeerMaps are the preserved maps of mappings on shared NAT
+// ports. A predecessor from before ports were shared has none: its flows
+// hold exclusive ports, and the successor starts these maps empty. Each
+// follows its bank's nat_ports map, so they play no part in deciding
+// whether a preserved map set is complete.
+type kernelHotRestartNATPeerMaps struct {
+	maps map[string]*ebpf.Map
+	used map[string]bool
+}
+
+func loadKernelHotRestartNATPeerMaps(source kernelHotRestartMapSource, state *kernelHotRestartMapState) (kernelHotRestartNATPeerMaps, error) {
+	peers := kernelHotRestartNATPeerMaps{maps: make(map[string]*ebpf.Map), used: make(map[string]bool)}
+	for _, name := range []string{kernelNatPeersMapNameV4, kernelNatPeersMapNameV6, kernelTCNatPeersOldMapNameV4, kernelTCNatPeersOldMapNameV6} {
+		m, ok, err := source.load(name)
+		if err != nil {
+			return peers, fmt.Errorf("load %s: %w", name, err)
+		}
+		if ok {
+			peers.maps[name] = m
+			peers.used[name] = true
+			state.replacements[name] = m
+		}
+	}
+	return peers, nil
+}
+
+// retireActive takes the preserved peer maps out of the successor's banks
+// when the predecessor's active bank becomes the successor's old one;
+// adoptAsOld then moves each active map along with its bank.
+func (peers kernelHotRestartNATPeerMaps) retireActive(state *kernelHotRestartMapState) {
+	for name := range peers.maps {
+		delete(state.replacements, name)
+		peers.used[name] = false
+	}
+}
+
+func (peers kernelHotRestartNATPeerMaps) adoptAsOld(state *kernelHotRestartMapState, active string, old string) {
+	if m := peers.maps[active]; m != nil {
+		state.replacements[old] = m
+		peers.used[active] = true
+	}
+}
+
+// closeUnused closes the preserved peer maps that no bank took.
+func (peers kernelHotRestartNATPeerMaps) closeUnused() {
+	for name, m := range peers.maps {
+		if !peers.used[name] {
+			_ = m.Close()
+		}
+	}
 }
 
 func loadXDPKernelHotRestartState(desired kernelMapCapacities, opts kernelHotRestartValidationOptions) (*kernelHotRestartMapState, error) {
@@ -1636,6 +1723,12 @@ func buildXDPKernelHotRestartMapState(desired kernelMapCapacities, source kernel
 		state.replacements[kernelTCNatPortsOldMapNameV6] = natOldMapV6
 	}
 
+	peers, err := loadKernelHotRestartNATPeerMaps(source, state)
+	if err != nil {
+		state.close()
+		return nil, fmt.Errorf("load pinned xdp nat peer maps: %w", err)
+	}
+
 	if haveOldNATV4 && state.xdpFlowMigrationFlags&xdpFlowMigrationFlagV4Old == 0 {
 		state.close()
 		return nil, newKernelHotRestartIncompatibleError(
@@ -1670,11 +1763,13 @@ func buildXDPKernelHotRestartMapState(desired kernelMapCapacities, source kernel
 		delete(state.replacements, kernelFlowsMapNameV6)
 		delete(state.replacements, kernelNatPortsMapName)
 		delete(state.replacements, kernelNatPortsMapNameV6)
+		peers.retireActive(state)
 		if flowsMap != nil {
 			state.replacements[kernelXDPFlowsOldMapNameV4] = flowsMap
 			state.xdpFlowMigrationFlags |= xdpFlowMigrationFlagV4Old
 			if natMap != nil {
 				state.replacements[kernelTCNatPortsOldMapNameV4] = natMap
+				peers.adoptAsOld(state, kernelNatPeersMapNameV4, kernelTCNatPeersOldMapNameV4)
 			}
 		}
 		if flowsMapV6 != nil {
@@ -1682,8 +1777,10 @@ func buildXDPKernelHotRestartMapState(desired kernelMapCapacities, source kernel
 			state.xdpFlowMigrationFlags |= xdpFlowMigrationFlagV6Old
 			if natMapV6 != nil {
 				state.replacements[kernelTCNatPortsOldMapNameV6] = natMapV6
+				peers.adoptAsOld(state, kernelNatPeersMapNameV6, kernelTCNatPeersOldMapNameV6)
 			}
 		}
+		peers.closeUnused()
 	} else {
 		if flowCapacity := kernelRuntimeMapCapacity(flowsMap); flowCapacity > 0 && flowCapacity < state.actualCapacities.Flows {
 			state.actualCapacities.Flows = flowCapacity

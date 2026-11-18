@@ -814,6 +814,7 @@ TC 连接缓存的字段同样分两层：顶层 `kernel_tc_flow_cache` 是配�
 - map 容量与占用
 - `degraded` / `degraded_reason`：当前 map 容量低于期望容量时的降级状态和原因
 - `flows_map_old_capacity_v4/v6`、`nat_map_old_capacity_v4/v6`：迁移期间仍保留并计入的旧 map bank 容量；非零不代表泄漏
+- `nat_map_entries`、`nat_map_entries_v4/v6`：内核 NAT 映射数，即独占端口（Full Cone 和共享端口之前建立的连接）加共享端口上的映射；`nat_map_peer_entries` 是其中共享端口上的映射数，`nat_map_shared_ports` 是被共享的端口数（含回收中的端口），后者不计入映射数。对称型 Egress NAT 和非透明端口转发按对端共享端口，见 README 的 `kernel_nat_port_min` / `kernel_nat_port_max`
 - attach mode 与 attachment health
 - retry / self-heal / cooldown / backoff
 - netlink recover 与 attachment heal 状态

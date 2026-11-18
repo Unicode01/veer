@@ -31,10 +31,14 @@ var hotRestartCheckMapNames = []string{
 	kernelFlowsMapNameV6,
 	kernelNatPortsMapName,
 	kernelNatPortsMapNameV6,
+	kernelNatPeersMapNameV4,
+	kernelNatPeersMapNameV6,
 	kernelTCFlowsOldMapNameV4,
 	kernelTCFlowsOldMapNameV6,
 	kernelTCNatPortsOldMapNameV4,
 	kernelTCNatPortsOldMapNameV6,
+	kernelTCNatPeersOldMapNameV4,
+	kernelTCNatPeersOldMapNameV6,
 	kernelStatsMapName,
 }
 
@@ -216,7 +220,7 @@ func (c hotRestartEngineCheck) livePreservedMapNames(maps map[string]*ebpf.Map) 
 		return kernelTCHotRestartPreservedMapNames(present, flags, c.skipStats), nil
 	}
 	keepNAT := false
-	for _, name := range []string{kernelNatPortsMapName, kernelNatPortsMapNameV6, kernelTCNatPortsOldMapNameV4, kernelTCNatPortsOldMapNameV6} {
+	for _, name := range kernelNATMapNames {
 		used, err := kernelMapHasEntries(maps[name])
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", name, err)
@@ -628,6 +632,8 @@ var hotRestartLiveMapBanks = []struct{ active, old string }{
 	{kernelFlowsMapNameV6, kernelTCFlowsOldMapNameV6},
 	{kernelNatPortsMapNameV4, kernelTCNatPortsOldMapNameV4},
 	{kernelNatPortsMapNameV6, kernelTCNatPortsOldMapNameV6},
+	{kernelNatPeersMapNameV4, kernelTCNatPeersOldMapNameV4},
+	{kernelNatPeersMapNameV6, kernelTCNatPeersOldMapNameV6},
 }
 
 // resolveHotRestartLiveMaps tells which of an engine's live maps plays which
@@ -635,8 +641,9 @@ var hotRestartLiveMapBanks = []struct{ active, old string }{
 // active banks it inherits as its old banks, so after a hot restart both maps
 // of a bank pair can carry the active name. The newer map, with the higher
 // id, is then the active bank: an old bank is always a former active bank or
-// a placeholder named as an old bank. Both old NAT banks reach the kernel as
-// "nat_ports_old_v"; each belongs to the pair whose active map has its key
+// a placeholder named as an old bank. Both old NAT port banks reach the
+// kernel as "nat_ports_old_v", and both old NAT peer banks as
+// "nat_peers_old_v"; each belongs to the pair whose active map has its key
 // size, since IPv4 and IPv6 keys differ in size.
 func resolveHotRestartLiveMaps(candidates []hotRestartLiveMap) (map[string]hotRestartLiveMap, error) {
 	byName := make(map[string][]hotRestartLiveMap)

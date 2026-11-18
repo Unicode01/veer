@@ -68,8 +68,9 @@ func TestKernelXDPHotRestartPreservedMapNames(t *testing.T) {
 	}
 	got := kernelXDPHotRestartPreservedMapNames(noOldV6NAT, xdpFlowMigrationFlagV4Old|xdpFlowMigrationFlagV6Old, true, false)
 	want := []string{
-		kernelFlowsMapName, kernelFlowsMapNameV6, kernelNatPortsMapName, kernelNatPortsMapNameV6,
-		kernelXDPFlowsOldMapNameV4, kernelTCNatPortsOldMapNameV4, kernelXDPFlowsOldMapNameV6, kernelStatsMapName,
+		kernelFlowsMapName, kernelFlowsMapNameV6, kernelNatPortsMapName, kernelNatPeersMapNameV4, kernelNatPortsMapNameV6, kernelNatPeersMapNameV6,
+		kernelXDPFlowsOldMapNameV4, kernelTCNatPortsOldMapNameV4, kernelTCNatPeersOldMapNameV4,
+		kernelXDPFlowsOldMapNameV6, kernelTCNatPeersOldMapNameV6, kernelStatsMapName,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("draining with NAT entries = %v, want %v", got, want)
@@ -86,6 +87,10 @@ func TestResolveHotRestartLiveMapsTellsOldNATBanksApart(t *testing.T) {
 		{id: 4, name: "nat_ports_old_v", keySize: 20},
 		{id: 5, name: "nat_ports_old_v", keySize: 8},
 		{id: 6, name: "unrelated_map", keySize: 4},
+		{id: 7, name: kernelNatPeersMapNameV4, keySize: 20},
+		{id: 8, name: kernelNatPeersMapNameV6, keySize: 44},
+		{id: 9, name: "nat_peers_old_v", keySize: 44},
+		{id: 10, name: "nat_peers_old_v", keySize: 20},
 	})
 	if err != nil {
 		t.Fatalf("resolveHotRestartLiveMaps() error = %v", err)
@@ -100,6 +105,10 @@ func TestResolveHotRestartLiveMapsTellsOldNATBanksApart(t *testing.T) {
 		kernelNatPortsMapNameV6:      3,
 		kernelTCNatPortsOldMapNameV4: 5,
 		kernelTCNatPortsOldMapNameV6: 4,
+		kernelNatPeersMapNameV4:      7,
+		kernelNatPeersMapNameV6:      8,
+		kernelTCNatPeersOldMapNameV4: 10,
+		kernelTCNatPeersOldMapNameV6: 9,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("resolved ids = %v, want %v", got, want)

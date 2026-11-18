@@ -79,6 +79,8 @@ const (
 	kernelTCFlowsOldMapNameV6                 = "flows_old_v6"
 	kernelTCNatPortsOldMapNameV4              = "nat_ports_old_v4"
 	kernelTCNatPortsOldMapNameV6              = "nat_ports_old_v6"
+	kernelTCNatPeersOldMapNameV4              = "nat_peers_old_v4"
+	kernelTCNatPeersOldMapNameV6              = "nat_peers_old_v6"
 	kernelTCFlowMigrationStateMapName         = "tc_flow_migration_state"
 	kernelReplyFilterPrio                     = 10
 	kernelReplyFilterPrioV6                   = 11
@@ -144,6 +146,22 @@ const (
 	kernelFlowFlagCounted      = 0x20
 	kernelFlowFlagFullCone     = 0x80
 	kernelFlowFlagReplyClosing = 0x100
+	// kernelFlowFlagNATPeer marks a flow that holds its NAT port shared,
+	// through an entry in nat_peers_v4/v6; any other NAT flow holds an
+	// exclusive nat_ports entry.
+	kernelFlowFlagNATPeer = 0x200
+)
+
+// tcNATPortValue.Mode: how a nat_ports entry holds its port. An exclusive
+// port serves one mapping, the entry's session (full cone, and every entry
+// made before ports were shared). A shared one serves one mapping per peer,
+// each a nat_peers entry, and belongs to no session. Maintenance marks a
+// shared port without mappings draining, so that no new mapping takes it,
+// and deletes it if it is still unused a pass later.
+const (
+	kernelNATPortExclusive = 0
+	kernelNATPortShared    = 1
+	kernelNATPortDraining  = 2
 )
 
 const (
@@ -252,6 +270,29 @@ type tcFlowFastV4 struct {
 }
 
 type tcNATPortValue struct {
+	RuleID    uint32
+	Mode      uint32
+	SessionID uint64
+}
+
+// tcNATPeerKeyV4 mirrors struct nat_peer_key_v4: one mapping on a shared
+// NAT port, the port's nat_ports key and the peer it talks to (an egress NAT
+// flow's destination, a port forward's backend).
+type tcNATPeerKeyV4 struct {
+	Port     tcNATPortKeyV4
+	PeerAddr uint32
+	PeerPort uint16
+	Pad      [2]byte
+}
+
+type tcNATPeerKeyV6 struct {
+	Port     tcNATPortKeyV6
+	PeerAddr [16]byte
+	PeerPort uint16
+	Pad      [2]byte
+}
+
+type tcNATPeerValue struct {
 	RuleID    uint32
 	Pad       uint32
 	SessionID uint64
@@ -1125,6 +1166,8 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 				{name: kernelFlowsMapNameV6, m: rt.coll.Maps[kernelFlowsMapNameV6], isFlow: true},
 				{name: kernelNatPortsMapName, m: rt.coll.Maps[kernelNatPortsMapName], isNAT: true},
 				{name: kernelNatPortsMapNameV6, m: rt.coll.Maps[kernelNatPortsMapNameV6], isNAT: true},
+				{name: kernelNatPeersMapNameV4, m: rt.coll.Maps[kernelNatPeersMapNameV4], isNAT: true},
+				{name: kernelNatPeersMapNameV6, m: rt.coll.Maps[kernelNatPeersMapNameV6], isNAT: true},
 			} {
 				if item.m == nil {
 					continue
@@ -1151,6 +1194,10 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 					ensureMapReplacements()
 					mapReplacements[kernelTCNatPortsOldMapNameV4] = old
 				}
+				if old := rt.coll.Maps[kernelTCNatPeersOldMapNameV4]; old != nil {
+					ensureMapReplacements()
+					mapReplacements[kernelTCNatPeersOldMapNameV4] = old
+				}
 			}
 			if existingMigrationFlags&tcFlowMigrationFlagV6Old != 0 {
 				if old := rt.coll.Maps[kernelTCFlowsOldMapNameV6]; old != nil {
@@ -1160,6 +1207,10 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 				if old := rt.coll.Maps[kernelTCNatPortsOldMapNameV6]; old != nil {
 					ensureMapReplacements()
 					mapReplacements[kernelTCNatPortsOldMapNameV6] = old
+				}
+				if old := rt.coll.Maps[kernelTCNatPeersOldMapNameV6]; old != nil {
+					ensureMapReplacements()
+					mapReplacements[kernelTCNatPeersOldMapNameV6] = old
 				}
 			}
 			tcFlowMigrationFlags = existingMigrationFlags
@@ -1187,11 +1238,18 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 				ensureMapReplacements()
 				mapReplacements[kernelTCNatPortsOldMapNameV4] = natMap
 			}
+			if peers := rt.coll.Maps[kernelNatPeersMapNameV4]; peers != nil {
+				ensureMapReplacements()
+				mapReplacements[kernelTCNatPeersOldMapNameV4] = peers
+			}
 			if flowsMap := rt.coll.Maps[kernelFlowsMapNameV6]; flowsMap != nil {
 				if natMap := rt.coll.Maps[kernelNatPortsMapNameV6]; natMap != nil {
 					ensureMapReplacements()
 					mapReplacements[kernelTCFlowsOldMapNameV6] = flowsMap
 					mapReplacements[kernelTCNatPortsOldMapNameV6] = natMap
+					if peers := rt.coll.Maps[kernelNatPeersMapNameV6]; peers != nil {
+						mapReplacements[kernelTCNatPeersOldMapNameV6] = peers
+					}
 					tcFlowMigrationFlags |= tcFlowMigrationFlagV6Old
 				}
 			}
@@ -1801,7 +1859,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 	driftDetected := false
 
 	if refs.flowsV4 != nil {
-		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsV4, refs.natV4, &flowPruneState, v4ActiveBudget, tcpIdleTimeoutNS)
+		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsV4, refs.natBankV4(), &flowPruneState, v4ActiveBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v4Metrics.Budget
 		pruneMetrics.Scanned += v4Metrics.Scanned
 		pruneMetrics.Deleted += v4Metrics.Deleted
@@ -1812,7 +1870,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 		mergeKernelStatsCorrections(corrections, v4Corrections)
 	}
 	if refs.flowsOldV4 != nil {
-		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsOldV4, refs.natOldV4, &oldFlowPruneState, v4OldBudget, tcpIdleTimeoutNS)
+		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsOldV4, refs.natOldBankV4(), &oldFlowPruneState, v4OldBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v4Metrics.Budget
 		pruneMetrics.Scanned += v4Metrics.Scanned
 		pruneMetrics.Deleted += v4Metrics.Deleted
@@ -1823,7 +1881,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 		mergeKernelStatsCorrections(corrections, v4Corrections)
 	}
 	if refs.flowsV6 != nil {
-		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, refs.natV6, &flowPruneState, v6ActiveBudget, tcpIdleTimeoutNS)
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, refs.natBankV6(), &flowPruneState, v6ActiveBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v6Metrics.Budget
 		pruneMetrics.Scanned += v6Metrics.Scanned
 		pruneMetrics.Deleted += v6Metrics.Deleted
@@ -1834,7 +1892,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 		mergeKernelStatsCorrections(corrections, v6Corrections)
 	}
 	if refs.flowsOldV6 != nil {
-		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsOldV6, refs.natOldV6, &oldFlowPruneState, v6OldBudget, tcpIdleTimeoutNS)
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsOldV6, refs.natOldBankV6(), &oldFlowPruneState, v6OldBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v6Metrics.Budget
 		pruneMetrics.Scanned += v6Metrics.Scanned
 		pruneMetrics.Deleted += v6Metrics.Deleted
@@ -2756,10 +2814,10 @@ func purgeKernelFlowsForTargets(refs kernelRuntimeMapRefs, targets map[kernelFlo
 	var purgeErrs []error
 	for _, item := range []struct {
 		flows *ebpf.Map
-		nat   *ebpf.Map
+		nat   kernelNATBankMaps
 	}{
-		{refs.flowsV4, refs.natV4},
-		{refs.flowsOldV4, refs.natOldV4},
+		{refs.flowsV4, refs.natBankV4()},
+		{refs.flowsOldV4, refs.natOldBankV4()},
 	} {
 		itemCorrections, itemDeleted, err := purgeKernelFlowsForTargetsV4(item.flows, item.nat, targets, xdp)
 		mergeKernelStatsCorrections(corrections, itemCorrections)
@@ -2770,10 +2828,10 @@ func purgeKernelFlowsForTargets(refs kernelRuntimeMapRefs, targets map[kernelFlo
 	}
 	for _, item := range []struct {
 		flows *ebpf.Map
-		nat   *ebpf.Map
+		nat   kernelNATBankMaps
 	}{
-		{refs.flowsV6, refs.natV6},
-		{refs.flowsOldV6, refs.natOldV6},
+		{refs.flowsV6, refs.natBankV6()},
+		{refs.flowsOldV6, refs.natOldBankV6()},
 	} {
 		itemCorrections, itemDeleted, err := purgeKernelFlowsForTargetsV6(item.flows, item.nat, targets)
 		mergeKernelStatsCorrections(corrections, itemCorrections)
@@ -2833,7 +2891,7 @@ func kernelFlowMatchesInterfaceScopedPurgeTarget(ifindex uint32, value tcFlowVal
 	return ok
 }
 
-func purgeKernelFlowsForTargetsV4(flowsMap, natPortsMap *ebpf.Map, targets map[kernelFlowPurgeTarget]struct{}, xdp bool) (map[uint32]kernelRuleStats, int, error) {
+func purgeKernelFlowsForTargetsV4(flowsMap *ebpf.Map, nat kernelNATBankMaps, targets map[kernelFlowPurgeTarget]struct{}, xdp bool) (map[uint32]kernelRuleStats, int, error) {
 	corrections := make(map[uint32]kernelRuleStats)
 	if flowsMap == nil || len(targets) == 0 {
 		return corrections, 0, nil
@@ -2911,7 +2969,7 @@ func purgeKernelFlowsForTargetsV4(flowsMap, natPortsMap *ebpf.Map, targets map[k
 	deleted := 0
 	var deleteErrs []error
 	for _, item := range orderKernelFlowPurgeCandidates(stale) {
-		itemDeleted, err := deleteKernelFlowSessionWithError(flowsMap, natPortsMap, item, corrections, false)
+		itemDeleted, err := deleteKernelFlowSessionWithError(flowsMap, nat, item, corrections, false)
 		deleted += itemDeleted
 		if err != nil {
 			deleteErrs = append(deleteErrs, err)
@@ -2920,7 +2978,7 @@ func purgeKernelFlowsForTargetsV4(flowsMap, natPortsMap *ebpf.Map, targets map[k
 	return corrections, deleted, errors.Join(deleteErrs...)
 }
 
-func purgeKernelFlowsForTargetsV6(flowsMap, natPortsMap *ebpf.Map, targets map[kernelFlowPurgeTarget]struct{}) (map[uint32]kernelRuleStats, int, error) {
+func purgeKernelFlowsForTargetsV6(flowsMap *ebpf.Map, nat kernelNATBankMaps, targets map[kernelFlowPurgeTarget]struct{}) (map[uint32]kernelRuleStats, int, error) {
 	corrections := make(map[uint32]kernelRuleStats)
 	if flowsMap == nil || len(targets) == 0 {
 		return corrections, 0, nil
@@ -2968,7 +3026,7 @@ func purgeKernelFlowsForTargetsV6(flowsMap, natPortsMap *ebpf.Map, targets map[k
 		if item.value.Flags&kernelFlowFlagFrontEntry != 0 {
 			continue
 		}
-		itemDeleted, err := deleteKernelFlowSessionV6WithError(flowsMap, natPortsMap, item, corrections, false)
+		itemDeleted, err := deleteKernelFlowSessionV6WithError(flowsMap, nat, item, corrections, false)
 		deleted += itemDeleted
 		if err != nil {
 			deleteErrs = append(deleteErrs, err)
@@ -2978,7 +3036,7 @@ func purgeKernelFlowsForTargetsV6(flowsMap, natPortsMap *ebpf.Map, targets map[k
 		if item.value.Flags&kernelFlowFlagFrontEntry == 0 {
 			continue
 		}
-		itemDeleted, err := deleteKernelFlowSessionV6WithError(flowsMap, natPortsMap, item, corrections, false)
+		itemDeleted, err := deleteKernelFlowSessionV6WithError(flowsMap, nat, item, corrections, false)
 		deleted += itemDeleted
 		if err != nil {
 			deleteErrs = append(deleteErrs, err)
@@ -3831,6 +3889,9 @@ func validateKernelCollectionSpec(spec *ebpf.CollectionSpec) error {
 		kernelTCNatPortsOldMapNameV4,
 		kernelTCFlowsOldMapNameV6,
 		kernelTCNatPortsOldMapNameV6,
+		kernelNatPeersMapNameV4,
+		kernelTCNatPeersOldMapNameV4,
+		kernelTCNatPeersOldMapNameV6,
 		kernelTCFlowMigrationStateMapName,
 	} {
 		if _, ok := spec.Maps[name]; !ok {

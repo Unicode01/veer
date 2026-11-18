@@ -68,5 +68,9 @@ func kernelCapMapNames() kernelcap.MapNames {
 		NATPortsV6:      kernelNatPortsMapNameV6,
 		TCNATPortsOldV4: kernelTCNatPortsOldMapNameV4,
 		TCNATPortsOldV6: kernelTCNatPortsOldMapNameV6,
+		NATPeers:        kernelNatPeersMapNameV4,
+		NATPeersV6:      kernelNatPeersMapNameV6,
+		TCNATPeersOldV4: kernelTCNatPeersOldMapNameV4,
+		TCNATPeersOldV6: kernelTCNatPeersOldMapNameV6,
 	}
 }

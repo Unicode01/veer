@@ -247,6 +247,10 @@ Authorization: Bearer <web_token>
 - `kernel_tcp_established_idle_timeout_seconds`：内核已建立 TCP flow 的空闲超时；`0` 表示按 IPv4/IPv6 flow map 的最高利用率自动选择，正数表示固定秒数。auto 在利用率达到 50% / 70% / 85% 时依次采用 6 小时 / 1 小时 / 10 分钟，低负载采用 24 小时；回落阈值分别为 45% / 65% / 80%，避免临界点抖动
 - `kernel_nat_ports_map_limit`：内核 NAT 端口 map 容量，`0` 表示自适应
 - `kernel_nat_port_min` / `kernel_nat_port_max`：内核 Full NAT / Egress NAT 的端口池，默认 20000–65535。NAT 地址就是宿主自己的地址，宿主连接用的临时端口（`net.ipv4.ip_local_port_range`，Linux 默认 32768–60999）若也被 NAT 占用，回包会被当作 NAT 回程转给内网主机（Full Cone 的回程不看对端），宿主那条连接只能超时。所以内核 NAT 启动时从端口池里去掉宿主的临时端口范围，取剩下较大的一段，默认配置下实际使用 20000–32767；运行时视图 TC/XDP 引擎的 `nat_port_min` / `nat_port_max` 显示实际范围。端口池整个落在临时端口范围内时按配置使用并记录警告。临时端口范围只在启动时读取，修改后重启 Veer 生效；需要更多 NAT 端口时可以调小宿主的临时端口范围，或把端口池配置到它之外
+  - 端口按对端共享：对称型 Egress NAT 和非透明（Full NAT）端口转发像 Linux nf_nat 一样按五元组占用 NAT 端口，同一个端口同时服务去往不同对端的映射（Egress NAT 的对端是目的地址和端口，端口转发的对端是后端）。端口池大小因此是每个 NAT 地址、每种协议下“到同一个对端”的映射上限，默认配置下是 12768 个，不再是所有映射合计的上限。端口转发只有一个后端，所以单条端口转发规则的并发连接上限不变，仍是端口池大小
+  - Full Cone 映射对所有对端开放，仍然独占端口：有共享映射的端口不会分给 Full Cone。端口上最后一条共享映射结束后，维护任务先把端口标为回收中，下一轮仍无映射才删除记录，之后端口才能分给 Full Cone
+  - `kernel_nat_ports_map_limit` 同时决定端口记录表和共享映射表的容量，共享映射每条连接占一项；运行时视图的 `nat_map_entries` 统计映射数（独占端口加共享映射），见 API 文档
+  - 降级到不认识共享端口的旧版本（热重启回旧版本）时，旧版本的孤儿清理会删掉共享端口的记录，之后可能把仍有共享映射的端口分给 Full Cone；在这些共享连接结束前，Full Cone 映射若访问同一对端，回包可能被交给共享连接。已建立的连接本身不受影响
 - `kernel_tc_flow_cache`：TC 连接缓存，默认开启；只跑大量短连接时可设为 `false`，取舍见下文 Dataplane 一节
 - `xdp_generic`：网卡驱动没有原生 XDP 时，允许 XDP 程序（XDP 转发引擎和 XDP 插件）以 generic 模式挂载，默认开启；设为 `false` 只允许原生模式。旧配置 `experimental_features` 里的同名项不再生效，部署脚本会删除它
 - `web_tls`：管理面使用 HTTPS，`deploy.sh` 新安装写为 `true`；配置里没有这一项时按 `false` 处理，所以升级前的配置继续用明文 HTTP。`web_tls_cert_file` / `web_tls_key_file`：自备证书和私钥（PEM，相对路径相对安装目录），两项须同时设置；不设时使用自签证书。见下文“管理面 HTTPS”

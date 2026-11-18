@@ -33,6 +33,12 @@ type MapNames struct {
 	NATPortsV6      string
 	TCNATPortsOldV4 string
 	TCNATPortsOldV6 string
+	// The mappings on shared NAT ports, one per flow like the exclusive
+	// entries in NATPorts, so they take the NAT capacity too.
+	NATPeers        string
+	NATPeersV6      string
+	TCNATPeersOldV4 string
+	TCNATPeersOldV6 string
 }
 
 const OldBankPlaceholderEntries = 1
@@ -101,10 +107,22 @@ func ApplyMapCapacitiesWithOccupancy(spec *ebpf.CollectionSpec, rulesConfiguredL
 		if err := SetCollectionMapCapacity(spec, names.NATPortsV6, capacities.NATPorts, false, "kernel IPv6 nat ports"); err != nil {
 			return MapCapacities{}, err
 		}
+		if err := SetCollectionMapCapacity(spec, names.NATPeers, capacities.NATPorts, false, "kernel nat peers"); err != nil {
+			return MapCapacities{}, err
+		}
+		if err := SetCollectionMapCapacity(spec, names.NATPeersV6, capacities.NATPorts, false, "kernel IPv6 nat peers"); err != nil {
+			return MapCapacities{}, err
+		}
 		if err := SetCollectionMapCapacity(spec, names.TCNATPortsOldV4, OldBankPlaceholderEntries, false, "tc old IPv4 nat ports"); err != nil {
 			return MapCapacities{}, err
 		}
 		if err := SetCollectionMapCapacity(spec, names.TCNATPortsOldV6, OldBankPlaceholderEntries, false, "tc old IPv6 nat ports"); err != nil {
+			return MapCapacities{}, err
+		}
+		if err := SetCollectionMapCapacity(spec, names.TCNATPeersOldV4, OldBankPlaceholderEntries, false, "tc old IPv4 nat peers"); err != nil {
+			return MapCapacities{}, err
+		}
+		if err := SetCollectionMapCapacity(spec, names.TCNATPeersOldV6, OldBankPlaceholderEntries, false, "tc old IPv6 nat peers"); err != nil {
 			return MapCapacities{}, err
 		}
 	} else {
@@ -119,6 +137,16 @@ func ApplyMapCapacitiesWithOccupancy(spec *ebpf.CollectionSpec, rulesConfiguredL
 		}
 		if err := SetCollectionMapCapacity(spec, names.TCNATPortsOldV6, OldBankPlaceholderEntries, false, "tc old IPv6 nat ports"); err != nil {
 			return MapCapacities{}, err
+		}
+		for _, item := range []struct{ name, label string }{
+			{names.NATPeers, "kernel nat peers"},
+			{names.NATPeersV6, "kernel IPv6 nat peers"},
+			{names.TCNATPeersOldV4, "tc old IPv4 nat peers"},
+			{names.TCNATPeersOldV6, "tc old IPv6 nat peers"},
+		} {
+			if err := SetCollectionMapCapacity(spec, item.name, OldBankPlaceholderEntries, false, item.label); err != nil {
+				return MapCapacities{}, err
+			}
 		}
 	}
 

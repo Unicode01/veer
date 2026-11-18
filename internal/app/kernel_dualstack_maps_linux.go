@@ -15,9 +15,11 @@ const (
 	kernelRulesMapNameV4    = "rules_v4"
 	kernelFlowsMapNameV4    = "flows_v4"
 	kernelNatPortsMapNameV4 = "nat_ports_v4"
+	kernelNatPeersMapNameV4 = "nat_peers_v4"
 	kernelRulesMapNameV6    = "rules_v6"
 	kernelFlowsMapNameV6    = "flows_v6"
 	kernelNatPortsMapNameV6 = "nat_ports_v6"
+	kernelNatPeersMapNameV6 = "nat_peers_v6"
 )
 
 const kernelRuleFlowContractFlags = kernelRuleFlagFullNAT | kernelRuleFlagEgressNAT | kernelRuleFlagPassthrough | kernelRuleFlagFullCone
