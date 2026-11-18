@@ -893,6 +893,14 @@ TC 连接缓存的字段同样分两层：顶层 `kernel_tc_flow_cache` 是配�
 
 `plugins.status=error` 表示已启用插件的期望状态尚未完整应用，会触发后台退避重试，并使 `/readyz` 保持 `503`，直到运行态收敛。
 
+首个 generation 应用完成之后，后续 reconcile 进行期间（`dataplane.status=pending`）`/readyz` 仍返回 `200`，因为数据面在此期间继续按已应用的状态转发。例如 guest 启停会触发一次 reconcile，监控和负载均衡不会因此看到短暂的不健康。只有下列情况会返回 `503`：
+
+- reconcile 失败；
+- reconcile 持续 pending 超过 30 秒；
+- 有 worker 出错。
+
+进程启动或热重启后，在第一个 generation 应用完成之前，仍然返回 `503`。
+
 `GET /metrics`
 
 用途与约束：

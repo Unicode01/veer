@@ -74,6 +74,7 @@ const (
 	workerConfigACKTimeout                = 15 * time.Second
 	userspaceWorkerReconnectGrace         = 3 * time.Second
 	workerRegistrationFailureUnhealthyFor = 10 * time.Second
+	readinessReconcileGrace               = 30 * time.Second // a pending reconcile keeps readiness this long
 	kernelDegradedRebuildCooldown         = 30 * time.Second
 	redistributeRetryDelay                = 250 * time.Millisecond
 	kernelStatsRefreshInterval            = 5 * time.Second
@@ -242,6 +243,7 @@ type ProcessManager struct {
 	desiredGeneration                              uint64
 	preparedGeneration                             uint64
 	appliedGeneration                              uint64
+	reconcilePendingSince                          time.Time
 	reconcileLastError                             string
 	reconcileRetryCount                            int
 	reconcileLastAttemptAt                         time.Time
@@ -474,7 +476,8 @@ func (pm *ProcessManager) isReadyLocked(now time.Time) bool {
 	if !pm.ready {
 		return false
 	}
-	if pm.desiredGeneration > pm.appliedGeneration || strings.TrimSpace(pm.reconcileLastError) != "" ||
+	settling := pm.reconcileSettlingLocked(now)
+	if (pm.desiredGeneration > pm.appliedGeneration && !settling) || strings.TrimSpace(pm.reconcileLastError) != "" ||
 		pm.workerReconcileErrorLocked() != "" || strings.TrimSpace(pm.pluginReconcileLastError) != "" {
 		return false
 	}
@@ -485,7 +488,7 @@ func (pm *ProcessManager) isReadyLocked(now time.Time) bool {
 		if wi != nil && len(wi.rules) > 0 && !userspaceWorkerControlReady(wi) {
 			return false
 		}
-		if pm.desiredGeneration > 0 && wi != nil && len(wi.rules) > 0 && !workerGenerationApplied(wi, pm.desiredGeneration) {
+		if pm.desiredGeneration > 0 && wi != nil && len(wi.rules) > 0 && !workerReadyForGeneration(wi, pm.desiredGeneration, settling) {
 			return false
 		}
 	}
@@ -493,7 +496,7 @@ func (pm *ProcessManager) isReadyLocked(now time.Time) bool {
 		if wi != nil && len(wi.ranges) > 0 && !userspaceWorkerControlReady(wi) {
 			return false
 		}
-		if pm.desiredGeneration > 0 && wi != nil && len(wi.ranges) > 0 && !workerGenerationApplied(wi, pm.desiredGeneration) {
+		if pm.desiredGeneration > 0 && wi != nil && len(wi.ranges) > 0 && !workerReadyForGeneration(wi, pm.desiredGeneration, settling) {
 			return false
 		}
 	}
@@ -515,7 +518,27 @@ func (pm *ProcessManager) isReadyLocked(now time.Time) bool {
 	if !userspaceWorkerControlReady(pm.sharedProxy) {
 		return false
 	}
-	return pm.desiredGeneration == 0 || workerGenerationApplied(pm.sharedProxy, pm.desiredGeneration)
+	return pm.desiredGeneration == 0 || workerReadyForGeneration(pm.sharedProxy, pm.desiredGeneration, settling)
+}
+
+// reconcileSettlingLocked reports whether a reconcile is being applied on top
+// of a generation that was applied already, for less than the grace period.
+// The dataplane keeps serving the applied state meanwhile, so readiness holds:
+// every guest started or stopped would otherwise make monitoring and load
+// balancers see the service flap. A failed reconcile, one stuck past the
+// grace period, or the first one after startup still makes it unready.
+func (pm *ProcessManager) reconcileSettlingLocked(now time.Time) bool {
+	return pm.desiredGeneration > pm.appliedGeneration && pm.appliedGeneration > 0 &&
+		!pm.reconcilePendingSince.IsZero() && now.Sub(pm.reconcilePendingSince) < readinessReconcileGrace
+}
+
+// workerReadyForGeneration tells whether a worker counts as ready: it applied
+// generation, or, while a reconcile settles, it has not failed.
+func workerReadyForGeneration(wi *WorkerInfo, generation uint64, settling bool) bool {
+	if settling {
+		return wi == nil || !wi.errored
+	}
+	return workerGenerationApplied(wi, generation)
 }
 
 func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessManager, error) {
