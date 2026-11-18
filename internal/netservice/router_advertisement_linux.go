@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -246,7 +247,11 @@ func (adv *ipv6RouterAdvertiser) listenForRouterSolicitations() {
 		config := adv.snapshot()
 		state, fd, err := openIPv6RouterSolicitationSocket(config)
 		if err != nil {
-			adv.logRouterSolicitationIssue(fmt.Sprintf("open socket: %v", err))
+			if isLinkGoneOrDownError(err) {
+				adv.noteRouterSolicitationIssue(fmt.Sprintf("open socket: %v", err))
+			} else {
+				adv.logRouterSolicitationIssue(fmt.Sprintf("open socket: %v", err))
+			}
 			select {
 			case <-adv.stopCh:
 				return
@@ -293,6 +298,13 @@ func (adv *ipv6RouterAdvertiser) listenForRouterSolicitations() {
 						}
 						continue
 					}
+					if isLinkGoneOrDownError(err) {
+						// The interface went down or away, as a guest's tap
+						// does when the guest stops; the socket is reopened
+						// once it is back. Expected, so not logged.
+						adv.noteRouterSolicitationIssue(fmt.Sprintf("read: %v", err))
+						return
+					}
 					adv.logRouterSolicitationIssue(fmt.Sprintf("read: %v", err))
 					return
 				}
@@ -320,6 +332,31 @@ func (adv *ipv6RouterAdvertiser) listenForRouterSolicitations() {
 		default:
 		}
 	}
+}
+
+// isLinkGoneOrDownError reports whether a socket operation failed because its
+// interface went down or was removed. RA and DHCPv6 only run on interfaces
+// that existed when their assignment was applied (a gone target leaves the
+// assignment dormant), so this is a guest stopping or restarting, not a
+// misconfiguration, and the next reconcile stops or resumes the service.
+func isLinkGoneOrDownError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, unix.ENETDOWN) || errors.Is(err, unix.ENXIO) || errors.Is(err, unix.ENODEV) ||
+		strings.Contains(err.Error(), "no such network interface")
+}
+
+// noteRouterSolicitationIssue records an issue for the runtime status without
+// logging it.
+func (adv *ipv6RouterAdvertiser) noteRouterSolicitationIssue(text string) {
+	if adv == nil {
+		return
+	}
+	adv.mu.Lock()
+	adv.lastRSIssue = text
+	adv.lastRSIssueAt = time.Now()
+	adv.mu.Unlock()
 }
 
 func (adv *ipv6RouterAdvertiser) logRouterSolicitationIssue(text string) {
@@ -352,7 +389,7 @@ func (adv *ipv6RouterAdvertiser) send() {
 		adv.mu.Lock()
 		adv.lastIssueText = text
 		adv.lastIssueAt = now
-		shouldLog := adv.lastIssueLogAt.IsZero() || now.Sub(adv.lastIssueLogAt) >= ipv6RATroubleLogEvery
+		shouldLog := !isLinkGoneOrDownError(err) && (adv.lastIssueLogAt.IsZero() || now.Sub(adv.lastIssueLogAt) >= ipv6RATroubleLogEvery)
 		if shouldLog {
 			adv.lastIssueLogAt = now
 		}

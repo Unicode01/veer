@@ -237,6 +237,13 @@ func TestManagedNetworkIntegrationRestoresIPv6AfterGuestRestart(t *testing.T) {
 		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
 		t.Fatal(err)
 	}
+	// The tap going away is a guest stopping, not a fault worth a log line.
+	if data, err := os.ReadFile(harness.LogPath); err != nil {
+		t.Fatalf("read forward log: %v", err)
+	} else if strings.Contains(string(data), "network is down") || strings.Contains(string(data), "no such network interface") {
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatal("forward log reports the restarted guest's tap going away as an issue")
+	}
 }
 
 func TestManagedNetworkIntegrationDelegatedPrefixSLAAC(t *testing.T) {

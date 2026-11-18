@@ -4,12 +4,16 @@ package netservice
 
 import (
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"net"
+	"os"
 	"testing"
 	"time"
 
 	"golang.org/x/net/bpf"
 	"golang.org/x/net/ipv6"
+	"golang.org/x/sys/unix"
 )
 
 func TestIsIPv6RouterSolicitationFrame(t *testing.T) {
@@ -360,4 +364,27 @@ func FuzzIsIPv6RouterSolicitationFrame(f *testing.F) {
 	f.Fuzz(func(t *testing.T, frame []byte) {
 		_ = isIPv6RouterSolicitationFrame(frame)
 	})
+}
+
+func TestIsLinkGoneOrDownError(t *testing.T) {
+	t.Parallel()
+
+	_, lookupErr := net.InterfaceByName("veer-no-such-link")
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{fmt.Errorf("recvfrom: %w", unix.ENETDOWN), true},
+		{os.NewSyscallError("recvfrom", unix.ENODEV), true},
+		{fmt.Errorf("bind: %w", unix.ENXIO), true},
+		{lookupErr, true},
+		{errors.New("route ip+net: no such network interface"), true},
+		{fmt.Errorf("recvfrom: %w", unix.EIO), false},
+		{errors.New("permission denied"), false},
+		{nil, false},
+	} {
+		if got := isLinkGoneOrDownError(tc.err); got != tc.want {
+			t.Fatalf("isLinkGoneOrDownError(%v) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
 }
