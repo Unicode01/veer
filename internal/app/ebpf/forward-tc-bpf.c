@@ -3456,6 +3456,44 @@ static __always_inline int egress_nat_dst_is_local_v4(__be32 addr)
 	return routed && *routed != 0;
 }
 
+/*
+ * Whether a guest's packet answers a connection this host opened from an
+ * address that is not its own. A transparent proxy (a shared site or a
+ * transparent user space forward) dials the backend as the original client,
+ * so the backend answers the client's address; the host's transparent socket
+ * takes that answer through policy routing, and NAT would instead send it out
+ * to the client, who never asked for it. Only a socket bound to exactly this
+ * destination and connected to exactly this source counts, so a listener on a
+ * wildcard address does not capture a guest's own traffic. A guest's new TCP
+ * connection starts with a SYN, which never needs the lookup.
+ */
+static __always_inline int egress_nat_reply_to_host_socket_v4(struct __sk_buff *skb, const struct packet_ctx *ctx)
+{
+	struct bpf_sock_tuple tuple = {};
+	struct bpf_sock *sk;
+	int owned;
+
+	if (ctx->proto == IPPROTO_TCP) {
+		if (is_initial_tcp_syn(ctx))
+			return 0;
+	} else if (ctx->proto != IPPROTO_UDP) {
+		return 0;
+	}
+	tuple.ipv4.saddr = ctx->src_addr;
+	tuple.ipv4.daddr = ctx->dst_addr;
+	tuple.ipv4.sport = bpf_htons(ctx->src_port);
+	tuple.ipv4.dport = bpf_htons(ctx->dst_port);
+	if (ctx->proto == IPPROTO_TCP)
+		sk = bpf_sk_lookup_tcp(skb, &tuple, sizeof(tuple.ipv4), BPF_F_CURRENT_NETNS, 0);
+	else
+		sk = bpf_sk_lookup_udp(skb, &tuple, sizeof(tuple.ipv4), BPF_F_CURRENT_NETNS, 0);
+	if (!sk)
+		return 0;
+	owned = sk->src_ip4 == ctx->dst_addr && sk->dst_ip4 == ctx->src_addr;
+	bpf_sk_release(sk);
+	return owned;
+}
+
 static __always_inline void build_front_flow_key(struct __sk_buff *skb, const struct packet_ctx *ctx, struct flow_key_v4 *key)
 {
 	key->ifindex = skb->ifindex;
@@ -5415,6 +5453,8 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 		}
 	} else {
 		/* A new mapping, which the egress NAT new-flow program opens. */
+		if (egress_nat_reply_to_host_socket_v4(skb, ctx))
+			return TC_ACT_OK;
 		if (ctx->proto == IPPROTO_TCP && !is_initial_tcp_syn(ctx))
 			return TC_ACT_SHOT;
 		bpf_tail_call(skb, &tc_egress_nat_new_chain_v4, FORWARD_TC_EGRESS_NAT_NEW_V4);
@@ -7758,6 +7798,8 @@ static __always_inline int handle_forward_ingress_v4_egress_nat_new(struct __sk_
 	if (egress_nat_dst_is_local_v4(dispatch->ctx.dst_addr))
 		return TC_ACT_OK;
 	if (egress_nat_dst_mac_mismatch(skb, &dispatch->rule_value))
+		return TC_ACT_OK;
+	if (egress_nat_reply_to_host_socket_v4(skb, &dispatch->ctx))
 		return TC_ACT_OK;
 	if (is_full_cone_egress_nat_rule(&dispatch->rule_value)) {
 		build_full_cone_front_flow_key(skb, &dispatch->ctx, &front_key);

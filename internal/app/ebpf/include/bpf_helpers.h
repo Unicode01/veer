@@ -35,6 +35,9 @@ static long (*const bpf_fib_lookup)(void *ctx, struct bpf_fib_lookup *params, in
 static long (*const bpf_tail_call)(void *ctx, void *prog_array_map, __u32 index) = (void *)BPF_FUNC_tail_call;
 static __u64 (*const bpf_ktime_get_ns)(void) = (void *)BPF_FUNC_ktime_get_ns;
 static __u32 (*const bpf_get_prandom_u32)(void) = (void *)BPF_FUNC_get_prandom_u32;
+static struct bpf_sock *(*const bpf_sk_lookup_tcp)(void *ctx, struct bpf_sock_tuple *tuple, __u32 tuple_size, __u64 netns, __u64 flags) = (void *)BPF_FUNC_sk_lookup_tcp;
+static struct bpf_sock *(*const bpf_sk_lookup_udp)(void *ctx, struct bpf_sock_tuple *tuple, __u32 tuple_size, __u64 netns, __u64 flags) = (void *)BPF_FUNC_sk_lookup_udp;
+static long (*const bpf_sk_release)(void *sock) = (void *)BPF_FUNC_sk_release;
 #ifdef BPF_FUNC_xdp_load_bytes
 static long (*const bpf_xdp_load_bytes)(struct xdp_md *xdp, __u32 offset, void *buf, __u32 len) = (void *)BPF_FUNC_xdp_load_bytes;
 #endif
