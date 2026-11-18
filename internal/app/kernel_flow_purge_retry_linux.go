@@ -182,6 +182,18 @@ func kernelLinkIndexExists(ifindex int) bool {
 	return err == nil
 }
 
+// kernelLinkIndexGone reports whether no interface has ifindex. Only a
+// definite "not found" counts: a lookup that fails for another reason leaves
+// the interface treated as present.
+func kernelLinkIndexGone(ifindex int) bool {
+	if ifindex <= 0 {
+		return false
+	}
+	_, err := netlink.LinkByIndex(ifindex)
+	var notFound netlink.LinkNotFoundError
+	return errors.As(err, &notFound)
+}
+
 func (rt *linuxKernelRuleRuntime) expireDeferredFlowRulesLocked(now time.Time) {
 	targets := collectPreparedKernelRuleFlowPurgeTargets(rt.deferredFlows.expire(now), nil)
 	if len(targets) > 0 {

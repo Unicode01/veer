@@ -204,6 +204,7 @@ type xdpKernelRuleRuntime struct {
 	lastReconcileMode  string
 	degradedSource     string
 	stateLog           kernelStateLogger
+	vanishedLinkLog    kernelStateLogger
 	pressureState      kernelRuntimePressureState
 	tcpIdleTimeout     kernelTCPIdleTimeoutState
 	observability      kernelRuntimeObservabilityState
@@ -355,7 +356,10 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		return results, nil
 	}
 
-	requiredIfIndices := collectXDPInterfaces(prepared)
+	// Rules held through interface inventory jitter can name an interface
+	// that is gone; nothing is attached there (see withoutGoneLinks).
+	requiredIfIndices, vanishedIfIndices := withoutGoneXDPLinks(collectXDPInterfaces(prepared), kernelLinkIndexGone)
+	rt.logVanishedXDPLinksLocked(vanishedIfIndices)
 	samePrepared := rt.samePreparedRulesLocked(prepared, requiredIfIndices)
 	desiredLocal, localIPv4Err := buildKernelEgressNATLocalInventory(rules)
 	desiredLocalMACs := buildXDPKernelLocalMACMap(prepared)
@@ -882,6 +886,12 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 	attachStartedAt := time.Now()
 	for _, ifindex := range requiredIfIndices {
 		att, err := rt.attachProgramLocked(ifindex, pieces.prog, oldProg, oldAttachments, xdpPreparedRulesNeedGenericOffloadGuard(prepared))
+		if err != nil && kernelLinkIndexGone(ifindex) {
+			// The interface went away after the targets were checked.
+			vanishedIfIndices = append(vanishedIfIndices, ifindex)
+			rt.logVanishedXDPLinksLocked(vanishedIfIndices)
+			continue
+		}
 		if err != nil {
 			rt.discardAttachmentsLocked(newAttachments)
 			coll.Close()
@@ -900,7 +910,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 	reconcileMetrics.AttachDuration = time.Since(attachStartedAt)
 	reconcileMetrics.Attaches = len(newAttachments)
 
-	if len(newAttachments) == 0 {
+	if len(newAttachments) == 0 && len(vanishedIfIndices) == 0 {
 		coll.Close()
 		msg := "xdp dataplane did not attach to any interface"
 		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
@@ -2077,6 +2087,32 @@ func deletePreparedXDPKernelRuleMapEntry(pieces xdpCollectionPieces, item prepar
 	default:
 		return deleteKernelMapEntry(pieces.rulesV4, item.keyV4)
 	}
+}
+
+// withoutGoneXDPLinks splits ifindexes into the interfaces that still exist
+// and those that are gone.
+func withoutGoneXDPLinks(ifindexes []int, gone func(int) bool) (kept []int, vanished []int) {
+	kept = make([]int, 0, len(ifindexes))
+	for _, ifindex := range ifindexes {
+		if gone(ifindex) {
+			vanished = append(vanished, ifindex)
+			continue
+		}
+		kept = append(kept, ifindex)
+	}
+	return kept, vanished
+}
+
+// logVanishedXDPLinksLocked logs the interfaces whose attachment is skipped
+// because they are gone, once per change of that set.
+func (rt *xdpKernelRuleRuntime) logVanishedXDPLinksLocked(vanished []int) {
+	if len(vanished) == 0 {
+		rt.vanishedLinkLog.Reset()
+		return
+	}
+	sorted := append([]int(nil), vanished...)
+	sort.Ints(sorted)
+	rt.vanishedLinkLog.Logf("xdp dataplane reconcile: skipping xdp attachment on interface(s) that no longer exist, ifindex %v; their entries stay until the interface inventory drops them", sorted)
 }
 
 func collectXDPInterfaces(prepared []preparedXDPKernelRule) []int {

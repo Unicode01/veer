@@ -720,7 +720,9 @@ func preparedKernelInterfaceRuleSets(prepared []preparedKernelRule) (map[int][]i
 }
 
 func effectiveKernelAttachmentRuleSets(prepared []preparedKernelRule, stored kernelAttachmentRuleSets) kernelAttachmentRuleSets {
-	if stored.hasTargets() {
+	// Sets whose only targets vanished still describe the attachments; the
+	// prepared rules would name those interfaces again.
+	if stored.hasTargets() || len(stored.Vanished) > 0 {
 		return stored
 	}
 	forwardIfRules, replyIfRules := preparedKernelInterfaceRuleSets(prepared)

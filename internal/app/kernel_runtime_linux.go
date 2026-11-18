@@ -622,6 +622,7 @@ type linuxKernelRuleRuntime struct {
 	lastReconcileMode            string
 	degradedSource               string
 	stateLog                     kernelStateLogger
+	vanishedLinkLog              kernelStateLogger
 	pressureState                kernelRuntimePressureState
 	tcpIdleTimeout               kernelTCPIdleTimeoutState
 	observability                kernelRuntimeObservabilityState
@@ -835,6 +836,17 @@ func (rt *linuxKernelRuleRuntime) ReconcileWithPluginCatalog(rules []Rule, catal
 	return rt.reconcileWithPluginCatalog(rules, &catalog)
 }
 
+// logVanishedAttachLinksLocked logs the interfaces whose hooks are skipped
+// because they are gone, once per change of that set.
+func (rt *linuxKernelRuleRuntime) logVanishedAttachLinksLocked(sets kernelAttachmentRuleSets) {
+	summary := sets.vanishedSummary()
+	if summary == "" {
+		rt.vanishedLinkLog.Reset()
+		return
+	}
+	rt.vanishedLinkLog.Logf("kernel dataplane reconcile: skipping tc hooks on interface(s) that no longer exist, ifindex %s; their entries stay until the interface inventory drops them", summary)
+}
+
 func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, pluginCatalogOverride *PluginCatalog) (results map[int64]kernelRuleApplyResult, reconcileErr error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -904,6 +916,8 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		rt.pluginPipelineActive = kernelPluginPipelineDesiredHasHooks(pluginDesired)
 	}
 	mergeKernelPluginPipelineAttachmentRuleSets(&attachmentRuleSets, pluginAttachmentTargets)
+	attachmentRuleSets = attachmentRuleSets.withoutGoneLinks(kernelLinkIndexGone)
+	rt.logVanishedAttachLinksLocked(attachmentRuleSets)
 	pluginOnlyPipeline := len(prepared) == 0 && rt.pluginPipelineActive && attachmentRuleSets.hasTargets()
 	if len(prepared) == 0 {
 		if pluginOnlyPipeline {
@@ -1507,8 +1521,17 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	attachStartedAt := time.Now()
 
 	for _, plan := range attachmentPlans {
+		if _, gone := attachmentRuleSets.Vanished[plan.ifindex]; gone {
+			continue
+		}
 		ruleIDs := attachmentRuleSets.rules(plan.reply, plan.attach)[plan.ifindex]
 		if err := rt.attachProgramLocked(&newAttachments, plan, oldAttachments); err != nil {
+			if kernelLinkIndexGone(plan.ifindex) {
+				// The interface went away after the targets were checked.
+				attachmentRuleSets = attachmentRuleSets.withoutLinks(map[int]struct{}{plan.ifindex: {}})
+				rt.logVanishedAttachLinksLocked(attachmentRuleSets)
+				continue
+			}
 			log.Printf("kernel dataplane attach failed: program=%s ifindex=%d rules=%v err=%v", plan.name, plan.ifindex, ruleIDs, err)
 			label := "forward"
 			if plan.reply {
@@ -1556,6 +1579,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		return results, nil
 	}
 
+	attachmentRuleSets.markVanishedReady(forwardReady, replyReady)
 	runningAny := false
 	for _, item := range prepared {
 		if current, ok := results[item.rule.ID]; ok && current.Error != "" {
@@ -3163,10 +3187,19 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	attachStartedAt := time.Now()
 
 	for _, plan := range plans {
+		if _, gone := attachmentRuleSets.Vanished[plan.ifindex]; gone {
+			continue
+		}
 		if current, ok := currentAttachments[plan.key]; ok && kernelAttachmentObservationMatchesExpectation(observedAttachments[plan.key], expectedAttachments[plan.key]) {
 			newAttachments = append(newAttachments, current)
 		} else {
 			if err := rt.attachProgramLocked(&createdAttachments, plan, rt.attachments); err != nil {
+				if kernelLinkIndexGone(plan.ifindex) {
+					// The interface went away after the targets were checked.
+					attachmentRuleSets = attachmentRuleSets.withoutLinks(map[int]struct{}{plan.ifindex: {}})
+					rt.logVanishedAttachLinksLocked(attachmentRuleSets)
+					continue
+				}
 				rt.discardAttachmentsLocked(createdAttachments)
 				return fmt.Errorf("attach %s on ifindex %d: %w", plan.name, plan.ifindex, err)
 			}
@@ -3237,6 +3270,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	detachedAttachments := kernelAttachmentDeleteCount(oldAttachments, finalAttachments)
 	preservedAttachments := len(finalAttachments) - len(newAttachments)
 
+	attachmentRuleSets.markVanishedReady(forwardReady, replyReady)
 	runningAny := false
 	for _, item := range prepared {
 		if current, ok := results[item.rule.ID]; ok && current.Error != "" {

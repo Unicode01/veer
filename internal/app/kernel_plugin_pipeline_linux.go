@@ -119,6 +119,104 @@ type kernelAttachmentRuleSets struct {
 	// those, so the cache stays off them.
 	PluginIngressHooked    map[int]struct{}
 	PluginIngressHookedAll bool
+	// Vanished holds the interfaces taken out of the sets because they no
+	// longer exist; see withoutGoneLinks.
+	Vanished map[int]struct{}
+}
+
+// withoutGoneLinks moves the targets on interfaces that no longer exist into
+// Vanished. A rule held through interface inventory jitter can still name
+// one, such as the tap of a guest that was just destroyed: no hook can be
+// attached there and no packet arrives on it, so the reconcile skips it
+// instead of failing. The rule's entries stay until the inventory drops it.
+func (sets kernelAttachmentRuleSets) withoutGoneLinks(gone func(int) bool) kernelAttachmentRuleSets {
+	checked := make(map[int]bool)
+	var links map[int]struct{}
+	for _, targets := range []map[int][]int64{sets.ForwardIngress, sets.ReplyIngress, sets.ForwardEgress, sets.ReplyEgress} {
+		for ifindex := range targets {
+			if _, ok := checked[ifindex]; ok {
+				continue
+			}
+			checked[ifindex] = gone(ifindex)
+			if !checked[ifindex] {
+				continue
+			}
+			if links == nil {
+				links = make(map[int]struct{})
+			}
+			links[ifindex] = struct{}{}
+		}
+	}
+	return sets.withoutLinks(links)
+}
+
+// withoutLinks returns sets without the targets on links and with links
+// added to Vanished. Target maps keep being nil or non-nil as they were.
+func (sets kernelAttachmentRuleSets) withoutLinks(links map[int]struct{}) kernelAttachmentRuleSets {
+	if len(links) == 0 {
+		return sets
+	}
+	out := kernelAttachmentRuleSets{
+		ForwardIngress:         withoutKernelAttachTargets(sets.ForwardIngress, links),
+		ReplyIngress:           withoutKernelAttachTargets(sets.ReplyIngress, links),
+		ForwardEgress:          withoutKernelAttachTargets(sets.ForwardEgress, links),
+		ReplyEgress:            withoutKernelAttachTargets(sets.ReplyEgress, links),
+		PluginIngressHookedAll: sets.PluginIngressHookedAll,
+		Vanished:               make(map[int]struct{}, len(sets.Vanished)+len(links)),
+	}
+	for ifindex := range sets.PluginIngressHooked {
+		if _, ok := links[ifindex]; ok {
+			continue
+		}
+		if out.PluginIngressHooked == nil {
+			out.PluginIngressHooked = make(map[int]struct{}, len(sets.PluginIngressHooked))
+		}
+		out.PluginIngressHooked[ifindex] = struct{}{}
+	}
+	for ifindex := range sets.Vanished {
+		out.Vanished[ifindex] = struct{}{}
+	}
+	for ifindex := range links {
+		out.Vanished[ifindex] = struct{}{}
+	}
+	return out
+}
+
+func withoutKernelAttachTargets(src map[int][]int64, links map[int]struct{}) map[int][]int64 {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[int][]int64, len(src))
+	for ifindex, ruleIDs := range src {
+		if _, ok := links[ifindex]; ok {
+			continue
+		}
+		dst[ifindex] = append([]int64(nil), ruleIDs...)
+	}
+	return dst
+}
+
+// markVanishedReady counts the hooks on vanished interfaces as attached:
+// their rules wait there for the interface inventory to settle and should not
+// fail the reconcile meanwhile.
+func (sets kernelAttachmentRuleSets) markVanishedReady(forwardReady, replyReady map[int]bool) {
+	for ifindex := range sets.Vanished {
+		forwardReady[ifindex] = true
+		replyReady[ifindex] = true
+	}
+}
+
+// vanishedSummary lists the vanished interfaces for the log, or "" for none.
+func (sets kernelAttachmentRuleSets) vanishedSummary() string {
+	if len(sets.Vanished) == 0 {
+		return ""
+	}
+	ifindexes := make([]int, 0, len(sets.Vanished))
+	for ifindex := range sets.Vanished {
+		ifindexes = append(ifindexes, ifindex)
+	}
+	sort.Ints(ifindexes)
+	return fmt.Sprint(ifindexes)
 }
 
 func kernelAttachmentRuleSetsForPrepared(forward, reply map[int][]int64) kernelAttachmentRuleSets {
@@ -178,6 +276,7 @@ func (sets kernelAttachmentRuleSets) clone() kernelAttachmentRuleSets {
 
 		PluginIngressHooked:    cloneKernelIfIndexSet(sets.PluginIngressHooked),
 		PluginIngressHookedAll: sets.PluginIngressHookedAll,
+		Vanished:               cloneKernelIfIndexSet(sets.Vanished),
 	}
 }
 
