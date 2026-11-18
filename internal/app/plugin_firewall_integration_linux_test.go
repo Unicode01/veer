@@ -26,7 +26,8 @@ import (
 // real daemon: policies go through the HTTP API and the confirmation flow,
 // and TCP connections from two network namespaces show the verdicts. One
 // client reaches the host over a veth (native XDP on the host end); the
-// other through a bridge (no native XDP: generic mode on the bridge).
+// other through a bridge (no native XDP: the firewall's tc fallback runs at
+// the bridge's TC ingress, ahead of the core).
 func TestFirewallPluginLinuxIntegration(t *testing.T) {
 	if os.Getenv("FORWARD_RUN_PLUGIN_INTEGRATION_TEST") != "1" {
 		t.Skip("set FORWARD_RUN_PLUGIN_INTEGRATION_TEST=1 to run the firewall plugin integration test")
@@ -195,11 +196,51 @@ func TestFirewallPluginLinuxIntegration(t *testing.T) {
 	}
 	action := func(id string) map[string]any {
 		t.Helper()
+		payload := map[string]any{}
+		if id == "apply" {
+			// Accept what the draft warns about, as the page does once the
+			// user agrees; the listener's port can fall in a reply port range.
+			var check struct {
+				Result struct {
+					Errors []string `json:"errors"`
+					Token  string   `json:"token"`
+				} `json:"result"`
+			}
+			if err := json.Unmarshal(api("POST", "/api/plugins/firewall/actions/check", map[string]any{"payload": map[string]any{}}), &check); err != nil {
+				t.Fatalf("check: %v", err)
+			}
+			if len(check.Result.Errors) > 0 {
+				t.Fatalf("check: %v", check.Result.Errors)
+			}
+			if check.Result.Token != "" {
+				payload["accept_warnings"] = check.Result.Token
+			}
+		}
 		var response struct {
 			Result map[string]any `json:"result"`
 		}
-		_ = json.Unmarshal(api("POST", "/api/plugins/firewall/actions/"+id, map[string]any{"payload": map[string]any{}}), &response)
+		_ = json.Unmarshal(api("POST", "/api/plugins/firewall/actions/"+id, map[string]any{"payload": payload}), &response)
 		return response.Result
+	}
+	// dropEvents waits for drop log entries that match (the ring reader and
+	// its worker deliver them asynchronously).
+	dropEvents := func(match func(map[string]any) bool) []any {
+		t.Helper()
+		var events []any
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+			var response struct {
+				Result []any `json:"result"`
+			}
+			_ = json.Unmarshal(api("POST", "/api/plugins/firewall/actions/events", map[string]any{"payload": map[string]any{}}), &response)
+			events = response.Result
+			for _, raw := range events {
+				if match(raw.(map[string]any)) {
+					return events
+				}
+			}
+		}
+		t.Fatalf("no matching drop log entry: %v", events)
+		return nil
 	}
 	putPolicy := func(sources []map[string]string) {
 		t.Helper()
@@ -225,16 +266,41 @@ func TestFirewallPluginLinuxIntegration(t *testing.T) {
 		t.Fatalf("status after apply: %v", status)
 	}
 	expect("drop all", map[string]bool{"direct": false, "direct v6": false, "bridged": false})
+	// The drop log works from the first apply: binding the hook from the
+	// control script starts the ring reader, no restart needed.
+	dropEvents(func(event map[string]any) bool {
+		return event["reason"] == "acl" && event["port"].(float64) == float64(port) && event["policy"] == "svc"
+	})
 	action("confirm")
-	for name, want := range map[string]uint32{hostDirect: nl.XDP_ATTACHED_DRV, bridge: nl.XDP_ATTACHED_SKB} {
-		link, err := netlink.LinkByName(name)
-		if err != nil {
-			t.Fatal(err)
+	direct, err := netlink.LinkByName(hostDirect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if xdp := direct.Attrs().Xdp; xdp == nil || !xdp.Attached || xdp.AttachMode != nl.XDP_ATTACHED_DRV {
+		t.Fatalf("%s XDP = %+v, want driver mode", hostDirect, xdp)
+	}
+	bridgeLink, err := netlink.LinkByName(bridge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if xdp := bridgeLink.Attrs().Xdp; xdp != nil && xdp.Attached {
+		t.Fatalf("%s XDP = %+v, want none: the bridge runs the tc fallback", bridge, xdp)
+	}
+	if first, err := firewallPerfFirstTCProgram(bridge); err != nil || first != "tc_firewall" {
+		t.Fatalf("%s first TC ingress program = %q (err %v), want tc_firewall ahead of the core", bridge, first, err)
+	}
+	attachments, _ := action("status")["attachments"].(map[string]any)
+	modes := map[string]string{}
+	for _, raw := range func() []any { list, _ := attachments["interfaces"].([]any); return list }() {
+		item, _ := raw.(map[string]any)
+		name, _ := item["interface"].(string)
+		mode, _ := item["mode"].(string)
+		if attached, _ := item["attached"].(bool); attached {
+			modes[name] = mode
 		}
-		xdp := link.Attrs().Xdp
-		if xdp == nil || !xdp.Attached || xdp.AttachMode != want {
-			t.Fatalf("%s XDP = %+v, want attach mode %d", name, xdp, want)
-		}
+	}
+	if modes[hostDirect] != "driver" || modes[bridge] != "tc" {
+		t.Fatalf("status attachments = %v, want %s driver and %s tc", attachments, hostDirect, bridge)
 	}
 
 	// Only the direct client's IPv4 address.
@@ -318,6 +384,68 @@ func TestFirewallPluginLinuxIntegration(t *testing.T) {
 	counters, _ := policies[0].(map[string]any)["counters"].(map[string]any)
 	if counters == nil || counters["drop"].(float64) == 0 || counters["pass"].(float64) == 0 {
 		t.Fatalf("counters = %v, want both drops and passes", counters)
+	}
+
+	// SYN limit: 5 new connections a minute per source, then a 30 s ban.
+	api("PUT", "/api/plugins/firewall/resources/policies/svc", map[string]any{"enabled": true,
+		"data": map[string]any{"name": "svc", "protocol": "tcp", "ports": []string{strconv.Itoa(port)}, "default_action": "allow",
+			"syn_limit": map[string]any{"max_new": 5, "window_seconds": 60, "ban_seconds": 30}}})
+	action("apply")
+	action("confirm")
+	// Only the bridged client connects here: every connection counts, and
+	// expect() would spend the other clients' allowance too.
+	for i := 0; i < 5; i++ {
+		if !reach(nsBridged, "10.198.0.1") {
+			t.Fatalf("connection %d within the limit failed", i+1)
+		}
+	}
+	if reach(nsBridged, "10.198.0.1") {
+		t.Fatal("the 6th connection in the window got through")
+	}
+	if !reach(nsDirect, "10.199.0.1") {
+		t.Fatal("another source was limited too")
+	}
+	bannedSources := func() []string {
+		t.Helper()
+		items, _ := action("bans")["items"].([]any)
+		var sources []string
+		for _, raw := range items {
+			item := raw.(map[string]any)
+			if item["policy"] != "svc" {
+				t.Fatalf("ban of another policy: %v", item)
+			}
+			if left, ok := item["remaining_seconds"].(float64); ok && (left <= 0 || left > 30) {
+				t.Fatalf("ban time left = %v", left)
+			}
+			sources = append(sources, item["source"].(string))
+		}
+		return sources
+	}
+	if got := bannedSources(); len(got) != 1 || got[0] != "10.198.0.2/32" {
+		t.Fatalf("bans = %v, want the bridged client", got)
+	}
+	// The drop log reaches the page through the ring and its worker.
+	dropEvents(func(event map[string]any) bool {
+		return event["reason"] == "rate" && event["source"] == "10.198.0.2" && event["port"].(float64) == float64(port) && event["policy"] == "svc"
+	})
+
+	// The ban outlives a hot restart: the successor keeps fw_ban.
+	if err := os.WriteFile(marker, []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stop()
+	start()
+	expect("banned after hot restart", map[string]bool{"bridged": false, "direct": true})
+	if got := bannedSources(); len(got) != 1 {
+		t.Fatalf("bans after hot restart = %v", got)
+	}
+	var unbanned struct {
+		Result map[string]any `json:"result"`
+	}
+	_ = json.Unmarshal(api("POST", "/api/plugins/firewall/actions/unban", map[string]any{"payload": map[string]any{"all": true}}), &unbanned)
+	expect("unbanned", map[string]bool{"bridged": true})
+	if got := bannedSources(); len(got) != 0 {
+		t.Fatalf("bans after unban = %v", got)
 	}
 
 	// No interface left: the hook detaches and nothing filters.

@@ -455,6 +455,14 @@ func validatePluginHookProgramRefs(plugin *LoadedPlugin) error {
 		objects[object.Path] = object
 	}
 	objectEngines := make(map[string]string, len(plugin.Objects))
+	objectsWithXDP := make(map[string]struct{}, len(plugin.Objects))
+	for _, object := range plugin.Objects {
+		for _, program := range object.Programs {
+			if program.Type == kernelEngineXDP {
+				objectsWithXDP[object.ID] = struct{}{}
+			}
+		}
+	}
 	for i, hook := range plugin.Hooks {
 		if hook.Engine == "control" || strings.HasPrefix(hook.Program, "builtin:") {
 			continue
@@ -474,12 +482,41 @@ func validatePluginHookProgramRefs(plugin *LoadedPlugin) error {
 		if hook.Engine != program.Type {
 			return fmt.Errorf("hooks[%d]: program %q type = %q, want hook engine %q", i, programRef, program.Type, hook.Engine)
 		}
+		if _, mixed := objectsWithXDP[object.ID]; mixed && hook.Engine == kernelEngineTC {
+			return fmt.Errorf("hooks[%d]: object %q holds xdp programs; its tc programs can only serve as an xdp hook's tc_fallback", i, object.ID)
+		}
+		if hook.TCFallback != "" {
+			if _, err := pluginHookTCFallbackProgram(hook, object, objects); err != nil {
+				return fmt.Errorf("hooks[%d]: %w", i, err)
+			}
+		}
 		if previous := objectEngines[object.ID]; previous != "" && previous != hook.Engine {
 			return fmt.Errorf("hooks[%d]: object %q is shared by %s and %s hooks; split cross-engine programs into separate objects so private map ownership remains deterministic", i, object.ID, previous, hook.Engine)
 		}
 		objectEngines[object.ID] = hook.Engine
 	}
 	return nil
+}
+
+// pluginHookTCFallbackProgram resolves the tc_fallback of an xdp hook. It must
+// live in the object of the hook's xdp program: both programs then share
+// that object's maps, so either one sees the state the plugin keeps.
+func pluginHookTCFallbackProgram(hook PluginHook, object PluginObject, objects map[string]PluginObject) (PluginObjectProgram, error) {
+	objectRef, programRef, ok := parsePluginProgramRef(hook.TCFallback)
+	if !ok {
+		return PluginObjectProgram{}, fmt.Errorf("tc_fallback must use object:program")
+	}
+	if fallbackObject, ok := objects[objectRef]; !ok || fallbackObject.ID != object.ID {
+		return PluginObjectProgram{}, fmt.Errorf("tc_fallback must name a program in object %q, the object of the xdp program", object.ID)
+	}
+	program, ok := pluginObjectProgramByRef(object, programRef)
+	if !ok {
+		return PluginObjectProgram{}, fmt.Errorf("tc_fallback program %q not found in object %q", programRef, object.ID)
+	}
+	if program.Type != kernelEngineTC {
+		return PluginObjectProgram{}, fmt.Errorf("tc_fallback program %q type = %q, want tc", programRef, program.Type)
+	}
+	return program, nil
 }
 
 func parsePluginProgramRef(value string) (string, string, bool) {

@@ -337,6 +337,7 @@ type PluginAttachmentState struct {
 	Order          int                           `json:"order,omitempty"`
 	ChainSlot      int                           `json:"chain_slot,omitempty"`
 	FilterHandle   string                        `json:"filter_handle,omitempty"`
+	XDPMode        string                        `json:"xdp_mode,omitempty"` // how the XDP hook runs here: driver, generic, or tc (its tc_fallback)
 	Status         string                        `json:"status"`
 	Error          string                        `json:"error,omitempty"`
 	Metrics        *PluginAttachmentMetrics      `json:"metrics,omitempty"`
@@ -467,6 +468,10 @@ type PluginHook struct {
 	Interfaces      []string                      `json:"interfaces,omitempty"`
 	BindingRequired bool                          `json:"binding_required,omitempty"`
 	PacketMetadata  []PluginPacketMetadataBinding `json:"packet_metadata,omitempty"`
+	// TCFallback names a tc program in the object of an xdp hook's program.
+	// Where native XDP is unavailable the host attaches it at TC ingress ahead
+	// of the Veer core instead of running the hook in generic XDP mode.
+	TCFallback string `json:"tc_fallback,omitempty"`
 }
 
 type PluginPacketMetadataBinding struct {

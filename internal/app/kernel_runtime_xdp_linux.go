@@ -1393,6 +1393,22 @@ func (rt *xdpKernelRuleRuntime) retainMatchingRulesLocked(rules []Rule) (map[int
 	return retained, nil
 }
 
+// yieldToXDPPluginHooks detaches the engine from every interface. Draining
+// (Reconcile(nil)) keeps the program attached so existing connections keep
+// their XDP flows, but an XDP plugin dispatcher cannot attach where another
+// XDP program sits: when plugin hooks pin the core to TC, the engine must let
+// go of the interfaces instead. Its connections continue on the TC engine
+// where it can serve them.
+func (rt *xdpKernelRuleRuntime) yieldToXDPPluginHooks() {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.coll == nil && len(rt.attachments) == 0 {
+		return
+	}
+	rt.stateLog.Logf("xdp dataplane: detaching so XDP plugin hooks can attach; the core runs on TC")
+	rt.cleanupLocked()
+}
+
 func (rt *xdpKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	if rt.coll == nil || rt.coll.Maps == nil {
 		if !kernelHotRestartStateExists(kernelEngineXDP) {
@@ -2221,10 +2237,16 @@ func xdpVethPeerOffloadTargets(link netlink.Link) ([]xdpGenericOffloadTarget, er
 	if peerIndex <= 0 {
 		return nil, fmt.Errorf("resolve veth peer for %s: invalid peer ifindex %d", link.Attrs().Name, peerIndex)
 	}
-	if peer, err := netlink.LinkByIndex(peerIndex); err == nil && peer != nil && peer.Attrs() != nil {
-		return []xdpGenericOffloadTarget{{ifName: peer.Attrs().Name}}, nil
+	// The peer's ifindex counts in the peer's namespace. When the peer lives
+	// elsewhere (IFLA_LINK_NETNSID set), looking the index up here finds an
+	// unrelated interface: a namespace's first veth and the host's uplink
+	// are both often ifindex 2, and the uplink lost its offloads that way.
+	if link.Attrs().NetNsID < 0 {
+		if peer, err := netlink.LinkByIndex(peerIndex); err == nil && peer != nil && peer.Attrs() != nil {
+			return []xdpGenericOffloadTarget{{ifName: peer.Attrs().Name}}, nil
+		}
 	}
-	targets, err := xdpFindNamedNetnsLinksByIndex(peerIndex)
+	targets, err := xdpFindNamedNetnsVethPeers(peerIndex, link.Attrs().Index)
 	if err != nil {
 		return nil, err
 	}
@@ -2234,7 +2256,10 @@ func xdpVethPeerOffloadTargets(link netlink.Link) ([]xdpGenericOffloadTarget, er
 	return targets, nil
 }
 
-func xdpFindNamedNetnsLinksByIndex(ifindex int) ([]xdpGenericOffloadTarget, error) {
+// xdpFindNamedNetnsVethPeers finds, in the named network namespaces, the veth
+// with index peerIndex whose own peer is ownIndex: the index alone matches an
+// interface in nearly every namespace.
+func xdpFindNamedNetnsVethPeers(peerIndex, ownIndex int) ([]xdpGenericOffloadTarget, error) {
 	entries, err := os.ReadDir("/var/run/netns")
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -2263,7 +2288,10 @@ func xdpFindNamedNetnsLinksByIndex(ifindex int) ([]xdpGenericOffloadTarget, erro
 			continue
 		}
 		for _, link := range links {
-			if link == nil || link.Attrs() == nil || link.Attrs().Index != ifindex {
+			if link == nil || link.Attrs() == nil || link.Attrs().Index != peerIndex {
+				continue
+			}
+			if link.Type() != "veth" || link.Attrs().ParentIndex != ownIndex {
 				continue
 			}
 			targets = append(targets, xdpGenericOffloadTarget{namespace: name, ifName: link.Attrs().Name})

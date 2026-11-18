@@ -51,6 +51,7 @@ func currentPluginHostFeatureAvailability() pluginHostFeatureAvailability {
 			"dataplane.kfuncs.handoff_ingress.v1",
 			"dataplane.kfuncs.wan.v1",
 			"dataplane.xdp_pipeline.v1",
+			"dataplane.xdp_tc_fallback.v1",
 			"dataplane.netfilter_pipeline.v1",
 			"dataplane.netfilter_skb_dynptr.v1",
 			"ebpf.bounded_reads.v1",
@@ -58,6 +59,7 @@ func currentPluginHostFeatureAvailability() pluginHostFeatureAvailability {
 			"ebpf.private_maps",
 			"ebpf.map_state.v1",
 			"ebpf.map_migration.v1",
+			"ebpf.monotonic_clock.v1",
 		} {
 			status[feature] = PluginHostFeatureStatus{Reason: reason}
 		}
@@ -70,6 +72,13 @@ func currentPluginHostFeatureAvailability() pluginHostFeatureAvailability {
 		caps.BPFXDP,
 		caps.BPFMapProgArray,
 		caps.Netlink.LinkList,
+	)
+	status["dataplane.xdp_tc_fallback.v1"] = pluginHostFeatureStatusFromChecks(
+		"XDP plugin TC fallback",
+		caps.BPFXDP,
+		caps.BPFMapProgArray,
+		caps.Netlink.LinkList,
+		caps.TC,
 	)
 	status["dataplane.netfilter_pipeline.v1"] = pluginHostFeatureStatusFromChecks(
 		"Netfilter plugin pipeline",
@@ -213,6 +222,9 @@ func pluginRequiredHostFeatures(plugin LoadedPlugin) []string {
 			required["dataplane.tc_pipeline.v2"] = struct{}{}
 		} else if hook.Engine == kernelEngineXDP {
 			required["dataplane.xdp_pipeline.v1"] = struct{}{}
+			if hook.TCFallback != "" {
+				required["dataplane.xdp_tc_fallback.v1"] = struct{}{}
+			}
 		} else if hook.Engine == pluginEngineNetfilter {
 			required["dataplane.netfilter_pipeline.v1"] = struct{}{}
 		}

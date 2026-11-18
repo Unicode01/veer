@@ -91,7 +91,9 @@ func BenchmarkKernelXDPPluginChain(b *testing.B) {
 				b.Fatal(err)
 			}
 			for i := 0; i < count; i++ {
-				if err := pieces.progChain.Put(uint32(kernelXDPPluginBank0Base+i), uint32(continuing.FD())); err != nil {
+				// Hooks live in their own map; the program chain holds the
+				// continue slot the no-op tail-calls.
+				if err := pieces.hooks.Put(uint32(kernelXDPPluginBank0Base+i), uint32(continuing.FD())); err != nil {
 					b.Fatal(err)
 				}
 			}

@@ -102,6 +102,8 @@ type kernelXDPPluginHookPlan struct {
 	ObjectStateMaps  []PluginObjectStateMap `json:"object_state_maps,omitempty"`
 	ProgramRef       string                 `json:"program_ref"`
 	ProgramSection   string                 `json:"program_section"`
+	TCFallbackRef    string                 `json:"tc_fallback_ref,omitempty"`
+	TCFallbackSect   string                 `json:"tc_fallback_section,omitempty"`
 	Stage            string                 `json:"stage"`
 	Mode             string                 `json:"mode"`
 	Interfaces       []string               `json:"interfaces"`
@@ -121,6 +123,8 @@ type kernelXDPPluginDesiredPlugin struct {
 type loadedKernelXDPPluginProgram struct {
 	plan kernelXDPPluginHookPlan
 	prog *ebpf.Program
+	// tcProg is the hook's tc_fallback, from the same collection as prog.
+	tcProg *ebpf.Program
 }
 
 type kernelXDPPluginPipelineRuntime struct {
@@ -128,6 +132,7 @@ type kernelXDPPluginPipelineRuntime struct {
 	cfg           *Config
 	dispatcher    *ebpf.Collection
 	attachments   []xdpAttachment
+	tcFallbacks   []kernelXDPPluginTCFallback // the hooks' tc programs where native XDP is missing
 	programID     uint32
 	loaded        []loadedPluginObjectRef
 	desired       []kernelXDPPluginDesiredPlugin
@@ -247,7 +252,7 @@ func (rt *kernelXDPPluginPipelineRuntime) Reconcile(catalog PluginCatalog) plugi
 	var bank uint32
 	installed := false
 	if createdDispatcher {
-		bank, err = installKernelXDPPluginPrograms(pieces, programs)
+		bank, err = installKernelXDPPluginPrograms(pieces, programs, nil)
 		if err != nil {
 			cleanupKernelPluginPipelineCollections(loaded)
 			dispatcher.Close()
@@ -268,7 +273,20 @@ func (rt *kernelXDPPluginPipelineRuntime) Reconcile(catalog PluginCatalog) plugi
 	}
 	defer handoff.close()
 
-	newAttachments, addedAttachments, adoptedAttachments, err := rt.reconcileAttachmentsLocked(desiredIfIndexes, pieces.dispatcher, programID, handoff)
+	fallbackCandidates := map[int]kernelXDPPluginTCFallbackSplit{}
+	if !rt.cfg.ExperimentalFeatureEnabled(experimentalFeatureXDPPluginNoTCFallback) {
+		fallbackCandidates = kernelXDPPluginTCFallbackCandidates(programs)
+	}
+	newAttachments, addedAttachments, adoptedAttachments, fallbackPlans, err := rt.reconcileAttachmentsLocked(desiredIfIndexes, pieces.dispatcher, programID, handoff, fallbackCandidates)
+	var newFallbacks, addedFallbacks []kernelXDPPluginTCFallback
+	if err == nil {
+		newFallbacks, addedFallbacks, err = rt.reconcileTCFallbacksLocked(fallbackPlans, handoff)
+		if err != nil {
+			if _, detachErr := detachKernelXDPPluginTCFallbacks(addedFallbacks); detachErr != nil {
+				err = errors.Join(err, detachErr)
+			}
+		}
+	}
 	if err != nil {
 		restoreErr := handoff.restore(adoptedAttachments, pieces.dispatcher)
 		detachErr := rt.rollbackAddedAttachmentsLocked(addedAttachments, programID, dispatcher, createdDispatcher)
@@ -278,11 +296,17 @@ func (rt *kernelXDPPluginPipelineRuntime) Reconcile(catalog PluginCatalog) plugi
 		return clonePluginRuntimeSnapshot(rt.snapshot)
 	}
 
-	if !installed {
-		bank, err = installKernelXDPPluginPrograms(pieces, programs)
+	// Hooks that run their tc fallback on an interface where the dispatcher
+	// also runs leave its mask there. A fresh dispatcher ran them as well until
+	// now: the tc positions went in first, so they ran twice for a moment but
+	// were never skipped.
+	exclude := kernelXDPPluginTCFallbackExclusions(newAttachments, newFallbacks)
+	if !installed || len(exclude) > 0 {
+		bank, err = installKernelXDPPluginPrograms(pieces, programs, exclude)
 		if err != nil {
+			_, fallbackErr := detachKernelXDPPluginTCFallbacks(addedFallbacks)
 			detachErr := rt.rollbackAddedAttachmentsLocked(addedAttachments, programID, dispatcher, createdDispatcher)
-			err = errors.Join(err, detachErr)
+			err = errors.Join(err, fallbackErr, detachErr)
 			cleanupKernelPluginPipelineCollections(loaded)
 			rt.snapshot = rt.failureSnapshot(catalog, desired, states, err)
 			return clonePluginRuntimeSnapshot(rt.snapshot)
@@ -295,7 +319,7 @@ func (rt *kernelXDPPluginPipelineRuntime) Reconcile(catalog PluginCatalog) plugi
 		rt.handoff = nil
 	}
 
-	attachmentsByPlugin := kernelXDPPluginAttachmentStates(programs, bank)
+	attachmentsByPlugin := kernelXDPPluginAttachmentStates(programs, bank, newAttachments, newFallbacks)
 	for _, item := range desired {
 		attachments := sortedPluginAttachmentStates(attachmentsByPlugin[item.plugin.ID])
 		state := PluginRuntimeState{
@@ -311,11 +335,13 @@ func (rt *kernelXDPPluginPipelineRuntime) Reconcile(catalog PluginCatalog) plugi
 
 	oldLoaded := rt.loaded
 	oldAttachments := append([]xdpAttachment(nil), rt.attachments...)
+	oldFallbacks := append([]kernelXDPPluginTCFallback(nil), rt.tcFallbacks...)
 	oldBank := rt.activeBank
 	rt.dispatcher = dispatcher
 	rt.loaded = loaded
 	rt.desired = cloneKernelXDPPluginDesired(desired)
 	rt.attachments = newAttachments
+	rt.tcFallbacks = newFallbacks
 	rt.programID = programID
 	rt.activeBank = bank
 	rt.fingerprint = fingerprint
@@ -332,11 +358,14 @@ func (rt *kernelXDPPluginPipelineRuntime) Reconcile(catalog PluginCatalog) plugi
 	cleanupKernelPluginPipelineCollections(oldLoaded)
 	pending, detachErr := detachStaleOwnedXDPPluginAttachments(oldAttachments, newAttachments, programID)
 	rt.attachments = append(rt.attachments, pending...)
+	pendingFallbacks, fallbackErr := detachStaleKernelXDPPluginTCFallbacks(oldFallbacks, newFallbacks)
+	rt.tcFallbacks = append(rt.tcFallbacks, pendingFallbacks...)
+	detachErr = errors.Join(detachErr, fallbackErr)
 	if detachErr != nil {
 		rt.fingerprint = ""
 		rt.snapshot = rt.failureSnapshot(catalog, desired, states, detachErr)
 	}
-	if err := writeXDPPluginRuntimeMetadata(rt.attachments, programID); err != nil {
+	if err := writeXDPPluginRuntimeMetadata(rt.attachments, rt.tcFallbacks, programID); err != nil {
 		log.Printf("xdp plugin pipeline metadata: %v", err)
 	}
 
@@ -478,7 +507,7 @@ func kernelXDPPluginCanPreserveDesired(current, next []kernelXDPPluginDesiredPlu
 	}
 	for i := range currentHooks {
 		left, right := currentHooks[i], nextHooks[i]
-		if left.PluginID != right.PluginID || left.HookID != right.HookID || left.ObjectID != right.ObjectID ||
+		if left.PluginID != right.PluginID || left.HookID != right.HookID || left.ObjectID != right.ObjectID || left.TCFallbackRef != right.TCFallbackRef ||
 			left.Stage != right.Stage || left.Priority != right.Priority || left.Order != right.Order || left.Mode != right.Mode ||
 			!equalKernelXDPPluginStringSlices(left.Before, right.Before) || !equalKernelXDPPluginStringSlices(left.After, right.After) ||
 			!equalKernelXDPPluginStringSlices(left.Interfaces, right.Interfaces) || !equalUint32Slices(left.InterfaceIndexes, right.InterfaceIndexes) {
@@ -641,6 +670,13 @@ func buildKernelXDPPluginDesiredPlugin(plugin LoadedPlugin) (kernelXDPPluginDesi
 		if program.Type != kernelEngineXDP {
 			return item, pluginRuntimeErrorState(fmt.Sprintf("hook %s program %q type = %q, want xdp", hook.ID, programRef, program.Type))
 		}
+		var fallback PluginObjectProgram
+		if hook.TCFallback != "" {
+			fallback, err = pluginHookTCFallbackProgram(hook, object, objects)
+			if err != nil {
+				return item, pluginRuntimeErrorState(fmt.Sprintf("hook %s: %v", hook.ID, err))
+			}
+		}
 		realPath, err := resolvePluginObjectRealPath(&plugin, object)
 		if err != nil {
 			return item, pluginRuntimeErrorState(fmt.Sprintf("hook %s object path: %v", hook.ID, err))
@@ -681,6 +717,8 @@ func buildKernelXDPPluginDesiredPlugin(plugin LoadedPlugin) (kernelXDPPluginDesi
 			ObjectStateMaps:  append([]PluginObjectStateMap(nil), object.StateMaps...),
 			ProgramRef:       programRef,
 			ProgramSection:   program.Section,
+			TCFallbackRef:    fallback.ID,
+			TCFallbackSect:   fallback.Section,
 			Stage:            stage,
 			Mode:             hook.Mode,
 			Interfaces:       interfaces,
@@ -990,7 +1028,15 @@ func (rt *kernelXDPPluginPipelineRuntime) loadProgramsLocked(desired []kernelXDP
 			cleanupLoadedPluginObjectCache(cache)
 			return nil, nil, states, fmt.Errorf("load plugin %s hook %s: %w", plan.PluginID, plan.HookID, err)
 		}
-		programs = append(programs, loadedKernelXDPPluginProgram{plan: plan, prog: prog})
+		loadedProgram := loadedKernelXDPPluginProgram{plan: plan, prog: prog}
+		if plan.TCFallbackRef != "" {
+			loadedProgram.tcProg, err = pluginProgramForAttach(object, plan.TCFallbackSect, plan.TCFallbackRef)
+			if err != nil {
+				cleanupLoadedPluginObjectCache(cache)
+				return nil, nil, states, fmt.Errorf("load plugin %s hook %s tc fallback: %w", plan.PluginID, plan.HookID, err)
+			}
+		}
+		programs = append(programs, loadedProgram)
 		refKey := plan.PluginID + "\x00" + plan.ObjectID + "\x00" + plan.ObjectPath
 		if _, ok := refSeen[refKey]; !ok {
 			refSeen[refKey] = struct{}{}
@@ -1065,41 +1111,76 @@ func collectKernelXDPPluginInterfaces(programs []loadedKernelXDPPluginProgram) [
 }
 
 // reconcileAttachmentsLocked returns every attachment of prog, the ones it
-// attached from scratch, and the ones it took over from a hot-restart
-// predecessor. Callers roll back the second set by detaching and the third by
-// restoring the predecessor.
-func (rt *kernelXDPPluginPipelineRuntime) reconcileAttachmentsLocked(desired []int, prog *ebpf.Program, programID uint32, handoff *kernelXDPPluginHandoff) ([]xdpAttachment, []xdpAttachment, []xdpAttachment, error) {
+// attached from scratch, the ones it took over from a hot-restart
+// predecessor, and the tc fallbacks to run. Callers roll back the second set
+// by detaching and the third by restoring the predecessor.
+//
+// An interface whose hooks all have a tc fallback tries driver mode only and
+// runs every hook at TC where that fails; one that already runs them there
+// keeps them without a new attempt. One with a split (hooks without a
+// fallback first, then hooks with one) tries driver mode and then generic
+// mode as usual; in generic mode the tail of the chain runs at TC instead,
+// beside the dispatcher.
+func (rt *kernelXDPPluginPipelineRuntime) reconcileAttachmentsLocked(desired []int, prog *ebpf.Program, programID uint32, handoff *kernelXDPPluginHandoff, fallbacks map[int]kernelXDPPluginTCFallbackSplit) ([]xdpAttachment, []xdpAttachment, []xdpAttachment, []kernelXDPPluginTCFallbackPlan, error) {
 	oldByIndex := make(map[int]xdpAttachment, len(rt.attachments))
 	for _, att := range rt.attachments {
 		oldByIndex[att.ifindex] = att
 	}
+	runningFallbacks := kernelXDPPluginTCFallbackInterfaces(rt.tcFallbacks)
 	allowGeneric := rt.cfg.XDPGenericEnabled()
 	result := make([]xdpAttachment, 0, len(desired))
 	added := make([]xdpAttachment, 0, len(desired))
 	adopted := make([]xdpAttachment, 0)
-	for _, ifindex := range desired {
-		if old, ok := oldByIndex[ifindex]; ok && xdpAttachmentExists(old, rt.programID) {
-			result = append(result, old)
-			continue
-		}
-		if att, ok, err := handoff.adopt(ifindex, prog, allowGeneric); err != nil {
-			return result, added, adopted, fmt.Errorf("take over xdp plugin dispatcher on %s: %w", xdpInterfaceLabel(ifindex), err)
-		} else if ok {
-			result = append(result, att)
-			adopted = append(adopted, att)
-			continue
-		}
-		att, err := attachKernelXDPPluginDispatcher(ifindex, prog, allowGeneric)
-		if err != nil {
-			return result, added, adopted, fmt.Errorf("attach xdp plugin dispatcher on %s: %w", xdpInterfaceLabel(ifindex), err)
-		}
+	tc := make([]kernelXDPPluginTCFallbackPlan, 0)
+	runAtTC := func(ifindex int) {
+		tc = append(tc, kernelXDPPluginTCFallbackPlan{ifindex: ifindex, programs: fallbacks[ifindex].tc})
+	}
+	// A dispatcher in generic mode leaves a split's tail to the tc fallbacks.
+	settle := func(att xdpAttachment) {
 		result = append(result, att)
+		if split, ok := fallbacks[att.ifindex]; ok && split.inXDP > 0 && att.flags == nl.XDP_FLAGS_SKB_MODE {
+			runAtTC(att.ifindex)
+		}
+	}
+	for _, ifindex := range desired {
+		split, canFallBack := fallbacks[ifindex]
+		onlyTC := canFallBack && split.inXDP == 0
+		interfaceGeneric := allowGeneric && !onlyTC
+		if old, ok := oldByIndex[ifindex]; ok && xdpAttachmentExists(old, rt.programID) && (interfaceGeneric || old.flags != nl.XDP_FLAGS_SKB_MODE) {
+			settle(old)
+			continue
+		}
+		if _, running := runningFallbacks[ifindex]; running && onlyTC {
+			runAtTC(ifindex)
+			continue
+		}
+		// A predecessor's generic dispatcher on such an interface keeps running
+		// until the tc fallbacks are in place; finish detaches it then.
+		if flags, ok := handoff.predecessorFlags(ifindex); !ok || !onlyTC || flags != nl.XDP_FLAGS_SKB_MODE {
+			if att, ok, err := handoff.adopt(ifindex, prog, interfaceGeneric); err != nil {
+				return result, added, adopted, tc, fmt.Errorf("take over xdp plugin dispatcher on %s: %w", xdpInterfaceLabel(ifindex), err)
+			} else if ok {
+				settle(att)
+				adopted = append(adopted, att)
+				continue
+			}
+		}
+		att, err := attachKernelXDPPluginDispatcher(ifindex, prog, interfaceGeneric)
+		if err != nil {
+			if onlyTC {
+				log.Printf("xdp plugin pipeline: %s has no native XDP (%v); running the hooks' tc fallbacks ahead of the core", xdpInterfaceLabel(ifindex), err)
+				runAtTC(ifindex)
+				continue
+			}
+			return result, added, adopted, tc, fmt.Errorf("attach xdp plugin dispatcher on %s: %w", xdpInterfaceLabel(ifindex), err)
+		}
+		settle(att)
 		added = append(added, att)
 	}
-	if len(result) == 0 || programID == 0 {
-		return result, added, adopted, fmt.Errorf("xdp plugin dispatcher did not establish a verifiable attachment")
+	if (len(result) == 0 && len(tc) == 0) || programID == 0 {
+		return result, added, adopted, tc, fmt.Errorf("xdp plugin dispatcher did not establish a verifiable attachment")
 	}
-	return result, added, adopted, nil
+	return result, added, adopted, tc, nil
 }
 
 func attachKernelXDPPluginDispatcher(ifindex int, prog *ebpf.Program, allowGeneric bool) (xdpAttachment, error) {
@@ -1150,18 +1231,33 @@ func (rt *kernelXDPPluginPipelineRuntime) attachmentsHealthyLocked(desired []ker
 			}
 		}
 	}
-	if len(wanted) != len(rt.attachments) || rt.programID == 0 {
+	if rt.programID == 0 {
 		return false
 	}
+	covered := kernelXDPPluginTCFallbackInterfaces(rt.tcFallbacks)
 	for _, att := range rt.attachments {
-		if _, ok := wanted[att.ifindex]; !ok || !xdpAttachmentExists(att, rt.programID) {
+		covered[att.ifindex] = struct{}{}
+	}
+	if len(covered) != len(wanted) {
+		return false
+	}
+	for ifindex := range covered {
+		if _, ok := wanted[ifindex]; !ok {
 			return false
 		}
 	}
-	return true
+	for _, att := range rt.attachments {
+		if !xdpAttachmentExists(att, rt.programID) {
+			return false
+		}
+	}
+	return kernelXDPPluginTCFallbacksPresent(rt.tcFallbacks)
 }
 
-func installKernelXDPPluginPrograms(pieces kernelXDPPluginPieces, programs []loadedKernelXDPPluginProgram) (bank uint32, resultErr error) {
+// installKernelXDPPluginPrograms fills the inactive bank and switches to it.
+// exclude names, per interface, the hooks that run their tc fallback there
+// instead (kernelXDPPluginTCFallbackHookKey); the dispatcher skips them.
+func installKernelXDPPluginPrograms(pieces kernelXDPPluginPieces, programs []loadedKernelXDPPluginProgram, exclude map[uint32]map[string]struct{}) (bank uint32, resultErr error) {
 	if len(programs) == 0 || len(programs) > kernelXDPPluginMaxHooks {
 		return 0, fmt.Errorf("xdp plugin program count %d is outside 1..%d", len(programs), kernelXDPPluginMaxHooks)
 	}
@@ -1191,6 +1287,9 @@ func installKernelXDPPluginPrograms(pieces kernelXDPPluginPieces, programs []loa
 		}
 		bit := uint32(1) << uint32(i)
 		for _, ifindex := range item.plan.InterfaceIndexes {
+			if _, atTC := exclude[ifindex][kernelXDPPluginTCFallbackHookKey(item.plan.PluginID, item.plan.HookID)]; atTC {
+				continue
+			}
 			interfaceMasks[ifindex] |= bit
 		}
 	}
@@ -1294,9 +1393,17 @@ func clearKernelXDPPluginMetrics(metrics *ebpf.Map) error {
 	return nil
 }
 
-func kernelXDPPluginAttachmentStates(programs []loadedKernelXDPPluginProgram, bank uint32) map[string][]PluginAttachmentState {
+// kernelXDPPluginAttachmentStates reports every hook on every interface the
+// dispatcher serves. attachments are the dispatcher attachments in effect, so
+// each state carries the mode the dispatcher really attached in there.
+func kernelXDPPluginAttachmentStates(programs []loadedKernelXDPPluginProgram, bank uint32, attachments []xdpAttachment, fallbacks []kernelXDPPluginTCFallback) map[string][]PluginAttachmentState {
 	result := make(map[string][]PluginAttachmentState)
 	base := kernelXDPPluginBankBase(bank)
+	modes := make(map[int]string, len(attachments)+len(fallbacks))
+	for _, att := range attachments {
+		modes[att.ifindex] = xdpPluginAttachmentModeLabel(att.flags)
+	}
+	atTC := kernelXDPPluginTCFallbackHookSet(fallbacks)
 	for index, item := range programs {
 		for i, ifindex := range item.plan.InterfaceIndexes {
 			name := ""
@@ -1305,6 +1412,10 @@ func kernelXDPPluginAttachmentStates(programs []loadedKernelXDPPluginProgram, ba
 			}
 			if name == "" {
 				name = xdpInterfaceLabel(int(ifindex))
+			}
+			mode := modes[int(ifindex)]
+			if _, ok := atTC[kernelXDPPluginTCFallbackPositionKey(item.plan.PluginID, item.plan.HookID, int(ifindex))]; ok {
+				mode = kernelXDPPluginTCFallbackMode
 			}
 			result[item.plan.PluginID] = append(result[item.plan.PluginID], PluginAttachmentState{
 				HookID:    item.plan.HookID,
@@ -1319,11 +1430,25 @@ func kernelXDPPluginAttachmentStates(programs []loadedKernelXDPPluginProgram, ba
 				After:     append([]string(nil), item.plan.After...),
 				Order:     item.plan.Order,
 				ChainSlot: base + index,
+				XDPMode:   mode,
 				Status:    "attached",
 			})
 		}
 	}
 	return result
+}
+
+// xdpPluginAttachmentModeLabel names an XDP attach mode the way the kernel
+// runtime view does ("driver" or "generic"), and "" for anything else.
+func xdpPluginAttachmentModeLabel(flags int) string {
+	switch flags {
+	case nl.XDP_FLAGS_DRV_MODE:
+		return "driver"
+	case nl.XDP_FLAGS_SKB_MODE:
+		return "generic"
+	default:
+		return ""
+	}
 }
 
 func populateKernelXDPPluginMetrics(snapshot pluginRuntimeSnapshot, metrics *ebpf.Map) {
@@ -1384,7 +1509,7 @@ func (rt *kernelXDPPluginPipelineRuntime) cleanupLocked() error {
 	// Runtime metadata on disk belongs to whoever attached a dispatcher. With
 	// nothing of our own it may still describe a predecessor that
 	// releasePredecessorLocked could not recover, so leave it in place.
-	owned := rt.dispatcher != nil || len(rt.attachments) > 0 || len(rt.loaded) > 0
+	owned := rt.dispatcher != nil || len(rt.attachments) > 0 || len(rt.tcFallbacks) > 0 || len(rt.loaded) > 0
 	if rt.dispatcher != nil {
 		if pieces, err := kernelXDPPluginCollectionPieces(rt.dispatcher); err != nil {
 			failures = append(failures, err.Error())
@@ -1407,11 +1532,14 @@ func (rt *kernelXDPPluginPipelineRuntime) cleanupLocked() error {
 			}
 		}
 	}
+	pendingFallbacks, fallbackErr := detachKernelXDPPluginTCFallbacks(rt.tcFallbacks)
+	rt.tcFallbacks = pendingFallbacks
 	pending, detachErr := detachOwnedXDPPluginAttachments(rt.attachments, rt.programID)
 	rt.attachments = pending
+	detachErr = errors.Join(fallbackErr, detachErr)
 	if detachErr != nil {
 		failures = append(failures, detachErr.Error())
-		if err := writeXDPPluginRuntimeMetadata(pending, rt.programID); err != nil {
+		if err := writeXDPPluginRuntimeMetadata(pending, pendingFallbacks, rt.programID); err != nil {
 			failures = append(failures, err.Error())
 		}
 		rt.fingerprint = ""
@@ -1426,6 +1554,7 @@ func (rt *kernelXDPPluginPipelineRuntime) cleanupLocked() error {
 	}
 	rt.dispatcher = nil
 	rt.attachments = nil
+	rt.tcFallbacks = nil
 	rt.programID = 0
 	rt.loaded = nil
 	rt.desired = nil
@@ -1490,7 +1619,7 @@ func kernelSupportsXDPPluginReplace(release string) bool {
 // keeps running while the service restarts. The successor swaps in its own
 // dispatcher with XDP_FLAGS_REPLACE, so no packet skips the chain.
 func (rt *kernelXDPPluginPipelineRuntime) prepareHotRestartLocked() bool {
-	if !kernelHotRestartRequested() || rt.dispatcher == nil || len(rt.attachments) == 0 || rt.programID == 0 {
+	if !kernelHotRestartRequested() || rt.dispatcher == nil || (len(rt.attachments) == 0 && len(rt.tcFallbacks) == 0) || rt.programID == 0 {
 		return false
 	}
 	if release := kernelRelease(); !kernelSupportsXDPPluginReplace(release) {
@@ -1514,10 +1643,16 @@ func (rt *kernelXDPPluginPipelineRuntime) prepareHotRestartLocked() bool {
 		clearKernelHotRestartState(kernelXDPPluginRuntimeEngine)
 		return false
 	}
+	if err := pinKernelXDPPluginTCFallbacks(rt.tcFallbacks); err != nil {
+		log.Printf("xdp plugin pipeline hot restart: %v; detaching the dispatcher instead", err)
+		clearKernelHotRestartState(kernelXDPPluginRuntimeEngine)
+		return false
+	}
 	meta := kernelHotRestartMetadata{
 		FormatVersion:  kernelHotRestartMetadataFormatVersion,
 		Engine:         kernelXDPPluginRuntimeEngine,
 		XDPAttachments: make([]kernelHotRestartXDPAttachment, 0, len(rt.attachments)),
+		TCAttachments:  kernelXDPPluginTCFallbackMetadata(rt.tcFallbacks),
 	}
 	for _, att := range rt.attachments {
 		meta.XDPAttachments = append(meta.XDPAttachments, kernelHotRestartXDPAttachment{Ifindex: att.ifindex, Flags: att.flags, ProgramID: rt.programID})
@@ -1527,7 +1662,7 @@ func (rt *kernelXDPPluginPipelineRuntime) prepareHotRestartLocked() bool {
 		clearKernelHotRestartState(kernelXDPPluginRuntimeEngine)
 		return false
 	}
-	log.Printf("xdp plugin pipeline hot restart: leaving %d dispatcher attachment(s) and the plugin chain active for successor", len(rt.attachments))
+	log.Printf("xdp plugin pipeline hot restart: leaving %d dispatcher attachment(s), %d tc fallback(s) and the plugin chain active for successor", len(rt.attachments), len(rt.tcFallbacks))
 	// The runtime metadata stays on disk on purpose: a successor that predates
 	// the handoff then detaches this dispatcher as a crashed owner's, which is
 	// the old cold behaviour. Collections stay open until the process exits.
@@ -1571,11 +1706,14 @@ func (rt *kernelXDPPluginPipelineRuntime) releasePredecessorLocked() {
 			failures = append(failures, fmt.Errorf("ifindex %d: %w", item.Ifindex, err))
 		}
 	}
+	if err := detachKernelXDPPluginTCFallbackMetadata(rt.handoff.TCAttachments); err != nil {
+		failures = append(failures, err)
+	}
 	if err := errors.Join(failures...); err != nil {
 		rt.logPredecessorOnce("xdp plugin pipeline hot restart: detach predecessor dispatcher: %v", err)
 		return
 	}
-	log.Printf("xdp plugin pipeline hot restart: no xdp plugin hook remains; detached %d predecessor attachment(s)", len(rt.handoff.XDPAttachments))
+	log.Printf("xdp plugin pipeline hot restart: no xdp plugin hook remains; detached %d predecessor attachment(s)", len(rt.handoff.XDPAttachments)+len(rt.handoff.TCAttachments))
 	clearKernelHotRestartState(kernelXDPPluginRuntimeEngine)
 	rt.handoff = nil
 }
@@ -1605,7 +1743,7 @@ func readXDPPluginHotRestartHandoff() (*kernelHotRestartMetadata, error) {
 	if kernelMetadataOwnerAlive(meta) {
 		return nil, fmt.Errorf("xdp plugin hot restart predecessor pid %d is still running", meta.OwnerPID)
 	}
-	if len(meta.XDPAttachments) == 0 {
+	if len(meta.XDPAttachments) == 0 && len(meta.TCAttachments) == 0 {
 		clearKernelHotRestartState(kernelXDPPluginRuntimeEngine)
 		return nil, nil
 	}
@@ -1619,6 +1757,10 @@ type kernelXDPPluginHandoff struct {
 	byIndex     map[int]kernelHotRestartXDPAttachment
 	predecessor *ebpf.Program
 	adopted     map[int]struct{}
+	// tcFallbacks are the predecessor's tc positions; a successor that runs
+	// the same position swaps its program in place.
+	tcFallbacks map[kernelAttachmentKey]struct{}
+	tcAdopted   map[kernelAttachmentKey]struct{}
 }
 
 func (rt *kernelXDPPluginPipelineRuntime) openHandoffLocked() (*kernelXDPPluginHandoff, error) {
@@ -1626,8 +1768,15 @@ func (rt *kernelXDPPluginPipelineRuntime) openHandoffLocked() (*kernelXDPPluginH
 		return nil, nil
 	}
 	h := &kernelXDPPluginHandoff{
-		byIndex: make(map[int]kernelHotRestartXDPAttachment, len(rt.handoff.XDPAttachments)),
-		adopted: make(map[int]struct{}),
+		byIndex:     make(map[int]kernelHotRestartXDPAttachment, len(rt.handoff.XDPAttachments)),
+		adopted:     make(map[int]struct{}),
+		tcFallbacks: make(map[kernelAttachmentKey]struct{}, len(rt.handoff.TCAttachments)),
+		tcAdopted:   make(map[kernelAttachmentKey]struct{}),
+	}
+	for _, item := range rt.handoff.TCAttachments {
+		if key, ok := kernelXDPPluginTCFallbackKeyFromMetadata(item); ok {
+			h.tcFallbacks[key] = struct{}{}
+		}
 	}
 	var programID uint32
 	for _, item := range rt.handoff.XDPAttachments {
@@ -1686,6 +1835,32 @@ func (h *kernelXDPPluginHandoff) adopt(ifindex int, prog *ebpf.Program, allowGen
 	return xdpAttachment{ifindex: ifindex, flags: old.Flags}, true, nil
 }
 
+// predecessorFlags is the attach mode of the predecessor's dispatcher on
+// ifindex, if it left one there.
+func (h *kernelXDPPluginHandoff) predecessorFlags(ifindex int) (int, bool) {
+	if h == nil || h.predecessor == nil {
+		return 0, false
+	}
+	old, ok := h.byIndex[ifindex]
+	return old.Flags, ok
+}
+
+// adoptTCFallback opens the predecessor's tc position key, if it left one.
+// The caller swaps its program in place.
+func (h *kernelXDPPluginHandoff) adoptTCFallback(key kernelAttachmentKey) (kernelXDPPluginTCFallback, bool) {
+	if h == nil {
+		return kernelXDPPluginTCFallback{}, false
+	}
+	if _, ok := h.tcFallbacks[key]; !ok {
+		return kernelXDPPluginTCFallback{}, false
+	}
+	position, ok := loadKernelXDPPluginTCFallbackPredecessor(key)
+	if ok {
+		h.tcAdopted[key] = struct{}{}
+	}
+	return position, ok
+}
+
 // restore puts the predecessor back where a later step of the same update
 // failed, so the old chain keeps running instead of no chain.
 func (h *kernelXDPPluginHandoff) restore(adopted []xdpAttachment, prog *ebpf.Program) error {
@@ -1720,8 +1895,17 @@ func (h *kernelXDPPluginHandoff) finish() error {
 			}
 		}
 	}
+	var stale []kernelHotRestartTCAttachment
+	for key := range h.tcFallbacks {
+		if _, adopted := h.tcAdopted[key]; !adopted {
+			stale = append(stale, kernelHotRestartTCAttachment{LinkIndex: key.linkIndex, Parent: key.parent, Priority: key.priority, Handle: key.handle, TCX: key.tcx})
+		}
+	}
+	if err := detachKernelXDPPluginTCFallbackMetadata(stale); err != nil {
+		failures = append(failures, err)
+	}
 	clearKernelHotRestartState(kernelXDPPluginRuntimeEngine)
-	log.Printf("xdp plugin pipeline hot restart: took over %d predecessor attachment(s) in place", len(h.adopted))
+	log.Printf("xdp plugin pipeline hot restart: took over %d predecessor attachment(s) and %d tc fallback(s) in place", len(h.adopted), len(h.tcAdopted))
 	return errors.Join(failures...)
 }
 
@@ -1758,18 +1942,19 @@ func (rt *kernelXDPPluginPipelineRuntime) rollbackAddedAttachmentsLocked(added [
 		rt.dispatcher, rt.programID = dispatcher, programID
 		rt.attachments = append(rt.attachments, pending...)
 		rt.fingerprint = ""
-		err = errors.Join(err, writeXDPPluginRuntimeMetadata(rt.attachments, programID))
+		err = errors.Join(err, writeXDPPluginRuntimeMetadata(rt.attachments, rt.tcFallbacks, programID))
 	} else if created {
 		dispatcher.Close()
 	}
 	return err
 }
 
-func writeXDPPluginRuntimeMetadata(attachments []xdpAttachment, programID uint32) error {
+func writeXDPPluginRuntimeMetadata(attachments []xdpAttachment, fallbacks []kernelXDPPluginTCFallback, programID uint32) error {
 	meta := kernelHotRestartMetadata{
 		FormatVersion:  kernelHotRestartMetadataFormatVersion,
 		Engine:         kernelXDPPluginRuntimeEngine,
 		XDPAttachments: make([]kernelHotRestartXDPAttachment, 0, len(attachments)),
+		TCAttachments:  kernelXDPPluginTCFallbackMetadata(fallbacks),
 	}
 	for _, att := range attachments {
 		meta.XDPAttachments = append(meta.XDPAttachments, kernelHotRestartXDPAttachment{Ifindex: att.ifindex, Flags: att.flags, ProgramID: programID})
@@ -1798,6 +1983,17 @@ func cleanupOrphanXDPPluginRuntimeState() error {
 		if err := detachOwnedXDPPluginAttachment(att, item.ProgramID); err != nil {
 			failures = append(failures, fmt.Errorf("detach orphan xdp plugin from ifindex %d: %w", item.Ifindex, err))
 		}
+	}
+	// The tcx links of a process that is gone went with it; only cls_bpf
+	// filters outlive their owner.
+	var filters []kernelHotRestartTCAttachment
+	for _, item := range meta.TCAttachments {
+		if !item.TCX {
+			filters = append(filters, item)
+		}
+	}
+	if err := detachKernelXDPPluginTCFallbackMetadata(filters); err != nil {
+		failures = append(failures, err)
 	}
 	if err := errors.Join(failures...); err != nil {
 		return err

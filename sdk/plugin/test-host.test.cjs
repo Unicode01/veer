@@ -539,7 +539,7 @@ test('test host loads bundled control-plane plugins without compatibility shims'
 test('test host exposes every versioned control API method', (t) => {
   const pluginDir = writePlugin(t, testManifest('api_contract'), `exports.onReconcile = function () {};`);
   const host = createTestHost({ pluginDir });
-  assert.equal(apiContract.version, 15);
+  assert.equal(apiContract.version, 16);
   assert.deepEqual(apiContract.webui.host_methods, ['notify', 'notifyError', 'headerActions']);
   assert.equal(apiContract.webui.max_header_actions, 2);
   assert.equal(apiContract.runtime.api_version, 'v1');
@@ -613,6 +613,70 @@ exports.onWorkerProbe = function () { return operations.list(); };
   assert.throws(() => host.context.operations.claim(operation.id, 1), /stale/);
   assert.equal(host.snapshot().operations.length, 1);
   assert.throws(() => host.action('worker_probe'), /main VM/);
+});
+
+test('test host reports attachment status, engine order and the monotonic clock through adapters', (t) => {
+  const manifest = testManifest('attach_sdk');
+  const pluginDir = writePlugin(t, manifest, `
+plugin.action({id:'status', runtime_update:'runtime_query'});
+plugin.action({id:'worker_status', runtime_update:'runtime_query'});
+var registrationErrors = [];
+try { plugin.attachments(); } catch (err) { registrationErrors.push(String(err.message || err)); }
+try { ebpf.monotonicMs(); } catch (err) { registrationErrors.push(String(err.message || err)); }
+exports.onAction = function (ctx) {
+  if (ctx.action.id === 'worker_status') return worker.call('probe', 'onProbe', {});
+  var host = plugin.host();
+  return {registration_errors: registrationErrors, status: plugin.attachments(), order: host.kernel_engine_order,
+    pinned: host.core_engine_pinned_to_tc, now: ebpf.monotonicMs()};
+};
+exports.onProbe = function () { return {status: plugin.attachments(), pinned: plugin.host().core_engine_pinned_to_tc, now: ebpf.monotonicMs()}; };
+`);
+
+  const bare = createTestHost({pluginDir}).load();
+  const empty = bare.action('status');
+  assert.equal(empty.registration_errors.length, 2);
+  assert.match(empty.registration_errors[0], /plugin\.attachments is unavailable during plugin registration/);
+  assert.match(empty.registration_errors[1], /ebpf\.monotonicMs is unavailable during plugin registration/);
+  assert.deepEqual(empty.status, {mode: 'registered', attached: false, reason: '', error: '', attachments: []});
+  assert.deepEqual(empty.order, ['tc']);
+  assert.equal(empty.pinned, false);
+  assert.ok(Number.isFinite(empty.now) && empty.now > 0);
+  assert.ok(bare.context.plugin.host().available_features.includes('control.attachment_status.v1'));
+  assert.ok(bare.context.plugin.host().available_features.includes('ebpf.monotonic_clock.v1'));
+
+  let now = 1500.25;
+  const host = createTestHost({
+    pluginDir,
+    hostInfo: {kernel_engine_order: ['XDP', 'tc', 'bogus'], core_engine_pinned_to_tc: true},
+    adapters: {
+      'plugin.attachments': () => ({
+        error: 'attach xdp plugin dispatcher on eth1: interface already has xdp program id 7',
+        attachments: [{hook_id: 'filter', engine: 'xdp', attach: 'ingress', interface: 'eth0', status: 'attached', xdp_mode: 'generic'}],
+      }),
+      'ebpf.monotonicMs': () => now,
+    },
+  }).load();
+  const result = host.action('status');
+  assert.deepEqual(result.order, ['xdp', 'tc']);
+  assert.equal(result.pinned, true);
+  assert.equal(result.now, 1500.25);
+  assert.equal(result.status.mode, 'dataplane');
+  assert.equal(result.status.attached, true);
+  assert.match(result.status.error, /already has xdp program/);
+  assert.deepEqual(result.status.attachments, [{
+    hook_id: 'filter', engine: 'xdp', attach: 'ingress', stage: '', interface: 'eth0',
+    program: '', status: 'attached', error: '', xdp_mode: 'generic',
+  }]);
+
+  now = 2000;
+  const fromWorker = host.action('worker_status');
+  assert.equal(fromWorker.status.attachments[0].xdp_mode, 'generic');
+  assert.equal(fromWorker.pinned, true);
+  assert.equal(fromWorker.now, 2000);
+  assert.ok(host.snapshot().calls.some((call) => call.api === 'plugin.attachments' && call.worker === 'probe'));
+
+  const broken = createTestHost({pluginDir, adapters: {'ebpf.monotonicMs': () => -1, 'plugin.attachments': () => []}}).load();
+  assert.throws(() => broken.action('status'), /plugin\.attachments adapter must return an object/);
 });
 
 test('router wizard resumes a persisted in-flight orchestration operation', () => {

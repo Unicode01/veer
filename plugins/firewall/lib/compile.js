@@ -27,6 +27,24 @@ var PROTO_UDP = 1;
 var ACTION_PASS = 0;
 var ACTION_DROP = 1;
 
+var POLICY_VALID = 1;
+var POLICY_LIMIT = 2;
+var MAX_SYN_PER_WINDOW = 1000000;
+var MAX_LIMIT_WINDOW_SECONDS = 3600;
+var MAX_BAN_SECONDS = 7 * 86400;
+var DEFAULT_LIMIT_IPV6_PREFIX = 64;
+var LIMIT_VALUE_ZERO = '0000000000000000000000000000000000000000000000000000000000000000'; // 32 bytes
+
+// fw_lstats: per policy slot; slot 0 counts the drop log.
+var LCOUNTERS = 4;
+var LCNT_BAN = 0;
+var LCNT_RATE = 1;
+var LCNT_LOGGED = 2;
+var LCNT_LOST = 3;
+
+var EVENT_BYTES = 56;
+var REASONS = {1: 'acl', 2: 'ban', 3: 'rate', 4: 'evasive'};
+
 function fail(message) {
   throw new Error(message);
 }
@@ -207,6 +225,41 @@ function parseAction(value, label) {
   fail(label + ': 动作必须是 allow 或 drop');
 }
 
+function intIn(value, min, max, label) {
+  var n = Number(value);
+  if (value === null || value === '' || !isFinite(n) || Math.floor(n) !== n || n < min || n > max) {
+    fail(label + ' 必须是 ' + min + ' 到 ' + max + ' 之间的整数');
+  }
+  return n;
+}
+
+/*
+ * {max_new, window_seconds, ban_seconds, ipv6_prefix}: at most max_new new
+ * TCP connections (SYNs) per window from one source prefix; over that, SYNs
+ * are dropped and, with ban_seconds, the prefix is banned from the policy.
+ */
+function parseSynLimit(value, protocols, label) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) fail(label + ': syn_limit 必须是对象');
+  if (protocols.indexOf(PROTO_TCP) < 0) fail(label + ': syn_limit 只限制 TCP 新连接，协议需要包含 tcp');
+  return {
+    maxNew: intIn(value.max_new, 1, MAX_SYN_PER_WINDOW, label + ': syn_limit.max_new'),
+    windowSeconds: intIn(value.window_seconds, 1, MAX_LIMIT_WINDOW_SECONDS, label + ': syn_limit.window_seconds'),
+    banSeconds: value.ban_seconds === undefined ? 0 : intIn(value.ban_seconds, 0, MAX_BAN_SECONDS, label + ': syn_limit.ban_seconds'),
+    ipv6Prefix: value.ipv6_prefix === undefined ? DEFAULT_LIMIT_IPV6_PREFIX : intIn(value.ipv6_prefix, 32, 128, label + ': syn_limit.ipv6_prefix')
+  };
+}
+
+/* The first prefix bits of 16 bytes set, as hex. */
+function prefixMaskHex(prefix) {
+  var out = '';
+  for (var i = 0; i < 16; i++) {
+    var bits = Math.max(0, Math.min(8, prefix - i * 8));
+    out += hexByte((0xff << (8 - bits)) & 0xff);
+  }
+  return out;
+}
+
 /*
  * Validates one policy record and returns its normalized form:
  * {key, name, protocols, ranges, destinations, defaultAction, sources}.
@@ -239,7 +292,8 @@ function normalizePolicy(key, data) {
     ranges: parsePortRanges(data.ports, label),
     destinations: destinations,
     defaultAction: parseAction(data.default_action || 'drop', label),
-    sources: sources
+    sources: sources,
+    synLimit: parseSynLimit(data.syn_limit, protocols, label)
   };
 }
 
@@ -275,6 +329,90 @@ function findConflicts(policies) {
     }
   }
   return errors;
+}
+
+// ----------------------------------------------------------------- warnings
+
+// Ports whose loss locks an administrator out. Veer's own port is whatever
+// web_port says, which a plugin cannot read; 8080 is its default.
+var MANAGEMENT_PORTS = [
+  {port: 22, name: 'SSH'},
+  {port: 8006, name: 'Proxmox VE'},
+  {port: 8080, name: 'Veer 默认管理端口'}
+];
+// Replies to outbound connections arrive on these ports: Veer's egress NAT
+// pool once the host's ephemeral ports are taken out of it, and Linux's
+// default ip_local_port_range. The plugin cannot read the actual values.
+var NAT_REPLY_PORTS = [20000, 32767];
+var EPHEMERAL_REPLY_PORTS = [32768, 60999];
+
+function portText(range) { return range[0] === range[1] ? String(range[0]) : range[0] + '-' + range[1]; }
+
+/* The first part of ranges inside window; single ports skipped when rangesOnly. */
+function overlapWith(ranges, window, rangesOnly) {
+  for (var i = 0; i < ranges.length; i++) {
+    if (rangesOnly && ranges[i][0] === ranges[i][1]) continue;
+    var lo = Math.max(ranges[i][0], window[0]);
+    var hi = Math.min(ranges[i][1], window[1]);
+    if (lo <= hi) return [lo, hi];
+  }
+  return null;
+}
+
+/*
+ * Rule sets that are valid but likely to cut off more than intended. Only
+ * policies that drop unlisted sources can: one covering a management port
+ * with no trusted source, or one covering ports that replies to outbound
+ * connections use (the filter keeps no connection state, so a reply is just
+ * another packet from an unlisted source). A single port in the ephemeral
+ * range is left alone: a local listener keeps the kernel from picking it.
+ * Returns [{id, policy, message}].
+ */
+function findWarnings(policies, trusted) {
+  var warnings = [];
+  policies.forEach(function (p) {
+    if (p.defaultAction !== ACTION_DROP) return;
+    var label = '策略 ' + p.name;
+    if (!trusted.length && p.protocols.indexOf(PROTO_TCP) >= 0) {
+      var hit = MANAGEMENT_PORTS.filter(function (m) {
+        return p.ranges.some(function (r) { return r[0] <= m.port && m.port <= r[1]; });
+      });
+      if (hit.length) {
+        warnings.push({
+          id: 'lockout:' + p.key,
+          policy: p.key,
+          message: label + ' 默认丢弃 tcp ' + hit.map(function (m) { return m.port + '（' + m.name + '）'; }).join('、') +
+            '，且没有信任来源：只有放行的来源还能连上。'
+        });
+      }
+    }
+    var nat = overlapWith(p.ranges, NAT_REPLY_PORTS, false);
+    var ephemeral = overlapWith(p.ranges, EPHEMERAL_REPLY_PORTS, true);
+    if (nat || ephemeral) {
+      var parts = [];
+      if (nat) parts.push(portText(nat) + ' 在 Veer 出向 NAT 的端口池（默认 20000-32767）内');
+      if (ephemeral) parts.push(portText(ephemeral) + ' 在宿主出站连接的临时端口（默认 32768-60999）内');
+      warnings.push({
+        id: 'reply_ports:' + p.key,
+        policy: p.key,
+        message: label + ' 的端口 ' + parts.join('，') +
+          '：过滤不跟踪连接，出站连接的回包也会按来源判断，对端不在放行列表里时回包被丢弃，连接失败。'
+      });
+    }
+  });
+  return warnings;
+}
+
+/* Fingerprint of a warning list (FNV-1a); '' when there is none. */
+function warningsToken(warnings) {
+  if (!warnings.length) return '';
+  var text = warnings.map(function (w) { return w.id + '\n' + w.message; }).sort().join('\n\n');
+  var h = 0x811c9dc5;
+  for (var i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = (h + (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24)) >>> 0;
+  }
+  return ('0000000' + h.toString(16)).slice(-8);
 }
 
 /*
@@ -389,7 +527,7 @@ function compileGeneration(policies, trusted, generation) {
   });
   if (lpm.fw_ports.length > PORT_PREFIX_CAPACITY) fail('端口前缀超过容量 ' + PORT_PREFIX_CAPACITY);
 
-  var arrays = {fw_port_bits: {}, fw_class: {}, fw_policy: {}};
+  var arrays = {fw_port_bits: {}, fw_class: {}, fw_policy: {}, fw_limit: {}};
   for (var proto = 0; proto < 2; proto++) {
     for (var wi = 0; wi < PORT_WORDS; wi++) {
       var pair = words[proto][wi];
@@ -406,7 +544,13 @@ function compileGeneration(policies, trusted, generation) {
     });
   });
   policies.forEach(function (pol) {
-    arrays.fw_policy[generation * POLICIES_PER_GEN + pol.slot] = u8(1) + u8(pol.defaultAction) + '0000';
+    var index = generation * POLICIES_PER_GEN + pol.slot;
+    var limit = pol.synLimit;
+    arrays.fw_policy[index] = u8(POLICY_VALID | (limit ? POLICY_LIMIT : 0)) + u8(pol.defaultAction) + '0000';
+    if (limit) {
+      arrays.fw_limit[index] = u32le(limit.maxNew) + u32le(limit.windowSeconds) + u32le(limit.banSeconds) +
+        u8(limit.ipv6Prefix) + '000000' + prefixMaskHex(limit.ipv6Prefix);
+    }
     pol.sources.forEach(function (src) {
       lpm[src.cidr.family === 4 ? 'fw_src4' : 'fw_src6'].push({key: addrKey(generation, pol.slot, src.cidr), value: u8(src.action) + '000000'});
     });
@@ -429,10 +573,61 @@ function compileGeneration(policies, trusted, generation) {
       classes: classList.length,
       port_prefixes: lpm.fw_ports.length,
       destinations: lpm.fw_dst4.length + lpm.fw_dst6.length,
-      sources: lpm.fw_src4.length + lpm.fw_src6.length
+      sources: lpm.fw_src4.length + lpm.fw_src6.length,
+      syn_limited: policies.filter(function (pol) { return pol.synLimit; }).length
     }
   };
 }
+
+// ------------------------------------------------------------ bans and log
+
+function hexU16le(hex, offset) { return parseInt(hex.substr(offset + 2, 2) + hex.substr(offset, 2), 16); }
+function hexU16be(hex, offset) { return parseInt(hex.substr(offset, 4), 16); }
+function hexU32le(hex, offset) { return hexU16le(hex, offset) + hexU16le(hex, offset + 4) * 65536; }
+/* A little-endian u64 of nanoseconds, as milliseconds (exact enough). */
+function hexU64leMs(hex, offset) { return (hexU32le(hex, offset) + hexU32le(hex, offset + 8) * 4294967296) / 1e6; }
+
+function addressFromHex(family, hex) {
+  var bytes = [];
+  for (var i = 0; i < (family === 4 ? 4 : 16); i++) bytes.push(parseInt(hex.substr(i * 2, 2), 16));
+  return formatAddress(family, bytes);
+}
+
+/* fw_ban / fw_rate key: {family u8, prefix u8, slot u16le, addr[16]}. */
+function decodeLimitKey(keyHex) {
+  var family = parseInt(keyHex.substr(0, 2), 16);
+  var prefix = parseInt(keyHex.substr(2, 2), 16);
+  if ((family !== 4 && family !== 6) || keyHex.length < 40) return null;
+  return {family: family, prefix: prefix, slot: hexU16le(keyHex, 4), source: addressFromHex(family, keyHex.substr(8)) + '/' + prefix};
+}
+
+/* fw_ban value: the ban's end, ktime ns as milliseconds. */
+function decodeBanUntilMs(valueHex) { return hexU64leMs(valueHex, 0); }
+
+/* struct fw_event in firewall.bpf.c (56 bytes). */
+function decodeEvent(hex) {
+  if (!hex || hex.length < EVENT_BYTES * 2) return null;
+  var family = parseInt(hex.substr(30, 2), 16);
+  var proto = parseInt(hex.substr(32, 2), 16);
+  var event = {
+    time_ms: hexU64leMs(hex, 0),
+    ifindex: hexU32le(hex, 16),
+    slot: hexU16le(hex, 24),
+    reason: REASONS[parseInt(hex.substr(28, 2), 16)] || 'unknown',
+    protocol: proto === PROTO_TCP ? 'tcp' : proto === PROTO_UDP ? 'udp' : '',
+    source_port: hexU16be(hex, 36),
+    port: hexU16be(hex, 40),
+    source: '',
+    destination: ''
+  };
+  if (family === 4 || family === 6) {
+    event.source = addressFromHex(family, hex.substr(48, 32));
+    event.destination = addressFromHex(family, hex.substr(80, 32));
+  }
+  return event;
+}
+
+function lstatsKey(slot, counter) { return u32le(slot * LCOUNTERS + counter); }
 
 // The generation byte of any key the LPM maps hold: right after prefixlen.
 function keyGeneration(keyHex) {
@@ -474,6 +669,19 @@ module.exports = {
   parsePortRanges: parsePortRanges,
   normalizePolicy: normalizePolicy,
   findConflicts: findConflicts,
+  findWarnings: findWarnings,
+  warningsToken: warningsToken,
+  prefixMaskHex: prefixMaskHex,
+  decodeLimitKey: decodeLimitKey,
+  decodeBanUntilMs: decodeBanUntilMs,
+  decodeEvent: decodeEvent,
+  lstatsKey: lstatsKey,
+  LCNT_BAN: LCNT_BAN,
+  LCNT_RATE: LCNT_RATE,
+  LCNT_LOGGED: LCNT_LOGGED,
+  LCNT_LOST: LCNT_LOST,
+  LIMIT_VALUE_ZERO: LIMIT_VALUE_ZERO,
+  EVENT_BYTES: EVENT_BYTES,
   assignSlots: assignSlots,
   portPrefixes: portPrefixes,
   compileGeneration: compileGeneration,

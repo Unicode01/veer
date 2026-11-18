@@ -19,12 +19,15 @@ const (
 	experimentalFeatureKernelTCPreparedL2        = "kernel_tc_prepared_l2"
 	experimentalFeatureKernelTCReplyL2Cache      = "kernel_tc_reply_l2_cache"
 	experimentalFeatureKernelTCLegacyAttach      = "kernel_tc_legacy_attach"
-	insecureDefaultWebToken                      = "change-me-to-a-secure-token"
-	insecureDefaultPluginAdminToken              = "change-me-to-a-separate-plugin-admin-token"
-	remoteManagementMinimumTokenCharacters       = 24
-	kernelTCPEstablishedIdleTimeoutModeAuto      = "auto"
-	kernelTCPEstablishedIdleTimeoutModeFixed     = "fixed"
-	kernelTCPEstablishedIdleTimeoutMaxSeconds    = int64(9_223_372_036)
+	// experimentalFeatureXDPPluginNoTCFallback runs XDP plugin hooks in generic
+	// mode where native XDP is missing, ignoring their tc_fallback programs.
+	experimentalFeatureXDPPluginNoTCFallback  = "xdp_plugin_no_tc_fallback"
+	insecureDefaultWebToken                   = "change-me-to-a-secure-token"
+	insecureDefaultPluginAdminToken           = "change-me-to-a-separate-plugin-admin-token"
+	remoteManagementMinimumTokenCharacters    = 24
+	kernelTCPEstablishedIdleTimeoutModeAuto   = "auto"
+	kernelTCPEstablishedIdleTimeoutModeFixed  = "fixed"
+	kernelTCPEstablishedIdleTimeoutMaxSeconds = int64(9_223_372_036)
 )
 
 // The flow cache was an experimental feature before kernel_tc_flow_cache

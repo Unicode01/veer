@@ -173,6 +173,48 @@ function normalizeTokenList(values, label, limit = 64) {
   return [...new Set(values.map((value) => token(value, label)).filter(Boolean))].sort();
 }
 
+// Mirrors the runtime: unknown engines are dropped and an empty order falls
+// back to the default TC-only order.
+function normalizeKernelEngineOrder(values) {
+  const out = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const name = String(value).trim().toLowerCase();
+    if ((name === 'xdp' || name === 'tc') && !out.includes(name)) out.push(name);
+  }
+  return out.length ? out : ['tc'];
+}
+
+// Fills an adapter's plugin.attachments() result into the runtime's shape, so
+// tests only spell out the fields they care about.
+function normalizeAttachmentStatus(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('plugin.attachments adapter must return an object');
+  }
+  if (value.attachments != null && !Array.isArray(value.attachments)) {
+    throw new Error('plugin.attachments adapter attachments must be an array');
+  }
+  const text = (field) => (field == null ? '' : String(field));
+  const attachments = (value.attachments || []).map((raw, index) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`plugin.attachments adapter attachments[${index}] must be an object`);
+    const item = {
+      hook_id: text(raw.hook_id), engine: text(raw.engine), attach: text(raw.attach), stage: text(raw.stage),
+      interface: text(raw.interface), program: text(raw.program), status: text(raw.status),
+      error: text(raw.error), xdp_mode: text(raw.xdp_mode),
+    };
+    if (item.engine === 'netfilter') {
+      for (const field of ['namespace', 'family', 'netfilter_hook', 'phase']) item[field] = text(raw[field]);
+    }
+    return item;
+  });
+  return {
+    mode: text(value.mode) || (attachments.length ? 'dataplane' : 'registered'),
+    attached: value.attached === true || attachments.length > 0,
+    reason: text(value.reason),
+    error: text(value.error),
+    attachments,
+  };
+}
+
 function normalizeUIResourceAccess(values, crossPlugin = false) {
   const field = crossPlugin ? 'resource_access' : 'resources';
   if (values == null) return [];
@@ -246,6 +288,21 @@ function normalizeHookBinding(item, api) {
   if (item.binding_required && !['tc', 'xdp'].includes(item.engine)) {
     throw new Error(`${api}.binding_required is only available to tc/xdp hooks`);
   }
+}
+
+function normalizeHookTCFallback(item, api) {
+  if (item.tc_fallback == null || item.tc_fallback === '') {
+    delete item.tc_fallback;
+    return;
+  }
+  if (typeof item.tc_fallback !== 'string') throw new Error(`${api}.tc_fallback must be a string`);
+  if (item.engine !== 'xdp') throw new Error(`${api}.tc_fallback is only available to xdp hooks`);
+  const value = item.tc_fallback.trim();
+  const index = value.lastIndexOf(':');
+  if (value.length > 160 || value.includes('\0') || index <= 0 || index >= value.length - 1) {
+    throw new Error(`${api}.tc_fallback must use object:program`);
+  }
+  item.tc_fallback = value;
 }
 
 function normalizeHookOrder(item, api) {
@@ -432,6 +489,8 @@ class VeerPluginTestHost {
     this.remoteInstallEnabled = options.remoteInstallEnabled === true;
     this.hostInfo = Object.assign({os:process.platform === 'win32' ? 'windows' : process.platform,
       arch:({x64:'amd64', ia32:'386'})[process.arch] || process.arch}, options.hostInfo || {});
+    this.hostInfo.kernel_engine_order = normalizeKernelEngineOrder(this.hostInfo.kernel_engine_order);
+    this.hostInfo.core_engine_pinned_to_tc = this.hostInfo.core_engine_pinned_to_tc === true;
     this.availableFeatures = Array.isArray(options.availableFeatures) ? options.availableFeatures.slice()
       : API_CONTRACT.runtime.features.filter(feature => feature !== 'dataplane.kfuncs.handoff.v1');
     this.state = sharedState || createSharedState(options.fixtures || {});
@@ -819,7 +878,10 @@ class VeerPluginTestHost {
           available_features: this.availableFeatures.slice(),
           feature_status: Object.fromEntries(API_CONTRACT.runtime.features.map((feature) => [feature, {available: this.availableFeatures.includes(feature)}])),
           resource_limits: cloneJSON(API_CONTRACT.runtime.resource_limits),
+          kernel_engine_order: this.hostInfo.kernel_engine_order.slice(),
+          core_engine_pinned_to_tc: this.hostInfo.core_engine_pinned_to_tc,
         }),
+        attachments: () => this.#attachments(),
         capabilities: (...values) => {
           this.#requirePermission('plugin.register', 'plugin.capabilities', true);
           const input = values.length === 1 && Array.isArray(values[0]) ? values[0] : values;
@@ -853,6 +915,7 @@ class VeerPluginTestHost {
           this.#requirePermission('hook.attach', 'hooks.attach', true);
           const hook = this.#registerUnique(this.surface.hooks, spec, 'hooks.attach');
           normalizeHookBinding(hook, 'hooks.attach');
+          normalizeHookTCFallback(hook, 'hooks.attach');
           normalizeHookOrder(hook, 'hooks.attach');
           normalizeHookPacketMetadata(hook, 'hooks.attach');
         },
@@ -873,6 +936,7 @@ class VeerPluginTestHost {
         ringRead: privileged('ebpf.map_read', 'ebpf.ringRead'),
         ringSubscribe: (spec) => this.#ringSubscribe(spec),
         ringStats: () => this.#ringStats(),
+        monotonicMs: () => this.#monotonicMs(),
       }),
       ui: Object.freeze({
         register: (spec) => {
@@ -1870,7 +1934,7 @@ class VeerPluginTestHost {
   #worker(name) {
     const id = token(name, 'worker');
     if (!this.state.workers.has(id)) {
-      const worker = new VeerPluginTestHost({ pluginDir: this.pluginDir, timeoutMs: this.timeoutMs, adapters: this.adapters, remoteInstallEnabled: this.remoteInstallEnabled, availableFeatures: this.availableFeatures }, this.state, id).load();
+      const worker = new VeerPluginTestHost({ pluginDir: this.pluginDir, timeoutMs: this.timeoutMs, adapters: this.adapters, remoteInstallEnabled: this.remoteInstallEnabled, availableFeatures: this.availableFeatures, hostInfo: this.hostInfo }, this.state, id).load();
       this.state.workers.set(id, worker);
     }
     return this.state.workers.get(id);
@@ -1918,6 +1982,26 @@ class VeerPluginTestHost {
     if (this.surface.ring_subscriptions.some((other) => other !== item && other.object === item.object && other.map === item.map)) {
       throw new Error(`ring map ${item.object}:${item.map} already has a consumer`);
     }
+  }
+
+  // The test host loads no dataplane, so without an adapter the plugin has
+  // nothing attached.
+  #attachments() {
+    if (this.registrationPhase) throw new Error('plugin.attachments is unavailable during plugin registration');
+    if (typeof this.adapters['plugin.attachments'] !== 'function') return normalizeAttachmentStatus({});
+    return normalizeAttachmentStatus(this.#adapter('plugin.attachments', []));
+  }
+
+  // Without an adapter this reads Node's monotonic clock, which is
+  // CLOCK_MONOTONIC on Linux like bpf_ktime_get_ns().
+  #monotonicMs() {
+    if (this.registrationPhase) throw new Error('ebpf.monotonicMs is unavailable during plugin registration');
+    if (typeof this.adapters['ebpf.monotonicMs'] !== 'function') return Number(process.hrtime.bigint()) / 1e6;
+    const value = this.#adapter('ebpf.monotonicMs', []);
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+      throw new Error('ebpf.monotonicMs adapter must return a finite non-negative number');
+    }
+    return value;
   }
 
   #ringStats() {

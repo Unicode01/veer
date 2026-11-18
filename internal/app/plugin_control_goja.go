@@ -145,6 +145,12 @@ type pluginControlPostDataplaneReconciler interface {
 	ReapplyPluginRuntimeResourcesAfterDataplane(catalog PluginCatalog, snapshot pluginRuntimeSnapshot) map[string]error
 }
 
+// pluginControlRingReconciler restarts ring buffer readers after a dataplane
+// reconcile that does not run the full post-dataplane replay.
+type pluginControlRingReconciler interface {
+	ReconcilePluginRingSubscriptionsAfterDataplane(snapshot pluginRuntimeSnapshot)
+}
+
 type gojaPluginControlRuntime struct {
 	mu                   sync.Mutex
 	reconcileMu          sync.Mutex
@@ -2306,6 +2312,9 @@ func (h *pluginControlHost) install() error {
 	if err := pluginAPI.Set("host", h.pluginHostInfo); err != nil {
 		return err
 	}
+	if err := pluginAPI.Set("attachments", h.pluginAttachments); err != nil {
+		return err
+	}
 	if err := pluginAPI.Set("capabilities", h.pluginRegisterCapabilities); err != nil {
 		return err
 	}
@@ -2458,6 +2467,9 @@ func (h *pluginControlHost) install() error {
 		return err
 	}
 	if err := ebpfAPI.Set("ringStats", h.ebpfRingStats); err != nil {
+		return err
+	}
+	if err := ebpfAPI.Set("monotonicMs", h.ebpfMonotonicMs); err != nil {
 		return err
 	}
 	if err := h.vm.Set("ebpf", ebpfAPI); err != nil {
@@ -2974,6 +2986,10 @@ func (h *pluginControlHost) pluginHostInfo(goja.FunctionCall) goja.Value {
 		"available_features": availability.Available,
 		"feature_status":     availability.Status,
 		"resource_limits":    pluginResourceLimitsFromConfig(h.cfg),
+		// Additive in control.attachment_status.v1: the configured core engine
+		// order, and whether active plugin hooks currently pin the core to TC.
+		"kernel_engine_order":      h.kernelEngineOrder(),
+		"core_engine_pinned_to_tc": h.coreEnginePinnedToTC(),
 	})
 }
 

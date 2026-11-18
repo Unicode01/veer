@@ -18,6 +18,10 @@ declare global {
     available_features: string[];
     feature_status: Record<string, { available: boolean; reason?: string }>;
     resource_limits: VeerPluginResourceLimits;
+    /** Configured core engine order, e.g. ['xdp', 'tc']. Feature: control.attachment_status.v1. */
+    kernel_engine_order?: Array<'xdp' | 'tc'>;
+    /** True while active TC or XDP plugin hooks restrict the core forwarding rules to the TC engine. Feature: control.attachment_status.v1. */
+    core_engine_pinned_to_tc?: boolean;
   }
 
   interface VeerPluginResourceLimits {
@@ -121,6 +125,12 @@ declare global {
     interfaces?: string[];
     /** Require a valid enabled hook_bindings record; otherwise this hook is inactive. TC/XDP only. */
     binding_required?: boolean;
+    /**
+     * XDP only: object:program of a tc program in the same object. On interfaces without native XDP
+     * the host attaches it at TC ingress ahead of the Veer core instead of using generic XDP.
+     * Pass returns TC_ACT_UNSPEC (-1), drop TC_ACT_SHOT (2). Requires dataplane.xdp_tc_fallback.v1.
+     */
+    tc_fallback?: string;
     packet_metadata?: VeerPacketMetadataBinding[];
   }
 
@@ -173,6 +183,8 @@ declare global {
 
   interface VeerPluginAPI {
     host(): VeerPluginHostInfo;
+    /** This plugin's own dataplane attachment state (runtime handlers only). Feature: control.attachment_status.v1. */
+    attachments(): VeerPluginAttachmentStatus;
     capabilities(values: string[] | string, ...rest: string[]): void;
     resource(spec: VeerResourceSpec): void;
     action(spec: VeerActionSpec): void;
@@ -180,6 +192,36 @@ declare global {
     virtualInterface(spec: VeerVirtualInterfaceSpec): void;
     pipelineNode(spec: VeerVirtualInterfaceSpec): void;
     handoff(spec: VeerVirtualInterfaceSpec): void;
+  }
+
+  interface VeerPluginHookAttachment {
+    hook_id: string;
+    engine: 'tc' | 'xdp' | 'netfilter' | string;
+    attach: string;
+    stage: string;
+    /** Interface the hook runs on; the TC pipeline reports its shared chain, Netfilter the namespace. */
+    interface: string;
+    program: string;
+    /** 'attached' (XDP, Netfilter), 'chained' (TC pipeline) or 'staging' (Netfilter code update). */
+    status: string;
+    error: string;
+    /** XDP hooks: the mode the dispatcher attached in on this interface ('driver' or 'generic'); '' for other engines. */
+    xdp_mode: '' | 'driver' | 'generic' | string;
+    namespace?: string;
+    family?: string;
+    netfilter_hook?: string;
+    phase?: string;
+  }
+
+  interface VeerPluginAttachmentStatus {
+    /** Dataplane runtime mode of this plugin: 'dataplane', 'error', 'registered', 'disabled', ... */
+    mode: string;
+    attached: boolean;
+    /** Warnings such as skipped missing interfaces. */
+    reason: string;
+    /** Why the dataplane failed to load or attach, e.g. an interface that already runs another XDP program. */
+    error: string;
+    attachments: VeerPluginHookAttachment[];
   }
 
   interface VeerServiceSpec {
@@ -1039,6 +1081,8 @@ declare global {
     ringRead(objectID: string, mapName: string, options: VeerEBPFRingReadOptions): VeerEBPFRingReadResult;
     ringSubscribe(spec: VeerEBPFRingSubscription): void;
     ringStats(): VeerEBPFRingBusState;
+    /** CLOCK_MONOTONIC in milliseconds (may be fractional): the clock bpf_ktime_get_ns() reads, divided by 1e6. Feature: ebpf.monotonic_clock.v1. */
+    monotonicMs(): number;
   }
 
   interface VeerEBPFMapMutation {

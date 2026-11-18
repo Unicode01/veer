@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -99,6 +100,10 @@ func TestBundledStablePluginCatalogIsValid(t *testing.T) {
 			t.Fatalf("parse %s: %v", manifestPath, err)
 		}
 		if strings.ToLower(strings.TrimSpace(manifest.Stability)) != pluginStabilityStable {
+			continue
+		}
+		// A plugin limited to other operating systems is rightly unloadable here.
+		if manifest.Compatibility != nil && len(manifest.Compatibility.OS) > 0 && !slices.Contains(manifest.Compatibility.OS, runtime.GOOS) {
 			continue
 		}
 		plugin, ok := loaded[manifest.ID]

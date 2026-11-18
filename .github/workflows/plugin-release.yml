@@ -83,7 +83,7 @@ jobs:
       - name: Install privileged plugin and PPPoE dependencies
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y clang llvm linux-libc-dev iproute2 util-linux iputils-ping ethtool nftables tcpdump ppp pppoe iperf3 curl procps
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y clang llvm linux-libc-dev iproute2 util-linux iputils-ping ethtool nftables tcpdump ppp pppoe iperf3 curl procps wireguard-tools
       - name: Load PPP kernel modules
         run: |
           # Cloud runner kernels may ship the PPP drivers only in the extra modules package.
@@ -233,14 +233,15 @@ jobs:
           cache: true
       - name: Install VM and eBPF build dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-x86 busybox-static clang llvm linux-libc-dev
-      - name: Build eBPF objects and the test binary
+      - name: Build eBPF objects, plugin objects and the test binary
         run: |
-          sh scripts/build-ebpf.sh
+          sh scripts/build-all-ebpf.sh
           CGO_ENABLED=0 go test -c -o /tmp/veer-kernel-load.test ./internal/app
-      - name: Load the embedded eBPF collections on distribution kernels
+      - name: Load the embedded eBPF collections and plugin objects on distribution kernels and the runner's
         run: |
           # The runner user cannot normally open /dev/kvm; use the available KVM device.
-          sudo python3 scripts/verify-kernel-load-matrix.py --test-binary /tmp/veer-kernel-load.test \
+          # --host also loads them on the runner's own (azure) kernel.
+          sudo python3 scripts/verify-kernel-load-matrix.py --test-binary /tmp/veer-kernel-load.test --host \
             --output "${RUNNER_TEMP}/kernel-load-logs"
       - name: Preserve kernel load logs
         if: always()

@@ -25,6 +25,7 @@ declare global {
     "ebpf.mapPut": typeof ebpf.mapPut;
     "ebpf.mapScan": typeof ebpf.mapScan;
     "ebpf.mapTransaction": typeof ebpf.mapTransaction;
+    "ebpf.monotonicMs": typeof ebpf.monotonicMs;
     "ebpf.ringRead": typeof ebpf.ringRead;
     "ebpf.ringStats": typeof ebpf.ringStats;
     "ebpf.ringSubscribe": typeof ebpf.ringSubscribe;
@@ -134,6 +135,7 @@ declare global {
     "pipeline.handoff": typeof pipeline.handoff;
     "pipeline.node": typeof pipeline.node;
     "plugin.action": typeof plugin.action;
+    "plugin.attachments": typeof plugin.attachments;
     "plugin.capabilities": typeof plugin.capabilities;
     "plugin.handoff": typeof plugin.handoff;
     "plugin.host": typeof plugin.host;

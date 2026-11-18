@@ -938,6 +938,11 @@ func normalizePluginObject(object *PluginObject) error {
 			continue
 		}
 		if programEngine != dataplaneEngine {
+			// An xdp hook's tc_fallback lives in the object of its xdp program,
+			// so the two share every map.
+			if (dataplaneEngine == kernelEngineXDP && programEngine == kernelEngineTC) || (dataplaneEngine == kernelEngineTC && programEngine == kernelEngineXDP) {
+				continue
+			}
 			return fmt.Errorf("programs[%d]: one object cannot mix %s and %s dataplane programs; split them into separate objects", i, dataplaneEngine, programEngine)
 		}
 	}
@@ -1137,6 +1142,18 @@ func normalizePluginHook(hook *PluginHook) error {
 	}
 	if strings.Contains(hook.Program, "\x00") || len(hook.Program) > 160 {
 		return fmt.Errorf("program contains invalid characters")
+	}
+	hook.TCFallback = strings.TrimSpace(hook.TCFallback)
+	if hook.TCFallback != "" {
+		if hook.Engine != kernelEngineXDP {
+			return fmt.Errorf("tc_fallback is only available to xdp hooks")
+		}
+		if strings.Contains(hook.TCFallback, "\x00") || len(hook.TCFallback) > 160 {
+			return fmt.Errorf("tc_fallback contains invalid characters")
+		}
+		if _, _, ok := parsePluginProgramRef(hook.TCFallback); !ok {
+			return fmt.Errorf("tc_fallback must use object:program")
+		}
 	}
 	hook.Mode = strings.TrimSpace(strings.ToLower(hook.Mode))
 	if hook.Mode == "" {

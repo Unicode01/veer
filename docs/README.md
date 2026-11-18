@@ -294,7 +294,7 @@ Egress NAT 的 `protocol` 含 `icmp` 时，ICMP 回显请求和应答以标识�
 
 在 Linux 5.11 及以上内核中，TC 程序用粗粒度单调时钟记录连接时间，精度为一个时钟节拍（通常 1–10 毫秒），省去了虚拟机中每包读取时钟源的开销；更老的内核仍使用精确时钟。
 
-在 Linux 6.6 及以上内核中，TC 核心程序（包括插件 pipeline）通过 tcx 挂载，不再经过 clsact 下的 cls_bpf 过滤器链，每个包少一次分类器遍历。tcx 程序先于网卡上所有 cls_bpf 过滤器执行；插件直接挂载的 TC 过滤器仍是 cls_bpf，执行顺序和以前一样排在核心程序之后。tcx 不支持 `TC_ACT_STOLEN`，插件接管数据包后应返回 `veer_tc_consumed()`，见 [PLUGIN.md](PLUGIN.md)。`experimental_features` 中的 `kernel_tc_legacy_attach` 可强制使用 cls_bpf。运行时视图中 TC 引擎的 `attachment_api` 字段显示当前挂载方式（`tcx` 或 `cls_bpf`）。热重启时新进程接管已挂载的 tcx 程序并原子替换；在两种挂载方式之间切换时，先挂上新程序，再移除旧的挂载。
+在 Linux 6.6 及以上内核中，TC 核心程序（包括插件 pipeline）通过 tcx 挂载，不再经过 clsact 下的 cls_bpf 过滤器链，每个包少一次分类器遍历。tcx 程序先于网卡上所有 cls_bpf 过滤器执行；插件直接挂载的 TC 过滤器仍是 cls_bpf，执行顺序和以前一样排在核心程序之后；XDP 插件 Hook 在没有原生 XDP 的接口上运行的 `tc_fallback` 程序例外，它跟随核心的挂载方式排在核心之前（见 [PLUGIN.md](PLUGIN.md)“TC 兜底”）。tcx 不支持 `TC_ACT_STOLEN`，插件接管数据包后应返回 `veer_tc_consumed()`，见 [PLUGIN.md](PLUGIN.md)。`experimental_features` 中的 `kernel_tc_legacy_attach` 可强制使用 cls_bpf。运行时视图中 TC 引擎的 `attachment_api` 字段显示当前挂载方式（`tcx` 或 `cls_bpf`）。热重启时新进程接管已挂载的 tcx 程序并原子替换；在两种挂载方式之间切换时，先挂上新程序，再移除旧的挂载。
 
 顶层配置 `kernel_tc_flow_cache` 控制 TC 连接缓存，默认开启，设为 `false` 关闭：核心程序把已建立连接的一个方向怎样发出（下一跳的网卡和 MAC、可直接发出的最大长度）记在这个方向的连接表项里；之后这个方向的普通包在 TC 分派程序入口查到连接表项，就直接改写并转发，跳过规则查找、FIB 和其余处理。缓存的连接有三类：Egress NAT（对称和 Full Cone，去程和回程）；Full NAT 端口转发（IPv4 和 IPv6，去程和回程，去程的记录同时记下要转去的后端地址和端口）；透明端口转发的回程。透明转发的一条连接只有一个按回程建的表项，去程包在规则查找之前找不到它，所以去程照常走核心程序。缓存不单独挂程序，也不另建一张表，还没有记录的包只多查一次连接表。核心程序在同一个 1 秒窗口内也复用这条连接完整处理时由 FIB 解析的下一跳，不再逐包查 FIB；关闭缓存时这一点不变。记录和该连接的 1 秒快路径窗口一起过期，所以每条连接每秒仍至少由核心程序完整处理一次，路由、邻居和本机地址变化的生效时间不变。旧配置写在 `experimental_features` 里的同名开关仍然有效（顶层配置优先），`deploy.sh` 升级配置时会把它移到顶层；两处都没有写的配置按默认开启。
 

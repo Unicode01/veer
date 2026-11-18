@@ -112,11 +112,96 @@ test('compileGeneration lays out the maps firewall.bpf.c reads', () => {
 test('an empty rule set is inactive and writes nothing', () => {
   const out = c.compileGeneration([], [], 0);
   assert.equal(out.active, false);
-  assert.deepEqual(out.arrays, {fw_port_bits: {}, fw_class: {}, fw_policy: {}});
+  assert.deepEqual(out.arrays, {fw_port_bits: {}, fw_class: {}, fw_policy: {}, fw_limit: {}});
   for (const map of Object.keys(out.lpm)) assert.equal(out.lpm[map].length, 0);
+});
+
+function dropPolicy(key, data) {
+  return c.normalizePolicy(key, {protocol: 'tcp', default_action: 'drop', ...data});
+}
+
+test('warnings name drop policies that can lock out an administrator or drop replies', () => {
+  const trusted = [c.parseCIDR('192.0.2.10')];
+  const ids = (policies, t) => c.findWarnings(policies, t).map((w) => w.id);
+  // Management ports, unless a trusted source still gets through.
+  assert.deepEqual(ids([dropPolicy('ssh', {ports: ['22']})], []), ['lockout:ssh']);
+  assert.deepEqual(ids([dropPolicy('ssh', {ports: ['22']})], trusted), []);
+  assert.deepEqual(ids([dropPolicy('web', {ports: ['8000-8100']})], []), ['lockout:web']);
+  assert.match(c.findWarnings([dropPolicy('web', {ports: ['8000-8100']})], [])[0].message, /8006.*8080/);
+  assert.deepEqual(ids([dropPolicy('dns', {protocol: 'udp', ports: ['22']})], []), []);
+  assert.deepEqual(ids([dropPolicy('open', {ports: ['22'], default_action: 'allow'})], []), []);
+  // Reply ports: any port in the NAT pool, ranges in the ephemeral ports.
+  assert.deepEqual(ids([dropPolicy('game', {ports: ['25565']})], trusted), ['reply_ports:game']);
+  assert.deepEqual(ids([dropPolicy('wg', {protocol: 'udp', ports: ['51820']})], []), []);
+  assert.deepEqual(ids([dropPolicy('high', {protocol: 'udp', ports: ['40000-40010']})], []), ['reply_ports:high']);
+  assert.deepEqual(ids([dropPolicy('low', {ports: ['1000-19999']})], trusted), []);
+  const all = c.findWarnings([dropPolicy('all', {ports: ['1-65535']})], []);
+  assert.deepEqual(all.map((w) => w.id), ['lockout:all', 'reply_ports:all']);
+  assert.match(all[1].message, /20000-32767 在 Veer 出向 NAT.*32768-60999 在宿主/);
+});
+
+test('the warnings token follows the warnings, not their order', () => {
+  const one = c.findWarnings([dropPolicy('ssh', {ports: ['22']})], []);
+  const two = c.findWarnings([dropPolicy('ssh', {ports: ['22']}), dropPolicy('game', {ports: ['25565']})], []);
+  assert.equal(c.warningsToken([]), '');
+  assert.match(c.warningsToken(one), /^[0-9a-f]{8}$/);
+  assert.notEqual(c.warningsToken(one), c.warningsToken(two));
+  assert.equal(c.warningsToken(two), c.warningsToken(two.slice().reverse()));
 });
 
 test('sumPerCPU adds little-endian u64 counters', () => {
   assert.equal(c.sumPerCPU(['0100000000000000', 'ff00000000000000', '0001000000000000']), 512);
   assert.equal(c.sumPerCPU(null), 0);
+});
+
+test('syn_limit is validated, defaulted and only allowed with tcp', () => {
+  const pol = (limit, protocol = 'tcp') => c.normalizePolicy('p', {protocol, ports: ['22'], default_action: 'allow', syn_limit: limit});
+  assert.deepEqual(pol({max_new: 20, window_seconds: 10}).synLimit, {maxNew: 20, windowSeconds: 10, banSeconds: 0, ipv6Prefix: 64});
+  assert.deepEqual(pol({max_new: 5, window_seconds: 1, ban_seconds: 600, ipv6_prefix: 56}, 'tcp+udp').synLimit,
+    {maxNew: 5, windowSeconds: 1, banSeconds: 600, ipv6Prefix: 56});
+  assert.equal(pol(undefined).synLimit, null);
+  assert.throws(() => pol({max_new: 5, window_seconds: 1}, 'udp'), /只限制 TCP/);
+  assert.throws(() => pol({max_new: 0, window_seconds: 1}), /max_new/);
+  assert.throws(() => pol({max_new: 5}), /window_seconds/);
+  assert.throws(() => pol({max_new: 5, window_seconds: 1, ipv6_prefix: 16}), /ipv6_prefix/);
+  assert.throws(() => pol({max_new: 1.5, window_seconds: 1}), /max_new/);
+});
+
+test('prefix masks cover whole and partial bytes', () => {
+  assert.equal(c.prefixMaskHex(64), 'ff'.repeat(8) + '00'.repeat(8));
+  assert.equal(c.prefixMaskHex(60), 'ff'.repeat(7) + 'f0' + '00'.repeat(8));
+  assert.equal(c.prefixMaskHex(128), 'ff'.repeat(16));
+  assert.equal(c.prefixMaskHex(32), 'ff'.repeat(4) + '00'.repeat(12));
+});
+
+test('a limited policy sets its flag and writes fw_limit', () => {
+  const ssh = c.normalizePolicy('ssh', {protocol: 'tcp', ports: ['22'], default_action: 'allow', syn_limit: {max_new: 20, window_seconds: 10, ban_seconds: 300, ipv6_prefix: 60}});
+  const web = c.normalizePolicy('web', {protocol: 'tcp', ports: ['443'], default_action: 'allow'});
+  ssh.slot = 3;
+  web.slot = 4;
+  const out = c.compileGeneration([ssh, web], [], 1);
+  assert.equal(out.arrays.fw_policy[256 + 3], '03000000');
+  assert.equal(out.arrays.fw_policy[256 + 4], '01000000');
+  assert.equal(out.arrays.fw_limit[256 + 3], c.u32le(20) + c.u32le(10) + c.u32le(300) + '3c000000' + c.prefixMaskHex(60));
+  assert.equal(out.arrays.fw_limit[256 + 3].length, c.LIMIT_VALUE_ZERO.length);
+  assert.equal(out.arrays.fw_limit[256 + 4], undefined);
+  assert.equal(out.summary.syn_limited, 1);
+});
+
+function limitKeyHex(family, prefix, slot, addrHex) {
+  return c.u8(family) + c.u8(prefix) + c.u16le(slot) + (addrHex + '0'.repeat(32)).slice(0, 32);
+}
+
+test('ban keys, ban ends and drop events decode', () => {
+  assert.deepEqual(c.decodeLimitKey(limitKeyHex(4, 32, 3, 'cb007105')), {family: 4, prefix: 32, slot: 3, source: '203.0.113.5/32'});
+  assert.deepEqual(c.decodeLimitKey(limitKeyHex(6, 64, 1, '20010db8000000010000000000000000')), {family: 6, prefix: 64, slot: 1, source: '2001:db8:0:1::/64'});
+  assert.equal(c.decodeLimitKey('00'.repeat(20)), null);
+  assert.equal(c.decodeBanUntilMs('00f2052a01000000'), 5000);
+
+  const ev = c.u32le(2000000) + c.u32le(0) + c.u32le(7) + c.u16le(3) + c.u8(3) + c.u8(4) + c.u8(0) + '00' +
+    '9c40' + '0016' + '0000' + ('cb007105' + '0'.repeat(32)).slice(0, 32) + ('0a000001' + '0'.repeat(32)).slice(0, 32);
+  assert.equal(ev.length, c.EVENT_BYTES * 2);
+  assert.deepEqual(c.decodeEvent(ev), {time_ms: 2, ifindex: 7, slot: 3, reason: 'rate', protocol: 'tcp', source_port: 40000, port: 22,
+    source: '203.0.113.5', destination: '10.0.0.1'});
+  assert.equal(c.decodeEvent('00'), null);
 });
