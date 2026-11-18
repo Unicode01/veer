@@ -515,13 +515,3 @@ func detachKernelXDPPluginTCFallbackMetadata(items []kernelHotRestartTCAttachmen
 	}
 	return errors.Join(failures...)
 }
-
-func closeKernelXDPPluginTCFallbacks(positions []kernelXDPPluginTCFallback) {
-	for _, position := range positions {
-		if position.slot != nil && position.slot.link != nil {
-			_ = position.slot.link.Close()
-			position.slot.link = nil
-			position.slot.linkID = 0
-		}
-	}
-}
