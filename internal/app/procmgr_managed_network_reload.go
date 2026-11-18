@@ -777,6 +777,12 @@ func (pm *ProcessManager) reloadManagedNetworkRuntimeOnly() error {
 				log.Printf("ipv6 assignment runtime reconcile: %v", err)
 				reloadIssues = appendManagedNetworkRuntimeReloadIssue(reloadIssues, "ipv6 assignment runtime reconcile", err)
 			}
+			if sweeper, ok := pm.ipv6Runtime.(ipv6AssignmentStaleRouteSweeper); ok {
+				if err := sweeper.SweepStaleRoutes(runtimeManagedNetworks, effectiveIPv6Assignments); err != nil {
+					log.Printf("ipv6 assignment runtime: sweep stale routes: %v", err)
+					reloadIssues = appendManagedNetworkRuntimeReloadIssue(reloadIssues, "ipv6 assignment stale route sweep", err)
+				}
+			}
 		}
 		pm.mu.Lock()
 		pm.managedNetworkInterfaces = managedNetworkInterfaces

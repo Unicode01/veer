@@ -1332,9 +1332,11 @@ curl -fsS -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8080/debug/pprof/g
 - `bridge_mode` 允许：`create`、`existing`
 - 省略 `bridge_mode` 时默认 `create`
 - `ipv6_assignment_mode` 允许：`single_128`、`prefix_64`
+- 客户机接口消失（例如虚拟机销毁）后，Veer 删除自己为它加在 bridge 上的 `/128`（`prefix_64` 时为 `/64`）路由；每次 reconcile（包括 `reload-runtime`）还会清理 bridge 上落在 `ipv6_parent_prefix` 内、长度与分配一致、`proto static` 且没有分配在用的路由，例如热重启期间或旧版本遗留的
 - `bridge_mtu` 仅在 `create` 模式生效，范围为 `0-65535`
 - `existing` 模式下 `bridge_mtu` 和 `bridge_vlan_aware` 会被归零
 - `existing` 模式要求目标 bridge 已存在于宿主机
+- 没有端口的 bridge 在第一个端口加入前没有 MAC（全 0），DHCPv4 在这之前无法监听，状态里会提示；第一个客户机接入后自动恢复，也可以给 bridge 固定一个 MAC（例如 `/etc/network/interfaces` 里的 `hwaddress`）
 - `create` 模式要求 bridge 名称不与非 bridge 接口冲突
 - 创建后默认 `enabled = true`
 

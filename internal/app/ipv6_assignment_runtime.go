@@ -47,6 +47,93 @@ type ipv6AssignmentClosePreserver interface {
 	PreserveIPv6AssignmentStateOnClose() bool
 }
 
+// ipv6AssignmentRouteSweepScope is where only Veer puts assignment routes:
+// static routes of one prefix length inside a managed network's IPv6 parent
+// prefix, on that network's bridge.
+type ipv6AssignmentRouteSweepScope struct {
+	Bridge       string
+	ParentPrefix *net.IPNet
+	PrefixLen    int
+}
+
+type ipv6AssignmentRouteSweeper interface {
+	SweepIPv6AssignmentRoutes(scopes []ipv6AssignmentRouteSweepScope, keep map[string]struct{}) error
+}
+
+// ipv6AssignmentStaleRouteSweeper is a runtime that can remove assignment
+// routes nothing uses, including ones it never installed itself.
+type ipv6AssignmentStaleRouteSweeper interface {
+	SweepStaleRoutes(networks []ManagedNetwork, items []IPv6Assignment) error
+}
+
+func ipv6AssignmentRouteKey(prefix *net.IPNet) string {
+	if prefix == nil {
+		return ""
+	}
+	ones, _ := prefix.Mask.Size()
+	return fmt.Sprintf("%s/%d", prefix.IP.Mask(prefix.Mask).String(), ones)
+}
+
+// managedNetworkIPv6RouteSweepScopes lists the bridges of enabled managed
+// networks with IPv6, with the parent prefix and the length of the prefixes
+// they hand out.
+func managedNetworkIPv6RouteSweepScopes(networks []ManagedNetwork) []ipv6AssignmentRouteSweepScope {
+	scopes := make([]ipv6AssignmentRouteSweepScope, 0, len(networks))
+	for _, network := range networks {
+		bridge := strings.TrimSpace(network.Bridge)
+		if !network.Enabled || !network.IPv6Enabled || bridge == "" {
+			continue
+		}
+		_, _, parent, _ := prepareManagedNetworkIPv6Parent(network)
+		if parent == nil {
+			continue
+		}
+		prefixLen := 128
+		if normalizeManagedNetworkIPv6AssignmentMode(network.IPv6AssignmentMode) == managedNetworkIPv6AssignmentModePrefix64 {
+			prefixLen = 64
+		}
+		if ones, _ := parent.Mask.Size(); ones >= prefixLen {
+			continue
+		}
+		scopes = append(scopes, ipv6AssignmentRouteSweepScope{Bridge: bridge, ParentPrefix: cloneIPv6Net(parent), PrefixLen: prefixLen})
+	}
+	return scopes
+}
+
+// ipv6AssignmentRoutePrefixesInUse gives the route key of every enabled
+// assignment, including those that fail to plan right now: a transient
+// resolution error must not cost a guest its route.
+func ipv6AssignmentRoutePrefixesInUse(items []IPv6Assignment) map[string]struct{} {
+	keep := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if !item.Enabled {
+			continue
+		}
+		hydrateIPv6AssignmentCompatibilityFields(&item)
+		if _, prefix, _, err := normalizeIPv6AssignmentRequestedPrefix(item); err == nil && prefix != nil {
+			keep[ipv6AssignmentRouteKey(prefix)] = struct{}{}
+		}
+	}
+	return keep
+}
+
+// SweepStaleRoutes removes routes on managed network bridges that look like
+// assignment routes but belong to no current assignment.
+func (rt *managedIPv6AssignmentRuntime) SweepStaleRoutes(networks []ManagedNetwork, items []IPv6Assignment) error {
+	if rt == nil {
+		return nil
+	}
+	sweeper, ok := rt.ops.(ipv6AssignmentRouteSweeper)
+	if !ok {
+		return nil
+	}
+	scopes := managedNetworkIPv6RouteSweepScopes(networks)
+	if len(scopes) == 0 {
+		return nil
+	}
+	return sweeper.SweepIPv6AssignmentRoutes(scopes, ipv6AssignmentRoutePrefixesInUse(items))
+}
+
 type managedIPv6AssignmentRuntime struct {
 	ops   ipv6AssignmentNetOps
 	inner *netservice.IPv6AssignmentRuntime

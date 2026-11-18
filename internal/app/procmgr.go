@@ -1205,6 +1205,11 @@ func (pm *ProcessManager) redistributeWorkersGeneration(generation uint64) error
 			} else {
 				ipv6RuntimeReconcileOK = true
 			}
+			if sweeper, ok := pm.ipv6Runtime.(ipv6AssignmentStaleRouteSweeper); ok {
+				if err := sweeper.SweepStaleRoutes(runtimeManagedNetworks, ipv6Assignments); err != nil {
+					log.Printf("ipv6 assignment runtime: sweep stale routes: %v", err)
+				}
+			}
 		}
 		ipv6Interfaces, ipv6ConfiguredCount := collectIPv6AssignmentInterfaceNames(ipv6Assignments)
 		for name := range managedNetworkCompiled.RedistributeIfaces {

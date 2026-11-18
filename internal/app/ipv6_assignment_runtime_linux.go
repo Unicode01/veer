@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/Unicode01/veer/internal/netservice"
 	"github.com/vishvananda/netlink"
@@ -22,10 +23,35 @@ func newIPv6AssignmentRuntime() ipv6AssignmentRuntime {
 
 type linuxIPv6AssignmentNetOps struct {
 	services *netservice.IPv6Manager
+
+	// routeLinks remembers the link each route went to: the bridge when the
+	// target is a bridge port. Once a guest's tap is gone its name no longer
+	// resolves, and only this tells where its route still is.
+	routesMu   sync.Mutex
+	routeLinks map[ipv6AssignmentRouteSpec]int
 }
 
 func newLinuxIPv6AssignmentNetOps() *linuxIPv6AssignmentNetOps {
-	return &linuxIPv6AssignmentNetOps{services: netservice.NewIPv6Manager()}
+	return &linuxIPv6AssignmentNetOps{services: netservice.NewIPv6Manager(), routeLinks: make(map[ipv6AssignmentRouteSpec]int)}
+}
+
+func (ops *linuxIPv6AssignmentNetOps) rememberRouteLink(spec ipv6AssignmentRouteSpec, linkIndex int) {
+	ops.routesMu.Lock()
+	defer ops.routesMu.Unlock()
+	if ops.routeLinks == nil {
+		ops.routeLinks = make(map[ipv6AssignmentRouteSpec]int)
+	}
+	if linkIndex > 0 {
+		ops.routeLinks[spec] = linkIndex
+	} else {
+		delete(ops.routeLinks, spec)
+	}
+}
+
+func (ops *linuxIPv6AssignmentNetOps) rememberedRouteLink(spec ipv6AssignmentRouteSpec) int {
+	ops.routesMu.Lock()
+	defer ops.routesMu.Unlock()
+	return ops.routeLinks[spec]
 }
 
 func (ops *linuxIPv6AssignmentNetOps) PreserveIPv6AssignmentStateOnClose() bool {
@@ -100,9 +126,29 @@ func (ops *linuxIPv6AssignmentNetOps) EnsureIPv6ProxyNDPEnabled(parentInterface 
 func (ops *linuxIPv6AssignmentNetOps) EnsureIPv6Route(spec ipv6AssignmentRouteSpec) error {
 	route, err := linuxIPv6AssignmentRouteFromSpec(spec)
 	if err != nil {
+		var linkNotFound netlink.LinkNotFoundError
+		if errors.As(err, &linkNotFound) {
+			// The target interface is gone, so the route it had on its
+			// bridge leads nowhere.
+			if cleanupErr := ops.deleteOrphanIPv6AssignmentRoute(spec); cleanupErr != nil {
+				log.Printf("ipv6 assignment runtime: remove route %s of missing %s: %v", spec.Prefix, spec.TargetInterface, cleanupErr)
+			}
+		}
 		return err
 	}
-	return netlink.RouteReplace(route)
+	if err := netlink.RouteReplace(route); err != nil {
+		return err
+	}
+	if previous := ops.rememberedRouteLink(spec); previous > 0 && previous != route.LinkIndex {
+		// The target moved to another bridge: drop the route on the old one.
+		stale := *route
+		stale.LinkIndex = previous
+		if err := netlink.RouteDel(&stale); err != nil && !errors.Is(err, unix.ESRCH) {
+			log.Printf("ipv6 assignment runtime: remove route %s from its previous link %d: %v", spec.Prefix, previous, err)
+		}
+	}
+	ops.rememberRouteLink(spec, route.LinkIndex)
+	return nil
 }
 
 func (ops *linuxIPv6AssignmentNetOps) DeleteIPv6Route(spec ipv6AssignmentRouteSpec) error {
@@ -110,17 +156,114 @@ func (ops *linuxIPv6AssignmentNetOps) DeleteIPv6Route(spec ipv6AssignmentRouteSp
 	if err != nil {
 		var linkNotFound netlink.LinkNotFoundError
 		if errors.As(err, &linkNotFound) {
-			return nil
+			// A destroyed guest's tap: its route stays on the bridge it was
+			// a port of until removed here.
+			return ops.deleteOrphanIPv6AssignmentRoute(spec)
 		}
 		return err
+	}
+	if previous := ops.rememberedRouteLink(spec); previous > 0 {
+		route.LinkIndex = previous
 	}
 	if err := netlink.RouteDel(route); err != nil {
 		if errors.Is(err, unix.ESRCH) {
+			ops.rememberRouteLink(spec, 0)
 			return nil
 		}
 		return err
 	}
+	ops.rememberRouteLink(spec, 0)
 	return nil
+}
+
+// deleteOrphanIPv6AssignmentRoute removes the route of spec after its target
+// interface disappeared: on the link it was installed on when that is known,
+// otherwise any route this runtime would have installed for exactly that
+// prefix (static, unicast, main table, no gateway).
+func (ops *linuxIPv6AssignmentNetOps) deleteOrphanIPv6AssignmentRoute(spec ipv6AssignmentRouteSpec) error {
+	_, prefix, err := net.ParseCIDR(strings.TrimSpace(spec.Prefix))
+	if err != nil || prefix == nil || prefix.IP.To4() != nil {
+		return nil
+	}
+	linkIndex := ops.rememberedRouteLink(spec)
+	routes, err := netlink.RouteListFiltered(unix.AF_INET6, &netlink.Route{Dst: prefix, Table: unix.RT_TABLE_MAIN}, netlink.RT_FILTER_DST|netlink.RT_FILTER_TABLE)
+	if err != nil {
+		return err
+	}
+	var failures []error
+	for i := range routes {
+		route := &routes[i]
+		if !isIPv6AssignmentRoute(route, prefix, prefix.Mask) || (linkIndex > 0 && route.LinkIndex != linkIndex) {
+			continue
+		}
+		if err := netlink.RouteDel(route); err != nil && !errors.Is(err, unix.ESRCH) {
+			failures = append(failures, err)
+			continue
+		}
+		log.Printf("ipv6 assignment runtime: removed route %s (its target %s is gone)", spec.Prefix, spec.TargetInterface)
+	}
+	if err := errors.Join(failures...); err != nil {
+		return err
+	}
+	ops.rememberRouteLink(spec, 0)
+	return nil
+}
+
+// isIPv6AssignmentRoute tells whether route has the shape of the routes this
+// runtime installs (see linuxIPv6AssignmentRouteFromSpec), with a destination
+// inside parent and the prefix length of mask.
+func isIPv6AssignmentRoute(route *netlink.Route, parent *net.IPNet, mask net.IPMask) bool {
+	if route == nil || route.Dst == nil || route.Dst.IP.To4() != nil || route.Gw != nil || route.LinkIndex <= 0 {
+		return false
+	}
+	if route.Protocol != unix.RTPROT_STATIC || (route.Type != 0 && route.Type != unix.RTN_UNICAST) {
+		return false
+	}
+	if route.Table != 0 && route.Table != unix.RT_TABLE_MAIN {
+		return false
+	}
+	ones, bits := route.Dst.Mask.Size()
+	wantOnes, wantBits := mask.Size()
+	return ones == wantOnes && bits == wantBits && parent.Contains(route.Dst.IP)
+}
+
+// SweepIPv6AssignmentRoutes removes assignment routes no assignment uses any
+// more from each scope's bridge: those a predecessor left across a hot
+// restart, or an older version left when a guest was destroyed.
+func (ops *linuxIPv6AssignmentNetOps) SweepIPv6AssignmentRoutes(scopes []ipv6AssignmentRouteSweepScope, keep map[string]struct{}) error {
+	var failures []error
+	for _, scope := range scopes {
+		link, err := netlink.LinkByName(scope.Bridge)
+		if err != nil {
+			var linkNotFound netlink.LinkNotFoundError
+			if !errors.As(err, &linkNotFound) {
+				failures = append(failures, fmt.Errorf("%s: %w", scope.Bridge, err))
+			}
+			continue
+		}
+		routes, err := netlink.RouteList(link, unix.AF_INET6)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("list routes on %s: %w", scope.Bridge, err))
+			continue
+		}
+		mask := net.CIDRMask(scope.PrefixLen, 128)
+		for i := range routes {
+			route := &routes[i]
+			if !isIPv6AssignmentRoute(route, scope.ParentPrefix, mask) {
+				continue
+			}
+			key := ipv6AssignmentRouteKey(route.Dst)
+			if _, used := keep[key]; used {
+				continue
+			}
+			if err := netlink.RouteDel(route); err != nil && !errors.Is(err, unix.ESRCH) {
+				failures = append(failures, fmt.Errorf("remove %s from %s: %w", key, scope.Bridge, err))
+				continue
+			}
+			log.Printf("ipv6 assignment runtime: removed stale route %s dev %s (no assignment uses it)", key, scope.Bridge)
+		}
+	}
+	return errors.Join(failures...)
 }
 
 func (ops *linuxIPv6AssignmentNetOps) EnsureIPv6Address(spec ipv6AssignmentAddressSpec) error {
