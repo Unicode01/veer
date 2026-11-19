@@ -1470,12 +1470,13 @@ func (pm *ProcessManager) redistributeWorkersGeneration(generation uint64) error
 	pm.mu.Unlock()
 
 	enabledRules, enabledRanges, ruleAssignments, rangeAssignments := buildUserspaceAssignments(rules, ranges, rulePlans, rangePlans, pm.cfg.MaxWorkers)
-	releaseUserspaceListenInterfaces(ruleAssignments, rangeAssignments, rules, ranges, sites)
+	listenScope := newUserspaceListenScope(rules, ranges, sites)
+	releaseUserspaceListenInterfaces(ruleAssignments, rangeAssignments, listenScope)
 	// Auto-configure transparent proxy routing BEFORE dispatching config to workers,
 	// so iptables rules are in place before any worker starts using IP_TRANSPARENT sockets.
 	pm.updateTransparentRouting(enabledRules, enabledRanges)
 
-	pm.updateSharedProxy(releaseSharedSiteListenInterfaces(sites, rules, ranges), generation)
+	pm.updateSharedProxy(releaseSharedSiteListenInterfaces(sites, listenScope), generation)
 
 	pm.applyRuleAssignmentsGeneration(ruleAssignments, generation)
 	pm.applyRangeAssignmentsGeneration(rangeAssignments, generation)
@@ -2806,7 +2807,7 @@ func (pm *ProcessManager) prewarmKernelToUserspaceHandoffs(rules []Rule, ranges 
 	}
 
 	enabledRules, enabledRanges, ruleAssignments, rangeAssignments := buildUserspaceAssignments(rules, ranges, rulePlans, rangePlans, pm.cfg.MaxWorkers)
-	releaseUserspaceListenInterfaces(ruleAssignments, rangeAssignments, rules, ranges, sites)
+	releaseUserspaceListenInterfaces(ruleAssignments, rangeAssignments, newUserspaceListenScope(rules, ranges, sites))
 	ruleWorkerIndexes := collectRuleWorkerIndexesForIDs(ruleAssignments, transitionRuleIDs)
 	rangeWorkerIndexes := collectRangeWorkerIndexesForIDs(rangeAssignments, transitionRangeIDs)
 	if len(ruleWorkerIndexes) == 0 && len(rangeWorkerIndexes) == 0 {

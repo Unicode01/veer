@@ -39,7 +39,7 @@ func TestLookupUserspaceSecondaryUplink(t *testing.T) {
 		t.Helper()
 		var got bool
 		if err := runInNetNSForTest(ns, func() error {
-			got = lookupUserspaceSecondaryUplink(iface, ip)
+			got = lookupUserspaceSecondaryUplink(&userspaceUplinkRoutes{}, iface, ip)
 			return nil
 		}); err != nil {
 			t.Fatalf("run in %s: %v", ns, err)

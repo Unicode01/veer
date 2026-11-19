@@ -2,6 +2,6 @@
 
 package app
 
-func lookupUserspaceSecondaryUplink(string, string) bool {
+func lookupUserspaceSecondaryUplink(*userspaceUplinkRoutes, string, string) bool {
 	return false
 }

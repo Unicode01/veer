@@ -18,8 +18,9 @@ var userspaceUplinkProbe = map[int]net.IP{
 
 // lookupUserspaceSecondaryUplink reports whether iface has a default route of
 // its own, in any table, while the routing decision for an answer from ip to
-// the internet leaves by another interface.
-func lookupUserspaceSecondaryUplink(iface string, ip string) bool {
+// the internet leaves by another interface. routes lists the default routes
+// once per family for every lookup of a scope.
+func lookupUserspaceSecondaryUplink(routes *userspaceUplinkRoutes, iface string, ip string) bool {
 	addr := net.ParseIP(ip)
 	if addr == nil {
 		return false
@@ -33,30 +34,7 @@ func lookupUserspaceSecondaryUplink(iface string, ip string) bool {
 	if addr.To4() == nil {
 		family = netlink.FAMILY_V6
 	}
-	routes, err := netlink.RouteListFiltered(family, &netlink.Route{Table: unix.RT_TABLE_UNSPEC}, netlink.RT_FILTER_TABLE)
-	if err != nil {
-		return false
-	}
-	hasDefault := false
-	for _, route := range routes {
-		if route.Type != unix.RTN_UNICAST || !isDefaultRouteDst(route.Dst) {
-			continue
-		}
-		if route.LinkIndex == index {
-			hasDefault = true
-			break
-		}
-		for _, hop := range route.MultiPath {
-			if hop != nil && hop.LinkIndex == index {
-				hasDefault = true
-				break
-			}
-		}
-		if hasDefault {
-			break
-		}
-	}
-	if !hasDefault {
+	if !routes.hasDefault(family, index, listUserspaceDefaultRouteLinks) {
 		return false
 	}
 	best, err := netlink.RouteGetWithOptions(userspaceUplinkProbe[family], &netlink.RouteGetOptions{SrcAddr: addr})
@@ -66,6 +44,31 @@ func lookupUserspaceSecondaryUplink(iface string, ip string) bool {
 		return true
 	}
 	return best[0].LinkIndex != index
+}
+
+// listUserspaceDefaultRouteLinks returns the indexes of the interfaces with a
+// unicast default route in any table of family, multipath next hops
+// included; none when the routes cannot be listed.
+func listUserspaceDefaultRouteLinks(family int) map[int]bool {
+	links := make(map[int]bool)
+	routes, err := netlink.RouteListFiltered(family, &netlink.Route{Table: unix.RT_TABLE_UNSPEC}, netlink.RT_FILTER_TABLE)
+	if err != nil {
+		return links
+	}
+	for _, route := range routes {
+		if route.Type != unix.RTN_UNICAST || !isDefaultRouteDst(route.Dst) {
+			continue
+		}
+		if route.LinkIndex > 0 {
+			links[route.LinkIndex] = true
+		}
+		for _, hop := range route.MultiPath {
+			if hop != nil && hop.LinkIndex > 0 {
+				links[hop.LinkIndex] = true
+			}
+		}
+	}
+	return links
 }
 
 func isDefaultRouteDst(dst *net.IPNet) bool {
