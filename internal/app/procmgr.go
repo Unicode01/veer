@@ -1475,7 +1475,7 @@ func (pm *ProcessManager) redistributeWorkersGeneration(generation uint64) error
 	// so iptables rules are in place before any worker starts using IP_TRANSPARENT sockets.
 	pm.updateTransparentRouting(enabledRules, enabledRanges)
 
-	pm.updateSharedProxy(sites, generation)
+	pm.updateSharedProxy(releaseSharedSiteListenInterfaces(sites, rules, ranges), generation)
 
 	pm.applyRuleAssignmentsGeneration(ruleAssignments, generation)
 	pm.applyRangeAssignmentsGeneration(rangeAssignments, generation)

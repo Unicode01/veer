@@ -75,6 +75,31 @@ func TestReleaseUserspaceListenInterfaces(t *testing.T) {
 	}
 }
 
+func TestReleaseSharedSiteListenInterfaces(t *testing.T) {
+	rules := []Rule{
+		{ID: 1, Enabled: true, InInterface: "vmbr1", InIP: "0.0.0.0", InPort: 443, Protocol: "udp"},
+	}
+	sites := []Site{
+		{ID: 2, Enabled: true, Domain: "a.test", ListenIface: "vmbr0", ListenIP: "203.0.113.10", BackendHTTP: 80, BackendHTTPS: 443},
+		{ID: 3, Enabled: true, Domain: "b.test", ListenIface: "vmbr0", ListenIP: "203.0.113.11", BackendHTTPS: 443, QUIC: true},
+		{ID: 4, Enabled: true, Domain: "c.test", ListenIface: "vmbr0", ListenIP: "", BackendHTTP: 80},
+	}
+
+	got := releaseSharedSiteListenInterfaces(sites, rules, nil)
+	if got[0].ListenIface != "" {
+		t.Fatalf("site 2 interface = %q, want it released", got[0].ListenIface)
+	}
+	if got[1].ListenIface != "vmbr0" {
+		t.Fatalf("site 3 interface = %q, want vmbr0 kept: rule 1 listens on UDP 443 of vmbr1", got[1].ListenIface)
+	}
+	if got[2].ListenIface != "vmbr0" {
+		t.Fatalf("site 4 interface = %q, want vmbr0 kept for the wildcard address", got[2].ListenIface)
+	}
+	if sites[0].ListenIface != "vmbr0" {
+		t.Fatal("releaseSharedSiteListenInterfaces() changed the site it was given instead of a copy")
+	}
+}
+
 func withUserspaceDialLookups(t *testing.T, routes map[string]string, prefixes map[string][]string) {
 	t.Helper()
 	oldRoute, oldPrefix, oldCache := userspaceRouteIfaceLookup, userspaceIfacePrefixLookup, userspaceDialLookups

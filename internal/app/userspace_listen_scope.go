@@ -5,8 +5,9 @@ package app
 // interface (SO_BINDTODEVICE) it refuses connections that reach the address
 // through any other interface, which shuts out guests behind egress NAT
 // reaching the host's public address (hairpin), routed networks and VPN
-// clients. Such listeners are therefore handed to the workers without their
-// interface, which is what an empty inbound interface means to them.
+// clients. Such listeners are therefore handed to the workers and the shared
+// proxy without their interface, which is what an empty interface means to
+// them.
 //
 // The binding stays where the kernel needs it: on listeners for a wildcard
 // address, which it limits to their interface, and on a listener whose port
@@ -90,6 +91,29 @@ func userspaceListenerNeedsInterface(iface string, ip string, startPort int, end
 		}
 	}
 	return false
+}
+
+// releaseSharedSiteListenInterfaces returns the sites for the shared proxy,
+// without their listen interface where none of their listeners (TCP 80 and
+// 443, UDP 443 with QUIC) needs it. The proxy routes by host name alone, so
+// the interface only scopes the listeners.
+func releaseSharedSiteListenInterfaces(sites []Site, rules []Rule, ranges []PortRange) []Site {
+	out := append([]Site(nil), sites...)
+	footprints := collectUserspaceListenerFootprints(rules, ranges, sites)
+	tcp := ruleProtocolMask("tcp")
+	for i := range out {
+		site := &out[i]
+		https := tcp
+		if site.QUIC {
+			https |= ruleProtocolMask("udp")
+		}
+		if userspaceListenerNeedsInterface(site.ListenIface, site.ListenIP, 80, 80, tcp, footprints) ||
+			userspaceListenerNeedsInterface(site.ListenIface, site.ListenIP, 443, 443, https, footprints) {
+			continue
+		}
+		site.ListenIface = ""
+	}
+	return out
 }
 
 // releaseUserspaceListenInterfaces clears the inbound interface of the rules
