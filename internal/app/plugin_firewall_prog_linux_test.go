@@ -417,12 +417,17 @@ func testFirewallProgramVerdicts(t *testing.T, r *firewallTestRig) {
 		{"ipv4 first fragment", ipv4Frag("8.8.8.8", "10.0.0.1", rdp, 0x2000, nil), 0, fwVerdictDrop},
 		{"ipv4 later fragment", ipv4Frag("8.8.8.8", "10.0.0.1", rdp, 0x2001, nil), 0, fwVerdictPass},
 		{"ipv4 first fragment hiding its ports", ipv4Frag("8.8.8.8", "10.0.0.1", rdp, 0x2000, []byte{0x9c}), 0, fwVerdictDrop},
+		// A TCP first fragment that ends before the flags would carry a SYN
+		// past the SYN limit, so it is evasive even from an allowed source.
+		{"ipv4 first fragment hiding its tcp flags", ipv4Frag("203.0.113.5", "10.0.0.1", rdp, 0x2000, fwL4Bytes(rdp)[:8]), 0, fwVerdictDrop},
+		{"ipv4 unfragmented without tcp flags", ipv4Frag("203.0.113.5", "10.0.0.1", rdp, 0, fwL4Bytes(rdp)[:8]), 0, fwVerdictPass},
 		{"ipv6 allowed", fwV6("2001:db8::5", "2001:db8:1::443", nil, 0, https), 0, fwVerdictPass},
 		{"ipv6 default drop", fwV6("2001:db9::5", "2001:db8:1::443", nil, 0, https), 0, fwVerdictDrop},
 		{"ipv6 trusted", fwV6("2001:db8:ffff::1", "2001:db8:1::443", nil, 0, https), 0, fwVerdictPass},
 		{"ipv6 behind extension headers", fwV6("2001:db9::5", "2001:db8:1::443", []uint8{0, 60}, 0, https), 0, fwVerdictDrop},
 		{"ipv6 first fragment", fwV6("2001:db9::5", "2001:db8:1::443", []uint8{44}, 0x0001, https), 0, fwVerdictDrop},
 		{"ipv6 later fragment", fwV6("2001:db9::5", "2001:db8:1::443", []uint8{44}, 0x0008, https), 0, fwVerdictPass},
+		{"ipv6 first fragment hiding its tcp flags", fwEthernet(0x86dd, nil, fwIPv6("2001:db8::5", "2001:db8:1::443", []uint8{44}, 0x0001, 6, fwL4Bytes(https)[:8])), 0, fwVerdictDrop},
 		{"ipv6 too many extension headers", fwV6("2001:db9::5", "2001:db8:1::443", []uint8{0, 60, 60, 60, 60, 60, 60}, 0, https), 0, fwVerdictDrop},
 		{"truncated", fwV4("8.8.8.8", "10.0.0.1", rdp)[:30], 0, fwVerdictPass},
 		// Cut inside the ports (no ports, so it passes), and inside the TCP
@@ -479,8 +484,8 @@ func testFirewallProgramVerdicts(t *testing.T, r *firewallTestRig) {
 	if got := r.counter(1, fwCntTrusted); got != 1 {
 		t.Fatalf("slot 1 trusted = %d, want 1", got)
 	}
-	if got := r.counter(0, fwCntEvasive); got != 2 {
-		t.Fatalf("evasive drops = %d, want 2", got)
+	if got := r.counter(0, fwCntEvasive); got != 4 {
+		t.Fatalf("evasive drops = %d, want 4", got)
 	}
 	if r.counter(1, fwCntDrop) == 0 || r.counter(1, fwCntPass) == 0 {
 		t.Fatal("slot 1 counted no pass or no drop")

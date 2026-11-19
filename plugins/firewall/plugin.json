@@ -2,7 +2,7 @@
   "api_version": "v1",
   "id": "firewall",
   "name": "Firewall",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "kind": "pipeline",
   "stability": "stable",
   "description": "Stateless XDP source filter for TCP and UDP ports, ahead of the Veer dataplane. Applied rule sets need confirmation or roll back by themselves.",
