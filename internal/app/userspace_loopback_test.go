@@ -42,6 +42,7 @@ func TestUserspaceListenerNeedsInterface(t *testing.T) {
 // same port of another interface bound to its own, and disabled entries do
 // not count.
 func TestReleaseUserspaceListenInterfaces(t *testing.T) {
+	withSecondaryUplinks(t)
 	rules := []Rule{
 		{ID: 1, Enabled: true, InInterface: "vmbr0", InIP: "203.0.113.10", InPort: 8080, Protocol: "tcp"},
 		{ID: 2, Enabled: true, InInterface: "vmbr0", InIP: "203.0.113.10", InPort: 443, Protocol: "tcp"},
@@ -75,7 +76,64 @@ func TestReleaseUserspaceListenInterfaces(t *testing.T) {
 	}
 }
 
+// withSecondaryUplinks makes the named interface/address pairs secondary
+// uplinks for the test.
+func withSecondaryUplinks(t *testing.T, pairs ...[2]string) {
+	t.Helper()
+	old := userspaceSecondaryUplinkLookup
+	userspaceSecondaryUplinkLookup = func(iface string, ip string) bool {
+		for _, pair := range pairs {
+			if pair[0] == iface && pair[1] == ip {
+				return true
+			}
+		}
+		return false
+	}
+	t.Cleanup(func() { userspaceSecondaryUplinkLookup = old })
+}
+
+// Listeners on a secondary uplink stay bound, so their answers leave by it.
+func TestReleaseKeepsSecondaryUplinkListenersBound(t *testing.T) {
+	withSecondaryUplinks(t, [2]string{"ppp1", "198.51.100.7"})
+	rules := []Rule{
+		{ID: 1, Enabled: true, InInterface: "ppp1", InIP: "198.51.100.7", InPort: 2222, Protocol: "tcp"},
+		{ID: 2, Enabled: true, InInterface: "ppp0", InIP: "203.0.113.10", InPort: 2222, Protocol: "tcp"},
+	}
+	ranges := []PortRange{{ID: 3, Enabled: true, InInterface: "ppp1", InIP: "198.51.100.7", StartPort: 30000, EndPort: 30010, Protocol: "udp"}}
+	sites := []Site{{ID: 4, Enabled: true, Domain: "a.test", ListenIface: "ppp1", ListenIP: "198.51.100.7", BackendHTTPS: 443}}
+
+	ruleAssignments := [][]Rule{{rules[0], rules[1]}}
+	rangeAssignments := [][]PortRange{{ranges[0]}}
+	releaseUserspaceListenInterfaces(ruleAssignments, rangeAssignments, rules, ranges, sites)
+	if got := ruleAssignments[0][0].InInterface; got != "ppp1" {
+		t.Fatalf("rule 1 interface = %q, want ppp1 kept on the secondary uplink", got)
+	}
+	if got := ruleAssignments[0][1].InInterface; got != "" {
+		t.Fatalf("rule 2 interface = %q, want it released on the primary uplink", got)
+	}
+	if got := rangeAssignments[0][0].InInterface; got != "ppp1" {
+		t.Fatalf("range 3 interface = %q, want ppp1 kept on the secondary uplink", got)
+	}
+	if got := releaseSharedSiteListenInterfaces(sites, rules, ranges)[0].ListenIface; got != "ppp1" {
+		t.Fatalf("site 4 interface = %q, want ppp1 kept on the secondary uplink", got)
+	}
+}
+
+// A site without a listen address listens on both families, so an IPv6 rule
+// on the same port of another interface keeps its binding too.
+func TestReleaseCountsDualStackSiteListeners(t *testing.T) {
+	withSecondaryUplinks(t)
+	rules := []Rule{{ID: 1, Enabled: true, InInterface: "vmbr1", InIP: "2001:db8::10", InPort: 443, Protocol: "tcp"}}
+	sites := []Site{{ID: 2, Enabled: true, Domain: "a.test", ListenIface: "vmbr0", BackendHTTPS: 443}}
+	ruleAssignments := [][]Rule{{rules[0]}}
+	releaseUserspaceListenInterfaces(ruleAssignments, nil, rules, nil, sites)
+	if got := ruleAssignments[0][0].InInterface; got != "vmbr1" {
+		t.Fatalf("rule 1 interface = %q, want vmbr1 kept: the site listens on [::]:443 of vmbr0", got)
+	}
+}
+
 func TestReleaseSharedSiteListenInterfaces(t *testing.T) {
+	withSecondaryUplinks(t)
 	rules := []Rule{
 		{ID: 1, Enabled: true, InInterface: "vmbr1", InIP: "0.0.0.0", InPort: 443, Protocol: "udp"},
 	}

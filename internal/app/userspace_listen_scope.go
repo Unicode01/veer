@@ -16,6 +16,12 @@ package app
 // the binding one of them could not bind at all. Every enabled rule, range
 // and site counts, whatever engine runs it, so the decision does not change
 // when a rule moves between the kernel and user space.
+//
+// It also stays on a secondary uplink: an interface with a default route of
+// its own that loses to another one, as a second WAN with a higher metric
+// does. Its answers leave by its interface only because the socket is bound
+// there; unbound they would follow the better default route out of the wrong
+// uplink, with this uplink's address, and never arrive.
 
 type userspaceListenerFootprint struct {
 	iface        string
@@ -55,16 +61,19 @@ func collectUserspaceListenerFootprints(rules []Rule, ranges []PortRange, sites 
 		if !site.Enabled {
 			continue
 		}
-		listenIP := site.ListenIP
-		if listenIP == "" {
-			listenIP = "0.0.0.0"
+		// Without a listen address the proxy listens on both families.
+		listenIPs := []string{site.ListenIP}
+		if site.ListenIP == "" {
+			listenIPs = []string{"0.0.0.0", "::"}
 		}
-		footprints = append(footprints,
-			userspaceListenerFootprint{iface: site.ListenIface, ip: listenIP, startPort: 80, endPort: 80, protocolMask: ruleProtocolMask("tcp")},
-			userspaceListenerFootprint{iface: site.ListenIface, ip: listenIP, startPort: 443, endPort: 443, protocolMask: ruleProtocolMask("tcp")},
-		)
-		if site.QUIC {
-			footprints = append(footprints, userspaceListenerFootprint{iface: site.ListenIface, ip: listenIP, startPort: 443, endPort: 443, protocolMask: ruleProtocolMask("udp")})
+		for _, listenIP := range listenIPs {
+			footprints = append(footprints,
+				userspaceListenerFootprint{iface: site.ListenIface, ip: listenIP, startPort: 80, endPort: 80, protocolMask: ruleProtocolMask("tcp")},
+				userspaceListenerFootprint{iface: site.ListenIface, ip: listenIP, startPort: 443, endPort: 443, protocolMask: ruleProtocolMask("tcp")},
+			)
+			if site.QUIC {
+				footprints = append(footprints, userspaceListenerFootprint{iface: site.ListenIface, ip: listenIP, startPort: 443, endPort: 443, protocolMask: ruleProtocolMask("udp")})
+			}
 		}
 	}
 	return footprints
@@ -93,13 +102,47 @@ func userspaceListenerNeedsInterface(iface string, ip string, startPort int, end
 	return false
 }
 
+// userspaceSecondaryUplinkLookup reports whether iface is a secondary uplink
+// for answers from ip (see the top of this file). Tests replace it.
+var userspaceSecondaryUplinkLookup = lookupUserspaceSecondaryUplink
+
+// userspaceListenScope decides which listeners keep their interface, looking
+// each interface and address up at most once.
+type userspaceListenScope struct {
+	footprints []userspaceListenerFootprint
+	secondary  map[[2]string]bool
+}
+
+func newUserspaceListenScope(rules []Rule, ranges []PortRange, sites []Site) *userspaceListenScope {
+	return &userspaceListenScope{
+		footprints: collectUserspaceListenerFootprints(rules, ranges, sites),
+		secondary:  make(map[[2]string]bool),
+	}
+}
+
+func (s *userspaceListenScope) needsInterface(iface string, ip string, startPort int, endPort int, mask int) bool {
+	if iface == "" {
+		return false
+	}
+	if userspaceListenerNeedsInterface(iface, ip, startPort, endPort, mask, s.footprints) {
+		return true
+	}
+	key := [2]string{iface, ip}
+	secondary, ok := s.secondary[key]
+	if !ok {
+		secondary = userspaceSecondaryUplinkLookup(iface, ip)
+		s.secondary[key] = secondary
+	}
+	return secondary
+}
+
 // releaseSharedSiteListenInterfaces returns the sites for the shared proxy,
 // without their listen interface where none of their listeners (TCP 80 and
 // 443, UDP 443 with QUIC) needs it. The proxy routes by host name alone, so
 // the interface only scopes the listeners.
 func releaseSharedSiteListenInterfaces(sites []Site, rules []Rule, ranges []PortRange) []Site {
 	out := append([]Site(nil), sites...)
-	footprints := collectUserspaceListenerFootprints(rules, ranges, sites)
+	scope := newUserspaceListenScope(rules, ranges, sites)
 	tcp := ruleProtocolMask("tcp")
 	for i := range out {
 		site := &out[i]
@@ -107,8 +150,8 @@ func releaseSharedSiteListenInterfaces(sites []Site, rules []Rule, ranges []Port
 		if site.QUIC {
 			https |= ruleProtocolMask("udp")
 		}
-		if userspaceListenerNeedsInterface(site.ListenIface, site.ListenIP, 80, 80, tcp, footprints) ||
-			userspaceListenerNeedsInterface(site.ListenIface, site.ListenIP, 443, 443, https, footprints) {
+		if scope.needsInterface(site.ListenIface, site.ListenIP, 80, 80, tcp) ||
+			scope.needsInterface(site.ListenIface, site.ListenIP, 443, 443, https) {
 			continue
 		}
 		site.ListenIface = ""
@@ -119,11 +162,11 @@ func releaseSharedSiteListenInterfaces(sites []Site, rules []Rule, ranges []Port
 // releaseUserspaceListenInterfaces clears the inbound interface of the rules
 // and ranges assigned to workers whose listeners can do without it.
 func releaseUserspaceListenInterfaces(ruleAssignments [][]Rule, rangeAssignments [][]PortRange, rules []Rule, ranges []PortRange, sites []Site) {
-	footprints := collectUserspaceListenerFootprints(rules, ranges, sites)
+	scope := newUserspaceListenScope(rules, ranges, sites)
 	for _, assigned := range ruleAssignments {
 		for i := range assigned {
 			rule := &assigned[i]
-			if !userspaceListenerNeedsInterface(rule.InInterface, rule.InIP, rule.InPort, rule.InPort, ruleProtocolMask(rule.Protocol), footprints) {
+			if !scope.needsInterface(rule.InInterface, rule.InIP, rule.InPort, rule.InPort, ruleProtocolMask(rule.Protocol)) {
 				rule.InInterface = ""
 			}
 		}
@@ -131,7 +174,7 @@ func releaseUserspaceListenInterfaces(ruleAssignments [][]Rule, rangeAssignments
 	for _, assigned := range rangeAssignments {
 		for i := range assigned {
 			pr := &assigned[i]
-			if !userspaceListenerNeedsInterface(pr.InInterface, pr.InIP, pr.StartPort, pr.EndPort, ruleProtocolMask(pr.Protocol), footprints) {
+			if !scope.needsInterface(pr.InInterface, pr.InIP, pr.StartPort, pr.EndPort, ruleProtocolMask(pr.Protocol)) {
 				pr.InInterface = ""
 			}
 		}
