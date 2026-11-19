@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cilium/ebpf"
@@ -47,6 +48,42 @@ func pluginMapHandoffTestRef(t *testing.T, contracts []PluginObjectStateMap) (lo
 	}, maps
 }
 
+func pluginMapHandoffTestPin(t *testing.T, mapName string) string {
+	t.Helper()
+	pin, err := pluginMapHandoffPinName("firewall", "firewall", mapName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pin
+}
+
+// Pin names stay unique where joined names would not, and fit the pattern
+// the successor checks for the longest IDs a manifest allows.
+func TestPluginMapHandoffPinNames(t *testing.T) {
+	a, errA := pluginMapHandoffPinName("a--b", "c", "m")
+	b, errB := pluginMapHandoffPinName("a", "b--c", "m")
+	if errA != nil || errB != nil {
+		t.Fatalf("pin names: %v, %v", errA, errB)
+	}
+	if a == b {
+		t.Fatalf("plugin a--b object c and plugin a object b--c share pin %s", a)
+	}
+	long := strings.Repeat("p", 64)
+	pin, err := pluginMapHandoffPinName(long, strings.Repeat("o", 64), "fw_rate_limit_state_v6")
+	if err != nil || !pluginMapHandoffNamePattern.MatchString(pin) {
+		t.Fatalf("pin for 64-character IDs = %q, %v; want a name matching %s", pin, err, pluginMapHandoffNamePattern)
+	}
+	again, _ := pluginMapHandoffPinName(long, strings.Repeat("o", 64), "fw_rate_limit_state_v6")
+	if again != pin {
+		t.Fatalf("pin name not stable: %s then %s", pin, again)
+	}
+	for _, bad := range [][3]string{{"", "o", "m"}, {"p", "", "m"}, {"p", "o", ""}} {
+		if _, err := pluginMapHandoffPinName(bad[0], bad[1], bad[2]); err == nil {
+			t.Fatalf("pin name for %q accepted", bad)
+		}
+	}
+}
+
 // The predecessor pins only maps its contract keeps; the successor sees them
 // with their contents as the previous object, adopts them through the usual
 // contract checks, and the startup release removes every pin.
@@ -68,10 +105,10 @@ func TestPluginMapHandoffKeepsPreservedMaps(t *testing.T) {
 		t.Fatalf("handOffPluginStateMaps() error = %v", err)
 	}
 	dir := kernelHotRestartEngineDir(pluginMapHandoffEngine)
-	if _, err := os.Stat(filepath.Join(dir, "firewall--firewall--kept")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, pluginMapHandoffTestPin(t, "kept"))); err != nil {
 		t.Fatalf("kept map not pinned: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "firewall--firewall--dropped")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, pluginMapHandoffTestPin(t, "dropped"))); !os.IsNotExist(err) {
 		t.Fatalf("reset map pinned: %v", err)
 	}
 	// The predecessor exits: only the pin holds the map now.
@@ -180,7 +217,7 @@ func TestPluginMapHandoffNeedsHotRestart(t *testing.T) {
 	if err := handOffPluginStateMapsForHotRestart(source, nil, disabledPluginDataplaneRuntime{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(kernelHotRestartEngineDir(pluginMapHandoffEngine), "firewall--firewall--kept")); err != nil {
+	if _, err := os.Stat(filepath.Join(kernelHotRestartEngineDir(pluginMapHandoffEngine), pluginMapHandoffTestPin(t, "kept"))); err != nil {
 		t.Fatalf("map not pinned for a hot restart: %v", err)
 	}
 }

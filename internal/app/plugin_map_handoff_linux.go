@@ -3,6 +3,8 @@
 package app
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -69,12 +71,19 @@ func pluginMapHandoffKey(pluginID, objectID string) string {
 	return pluginID + "\x00" + objectID
 }
 
+// pluginMapHandoffPinName names the pin of one plugin object's state map. It
+// is a hash of the three names, each ended by a NUL none of them can hold:
+// joining them with a separator would let one plugin's names spell another's
+// (plugin "a--b" object "c" and plugin "a" object "b--c"), and the successor
+// would hand one plugin the other's state. The metadata records which pin is
+// which, so the name only has to be unique and fit the pattern.
 func pluginMapHandoffPinName(pluginID, objectID, mapName string) (string, error) {
-	name := pluginID + "--" + objectID + "--" + mapName
-	if !pluginMapHandoffNamePattern.MatchString(name) || strings.Contains(name, "..") {
-		return "", fmt.Errorf("plugin %s object %s map %s has no valid pin name", pluginID, objectID, mapName)
+	if pluginID == "" || objectID == "" || mapName == "" ||
+		strings.ContainsRune(pluginID, 0) || strings.ContainsRune(objectID, 0) || strings.ContainsRune(mapName, 0) {
+		return "", fmt.Errorf("plugin %q object %q map %q has no valid pin name", pluginID, objectID, mapName)
 	}
-	return name, nil
+	sum := sha256.Sum256([]byte(pluginID + "\x00" + objectID + "\x00" + mapName + "\x00"))
+	return "map-" + hex.EncodeToString(sum[:20]), nil
 }
 
 func pluginMapKeptAcrossRestart(policy string) bool {
