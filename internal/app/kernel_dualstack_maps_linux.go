@@ -8,15 +8,18 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strings"
+	"unsafe"
 )
 
 const (
 	kernelRulesMapNameV4    = "rules_v4"
 	kernelFlowsMapNameV4    = "flows_v4"
 	kernelNatPortsMapNameV4 = "nat_ports_v4"
+	kernelNatPeersMapNameV4 = "nat_peers_v4"
 	kernelRulesMapNameV6    = "rules_v6"
 	kernelFlowsMapNameV6    = "flows_v6"
 	kernelNatPortsMapNameV6 = "nat_ports_v6"
+	kernelNatPeersMapNameV6 = "nat_peers_v6"
 )
 
 const kernelRuleFlowContractFlags = kernelRuleFlagFullNAT | kernelRuleFlagEgressNAT | kernelRuleFlagPassthrough | kernelRuleFlagFullCone
@@ -69,6 +72,10 @@ type tcFlowKeyV6 struct {
 	Pad     [3]uint8
 }
 
+// tcFlowValueV6 mirrors the tc object's struct flow_value_v6. The xdp
+// object's entries end before Fast (xdpFlowValueV6); single reads of either
+// object's IPv6 flows decode into this type (UnmarshalBinary), and nothing
+// in user space writes them.
 type tcFlowValueV6 struct {
 	RuleID           uint32
 	FrontAddr        [16]byte
@@ -86,6 +93,65 @@ type tcFlowValueV6 struct {
 	FrontCloseSeenNS uint64
 	RuleRevision     uint64
 	SessionID        uint64
+	Fast             tcFlowFastV6
+}
+
+// tcFlowFastV6 mirrors struct flow_fast_v6, the IPv6 flow cache record; see
+// tcFlowFastV4.
+type tcFlowFastV6 struct {
+	Stamp      uint32
+	OutIfIndex uint32
+	InIfIndex  uint32
+	MaxLen     uint16
+	DstPort    uint16
+	DMAC       [6]byte
+	SMAC       [6]byte
+	InDMAC     [6]byte
+	Pad        [2]byte
+	DstAddr    [16]byte
+	Pad2       uint32
+}
+
+// xdpFlowValueV6 mirrors the xdp object's struct flow_value_v6, which has no
+// flow cache record: tcFlowValueV6 without Fast.
+type xdpFlowValueV6 struct {
+	RuleID           uint32
+	FrontAddr        [16]byte
+	ClientAddr       [16]byte
+	NATAddr          [16]byte
+	InIfIndex        uint32
+	FrontPort        uint16
+	ClientPort       uint16
+	NATPort          uint16
+	Flags            uint16
+	FrontMAC         [6]byte
+	ClientMAC        [6]byte
+	Pad              uint32
+	LastSeenNS       uint64
+	FrontCloseSeenNS uint64
+	RuleRevision     uint64
+	SessionID        uint64
+}
+
+const xdpFlowValueV6Size = int(unsafe.Sizeof(xdpFlowValueV6{}))
+
+// UnmarshalBinary reads an IPv6 flow entry of either object: a tc entry, or
+// an xdp entry, which leaves Fast zero.
+func (v *tcFlowValueV6) UnmarshalBinary(data []byte) error {
+	size := int(unsafe.Sizeof(*v))
+	if len(data) != size && len(data) != xdpFlowValueV6Size {
+		return fmt.Errorf("IPv6 flow entry has %d bytes, want %d or %d", len(data), size, xdpFlowValueV6Size)
+	}
+	*v = tcFlowValueV6{}
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(v)), size), data)
+	return nil
+}
+
+// tc returns the entry with an empty flow cache record.
+func (v xdpFlowValueV6) tc() tcFlowValueV6 {
+	var out tcFlowValueV6
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(&out)), xdpFlowValueV6Size), unsafe.Slice((*byte)(unsafe.Pointer(&v)), xdpFlowValueV6Size))
+	return out
 }
 
 type tcNATPortKeyV6 struct {

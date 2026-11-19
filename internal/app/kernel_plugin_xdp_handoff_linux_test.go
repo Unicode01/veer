@@ -285,7 +285,7 @@ func TestKernelXDPPluginPipelineHotRestartHandsOffInPlace(t *testing.T) {
 	}
 	plugin := kernelXDPPluginTestPlugin(t, pluginDir, objectPath, targetName)
 	enabled := true
-	cfg := &Config{PluginsEnabledSetting: &enabled, PluginsDataplaneSetting: &enabled, Experimental: map[string]bool{experimentalFeatureXDPGeneric: true}}
+	cfg := &Config{PluginsEnabledSetting: &enabled, PluginsDataplaneSetting: &enabled}
 	runtime := newKernelXDPPluginPipelineRuntime(cfg)
 	t.Cleanup(func() { _ = runtime.Close() })
 	snapshot := runtime.Reconcile(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
@@ -311,7 +311,7 @@ func TestKernelXDPPluginHandoffHelper(t *testing.T) {
 	}
 	plugin := kernelXDPPluginTestPlugin(t, os.Getenv("VEER_XDP_PLUGIN_TEST_ROOT"), os.Getenv("VEER_XDP_PLUGIN_TEST_OBJECT"), os.Getenv("VEER_XDP_PLUGIN_TEST_INTERFACE"))
 	enabled := true
-	cfg := &Config{PluginsEnabledSetting: &enabled, PluginsDataplaneSetting: &enabled, Experimental: map[string]bool{experimentalFeatureXDPGeneric: true}}
+	cfg := &Config{PluginsEnabledSetting: &enabled, PluginsDataplaneSetting: &enabled}
 	runtime := newKernelXDPPluginPipelineRuntime(cfg)
 	snapshot := runtime.Reconcile(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
 	if state := snapshot.Plugins[plugin.ID]; state.Error != "" || !state.Attached {

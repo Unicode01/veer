@@ -65,6 +65,24 @@ static __always_inline int delete_nat_port_v6_session_in_bank(__u8 bank, const s
 	return delete_nat_port_v6_in_bank(bank, key);
 }
 
+static __always_inline int delete_nat_peer_v4_session_in_bank(__u8 bank, const struct nat_peer_key_v4 *key, __u64 session_id)
+{
+	struct nat_peer_value *current = lookup_nat_peer_v4_in_bank(bank, key);
+
+	if (!current || current->session_id != session_id)
+		return -1;
+	return delete_nat_peer_v4_in_bank(bank, key);
+}
+
+static __always_inline int delete_nat_peer_v6_session_in_bank(__u8 bank, const struct nat_peer_key_v6 *key, __u64 session_id)
+{
+	struct nat_peer_value *current = lookup_nat_peer_v6_in_bank(bank, key);
+
+	if (!current || current->session_id != session_id)
+		return -1;
+	return delete_nat_peer_v6_in_bank(bank, key);
+}
+
 static __always_inline __u16 csum_fold_helper(__u32 csum)
 {
 	csum = (csum & 0xffff) + (csum >> 16);
@@ -502,6 +520,180 @@ static __always_inline void drop_kernel_nat_occupancy(void)
 	if (occupancy->nat_entries <= 0)
 		return;
 	__sync_fetch_and_add(&occupancy->nat_entries, -1);
+}
+
+/*
+ * Both dataplanes keep their active flow and NAT maps in bank 0 and the
+ * banks a migration drains in bank 1. Each defines
+ * FORWARD_NAT_OLD_BANK_ENABLED_V4/V6() to tell whether bank 1 is in use.
+ */
+#define FORWARD_NAT_BANK_ACTIVE 0
+#define FORWARD_NAT_BANK_OLD 1
+
+/* A NAT flow's reply key names its whole mapping: the peer, and the NAT port it reaches. */
+static __always_inline void build_nat_peer_key_from_reply(const struct flow_key_v4 *reply_key, struct nat_peer_key_v4 *key)
+{
+	key->port.ifindex = reply_key->ifindex;
+	key->port.nat_addr = reply_key->dst_addr;
+	key->port.nat_port = reply_key->dst_port;
+	key->port.proto = reply_key->proto;
+	key->port.pad = 0;
+	key->peer_addr = reply_key->src_addr;
+	key->peer_port = reply_key->src_port;
+	key->pad[0] = 0;
+	key->pad[1] = 0;
+}
+
+static __always_inline void build_nat_peer_key_from_reply_v6(const struct flow_key_v6 *reply_key, struct nat_peer_key_v6 *key)
+{
+	key->port.ifindex = reply_key->ifindex;
+	copy_ipv6_addr(key->port.nat_addr, reply_key->dst_addr);
+	key->port.nat_port = reply_key->dst_port;
+	key->port.proto = reply_key->proto;
+	key->port.pad = 0;
+	copy_ipv6_addr(key->peer_addr, reply_key->src_addr);
+	key->peer_port = reply_key->src_port;
+	key->pad[0] = 0;
+	key->pad[1] = 0;
+}
+
+/*
+ * One candidate port of a shared reservation, for a symmetric egress NAT
+ * flow or a full NAT port forward; peer_key names the mapping. The port must
+ * be free or shared: an exclusive port belongs to a full-cone mapping or a
+ * flow opened before ports were shared, and a draining one is being
+ * reclaimed. A port the old bank shares serves new mappings too, unless the
+ * old bank's flows already hold this one; old_bank tells whether that bank
+ * is in use. Inserting the mapping with BPF_NOEXIST then claims the peer.
+ *
+ * A full-cone mapping or user space's reclaim may change the class in
+ * between; both go through the class's hash bucket lock, so reading the
+ * class once more after the insert sees them, and the mapping is given back
+ * unless the port is still shared. Only these BPF_NOEXIST inserts order
+ * mappings against each other: the objects are built for BPF v1, which 5.10
+ * requires, and has no compare-and-swap.
+ */
+static __always_inline int try_reserve_nat_peer(__u32 candidate, struct nat_peer_key_v4 *peer_key, const struct nat_peer_value *peer_value, const struct nat_port_value_v4 *shared, int old_bank)
+{
+	struct nat_port_value_v4 *port_class;
+
+	peer_key->port.nat_port = (__u16)candidate;
+	port_class = lookup_nat_port_v4_in_bank(FORWARD_NAT_BANK_ACTIVE, &peer_key->port);
+	if (!port_class) {
+		if (old_bank) {
+			port_class = lookup_nat_port_v4_in_bank(FORWARD_NAT_BANK_OLD, &peer_key->port);
+			if (port_class && port_class->mode != FORWARD_NAT_PORT_SHARED)
+				return -1;
+		}
+		if (bpf_map_update_elem(&nat_ports_v4, &peer_key->port, shared, BPF_NOEXIST) < 0) {
+			/* Another mapping inserted the class first; it may be shared. */
+			port_class = lookup_nat_port_v4_in_bank(FORWARD_NAT_BANK_ACTIVE, &peer_key->port);
+			if (!port_class || port_class->mode != FORWARD_NAT_PORT_SHARED)
+				return -1;
+		}
+	} else if (port_class->mode != FORWARD_NAT_PORT_SHARED) {
+		return -1;
+	}
+	if (old_bank && lookup_nat_peer_v4_in_bank(FORWARD_NAT_BANK_OLD, peer_key))
+		return -1;
+	if (bpf_map_update_elem(&nat_peers_v4, peer_key, peer_value, BPF_NOEXIST) < 0)
+		return -1;
+	port_class = lookup_nat_port_v4_in_bank(FORWARD_NAT_BANK_ACTIVE, &peer_key->port);
+	if (!port_class || port_class->mode != FORWARD_NAT_PORT_SHARED) {
+		/* The entry is this flow's: no other mapping could insert the same key. */
+		bpf_map_delete_elem(&nat_peers_v4, peer_key);
+		return -1;
+	}
+	return 0;
+}
+
+static __always_inline int try_reserve_nat_peer_v6(__u32 candidate, struct nat_peer_key_v6 *peer_key, const struct nat_peer_value *peer_value, const struct nat_port_value_v6 *shared, int old_bank)
+{
+	struct nat_port_value_v6 *port_class;
+
+	peer_key->port.nat_port = (__u16)candidate;
+	port_class = lookup_nat_port_v6_in_bank(FORWARD_NAT_BANK_ACTIVE, &peer_key->port);
+	if (!port_class) {
+		if (old_bank) {
+			port_class = lookup_nat_port_v6_in_bank(FORWARD_NAT_BANK_OLD, &peer_key->port);
+			if (port_class && port_class->mode != FORWARD_NAT_PORT_SHARED)
+				return -1;
+		}
+		if (bpf_map_update_elem(&nat_ports_v6, &peer_key->port, shared, BPF_NOEXIST) < 0) {
+			port_class = lookup_nat_port_v6_in_bank(FORWARD_NAT_BANK_ACTIVE, &peer_key->port);
+			if (!port_class || port_class->mode != FORWARD_NAT_PORT_SHARED)
+				return -1;
+		}
+	} else if (port_class->mode != FORWARD_NAT_PORT_SHARED) {
+		return -1;
+	}
+	if (old_bank && lookup_nat_peer_v6_in_bank(FORWARD_NAT_BANK_OLD, peer_key))
+		return -1;
+	if (bpf_map_update_elem(&nat_peers_v6, peer_key, peer_value, BPF_NOEXIST) < 0)
+		return -1;
+	port_class = lookup_nat_port_v6_in_bank(FORWARD_NAT_BANK_ACTIVE, &peer_key->port);
+	if (!port_class || port_class->mode != FORWARD_NAT_PORT_SHARED) {
+		bpf_map_delete_elem(&nat_peers_v6, peer_key);
+		return -1;
+	}
+	return 0;
+}
+
+/*
+ * Re-asserts the mapping of an existing flow on a shared port, which user
+ * space may have pruned or a hot restart left behind: its peer entry, and
+ * the port's shared class if user space reclaimed it in the meantime. A
+ * class that exists, exclusive or draining, stays as it is.
+ */
+static __always_inline void ensure_nat_peer_owner_v4(__u8 bank, const struct nat_peer_key_v4 *key, __u32 rule_id, __u64 session_id)
+{
+	struct nat_peer_value peer_value = {
+		.rule_id = rule_id,
+		.session_id = session_id,
+	};
+	/* A shared class belongs to no session, so no flow's release removes it. */
+	struct nat_port_value_v4 shared = {
+		.rule_id = rule_id,
+		.mode = FORWARD_NAT_PORT_SHARED,
+	};
+
+	if (update_nat_peer_v4_in_bank(bank, key, &peer_value, BPF_NOEXIST) == 0)
+		bump_kernel_nat_occupancy();
+	update_nat_port_v4_in_bank(bank, &key->port, &shared, BPF_NOEXIST);
+}
+
+static __always_inline void ensure_nat_peer_owner_v6(__u8 bank, const struct nat_peer_key_v6 *key, __u32 rule_id, __u64 session_id)
+{
+	struct nat_peer_value peer_value = {
+		.rule_id = rule_id,
+		.session_id = session_id,
+	};
+	struct nat_port_value_v6 shared = {
+		.rule_id = rule_id,
+		.mode = FORWARD_NAT_PORT_SHARED,
+	};
+
+	if (update_nat_peer_v6_in_bank(bank, key, &peer_value, BPF_NOEXIST) == 0)
+		bump_kernel_nat_occupancy();
+	update_nat_port_v6_in_bank(bank, &key->port, &shared, BPF_NOEXIST);
+}
+
+/*
+ * Releases the mapping of a flow on a shared port, which reply_key names.
+ * The port's class stays until user space reclaims it.
+ */
+static __always_inline void release_nat_peer_v4(__u8 bank, const struct flow_key_v4 *reply_key, __u64 session_id, struct nat_peer_key_v4 *key)
+{
+	build_nat_peer_key_from_reply(reply_key, key);
+	if (delete_nat_peer_v4_session_in_bank(bank, key, session_id) == 0)
+		drop_kernel_nat_occupancy();
+}
+
+static __always_inline void release_nat_peer_v6(__u8 bank, const struct flow_key_v6 *reply_key, __u64 session_id, struct nat_peer_key_v6 *key)
+{
+	build_nat_peer_key_from_reply_v6(reply_key, key);
+	if (delete_nat_peer_v6_session_in_bank(bank, key, session_id) == 0)
+		drop_kernel_nat_occupancy();
 }
 
 static __always_inline void init_fullnat_reply_value(struct flow_value_v4 *reply_value, const struct flow_value_v4 *front_value, __u64 now)

@@ -154,9 +154,11 @@ func (route sharedProxyRoute) httpDialContext(clientIP string) func(context.Cont
 			if ip == nil {
 				return nil, fmt.Errorf("transparent HTTP requires an IPv4 client")
 			}
-			dialer.LocalAddr = &net.TCPAddr{IP: ip}
-			dialer.Control = controlTransparent(ip, "")
-			network = "tcp4"
+			transparentNetwork, err := configureTransparentTCPDialer(&dialer, ip, route.backend, "")
+			if err != nil {
+				return nil, err
+			}
+			network = transparentNetwork
 		} else if err := configureOutboundTCPDialer(&dialer, "", route.sourceIP); err != nil {
 			return nil, err
 		}

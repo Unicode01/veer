@@ -33,6 +33,9 @@ func (pm *ProcessManager) beginDataplaneReconcile() uint64 {
 		return 0
 	}
 	pm.mu.Lock()
+	if pm.desiredGeneration <= pm.appliedGeneration {
+		pm.reconcilePendingSince = time.Now()
+	}
 	pm.desiredGeneration++
 	generation := pm.desiredGeneration
 	pm.mu.Unlock()
@@ -117,6 +120,7 @@ func (pm *ProcessManager) refreshDataplaneAppliedLocked(now time.Time) {
 		return
 	}
 	pm.appliedGeneration = generation
+	pm.reconcilePendingSince = time.Time{}
 	pm.reconcileLastError = ""
 	pm.reconcileRetryCount = 0
 	pm.reconcileLastAppliedAt = now

@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -15,6 +16,7 @@ var pluginRuntimeFeatures = []string{
 	"control.goja.v1",
 	"control.modules.v1",
 	"control.action_schema.v1",
+	"control.attachment_status.v1",
 	"control.blobs.v1",
 	"control.cross_plugin_events.v1",
 	"control.durable_events.v1",
@@ -57,10 +59,12 @@ var pluginRuntimeFeatures = []string{
 	"dataplane.hook_order.v1",
 	"dataplane.hook_bindings.v1",
 	"dataplane.xdp_pipeline.v1",
+	"dataplane.xdp_tc_fallback.v1",
 	"dataplane.netfilter_pipeline.v1",
 	"dataplane.netfilter_skb_dynptr.v1",
 	"ebpf.bounded_reads.v1",
 	"ebpf.map_transactions.v1",
+	"ebpf.monotonic_clock.v1",
 	"ebpf.ring_push.v1",
 	"ebpf.private_maps",
 	"ebpf.map_state.v1",
@@ -320,7 +324,7 @@ func checkPluginCompatibility(plugin LoadedPlugin, env pluginHostEnvironment) er
 		if strings.TrimSpace(env.KernelRelease) == "" {
 			return fmt.Errorf("requires kernel %s, host kernel release is unavailable", compatibility.Kernel)
 		}
-		if !pluginVersionSatisfies(env.KernelRelease, compatibility.Kernel) {
+		if !pluginVersionSatisfies(pluginKernelVersion(env.KernelRelease), compatibility.Kernel) {
 			return fmt.Errorf("requires kernel %s, host is %s", compatibility.Kernel, env.KernelRelease)
 		}
 	}
@@ -334,6 +338,24 @@ func checkPluginCompatibility(plugin LoadedPlugin, env pluginHostEnvironment) er
 		return fmt.Errorf("host is missing required features: %s", strings.Join(missingFeatures, ", "))
 	}
 	return nil
+}
+
+var pluginKernelVersionPattern = regexp.MustCompile(`^(\d+)\.(\d+)(?:\.(\d+))?`)
+
+// pluginKernelVersion reduces a kernel release to the version a constraint
+// compares. Distribution suffixes such as 6.8.0-1070-azure or 7.0.14-8-pve
+// would otherwise read as SemVer pre-releases, which no plain constraint
+// like >=5.10.0 admits.
+func pluginKernelVersion(release string) string {
+	match := pluginKernelVersionPattern.FindStringSubmatch(strings.TrimSpace(release))
+	if match == nil {
+		return release
+	}
+	patch := match[3]
+	if patch == "" {
+		patch = "0"
+	}
+	return match[1] + "." + match[2] + "." + patch
 }
 
 func pluginVersionSatisfies(version string, constraint string) bool {

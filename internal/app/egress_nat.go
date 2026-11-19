@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -16,6 +17,10 @@ const (
 	egressNATTypeFullCone           = "full_cone"
 	egressNATRedirectModePreparedL2 = "prepared_l2"
 	egressNATFullyOverriddenReason  = "all eligible child interfaces and protocols are covered by more specific egress nat rules"
+	// egressNATWaitingForChildrenReason marks a NAT whose parent has no child
+	// interface to take over yet, such as a managed bridge before its first
+	// guest: nothing to apply, which is an idle state and not a failure.
+	egressNATWaitingForChildrenReason = "waiting for child interfaces: parent_interface has none to take over yet"
 )
 
 const (
@@ -334,6 +339,8 @@ func isEgressNATSingleTargetInterface(info InterfaceInfo) bool {
 	}
 }
 
+var errEgressNATNoChildInterfaces = errors.New("parent_interface has no eligible child interfaces for egress nat takeover")
+
 func resolveEgressNATTargetInterfaces(item EgressNAT, infos []InterfaceInfo) ([]InterfaceInfo, error) {
 	ifaceByName := buildInterfaceInfoMap(infos)
 	item = normalizeEgressNATScope(item, ifaceByName)
@@ -380,7 +387,7 @@ func resolveEgressNATTargetInterfaces(item EgressNAT, infos []InterfaceInfo) ([]
 		return strings.Compare(targets[i].Name, targets[j].Name) < 0
 	})
 	if len(targets) == 0 {
-		return nil, fmt.Errorf("parent_interface has no eligible child interfaces for egress nat takeover")
+		return nil, errEgressNATNoChildInterfaces
 	}
 	return targets, nil
 }
@@ -617,6 +624,15 @@ func buildEgressNATKernelCandidatesWithSnapshot(items []EgressNAT, planner *rule
 		}
 
 		targetInfos, err := resolveEgressNATTargetInterfaces(item, snapshot.Infos)
+		if errors.Is(err, errEgressNATNoChildInterfaces) && item.Enabled {
+			plans[item.ID] = ruleDataplanePlan{
+				PreferredEngine: ruleEngineKernel,
+				EffectiveEngine: ruleEngineKernel,
+				KernelEligible:  true,
+				KernelReason:    egressNATWaitingForChildrenReason,
+			}
+			continue
+		}
 		if err != nil {
 			plans[item.ID] = ruleDataplanePlan{
 				PreferredEngine: ruleEngineKernel,

@@ -91,7 +91,9 @@ func BenchmarkKernelXDPPluginChain(b *testing.B) {
 				b.Fatal(err)
 			}
 			for i := 0; i < count; i++ {
-				if err := pieces.progChain.Put(uint32(kernelXDPPluginBank0Base+i), uint32(continuing.FD())); err != nil {
+				// Hooks live in their own map; the program chain holds the
+				// continue slot the no-op tail-calls.
+				if err := pieces.hooks.Put(uint32(kernelXDPPluginBank0Base+i), uint32(continuing.FD())); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -251,9 +253,6 @@ func TestKernelXDPPluginPipelineChainHotUpdateAndConflict(t *testing.T) {
 	cfg := &Config{
 		PluginsEnabledSetting:   &enabled,
 		PluginsDataplaneSetting: &enabled,
-		Experimental: map[string]bool{
-			experimentalFeatureXDPGeneric: true,
-		},
 	}
 	runtime := newKernelXDPPluginPipelineRuntime(cfg)
 	t.Cleanup(func() { _ = runtime.Close() })
@@ -449,7 +448,7 @@ func TestKernelXDPPluginPipelineRecoversOrphanAfterSIGKILL(t *testing.T) {
 
 	plugin := kernelXDPPluginTestPlugin(t, pluginDir, objectPath, targetName)
 	enabled := true
-	cfg := &Config{PluginsEnabledSetting: &enabled, PluginsDataplaneSetting: &enabled, Experimental: map[string]bool{experimentalFeatureXDPGeneric: true}}
+	cfg := &Config{PluginsEnabledSetting: &enabled, PluginsDataplaneSetting: &enabled}
 	runtime := newKernelXDPPluginPipelineRuntime(cfg)
 	snapshot := runtime.Reconcile(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
 	if state := snapshot.Plugins[plugin.ID]; state.Error != "" || !state.Attached {
@@ -501,7 +500,7 @@ func TestOrderedKernelRuntimeChainsXDPIntoTCPlugin(t *testing.T) {
 
 	plugin := kernelXDPAndTCPluginTestPlugin(t, pluginDir, xdpObject, tcObject, targetName)
 	enabled := true
-	cfg := &Config{PluginsEnabledSetting: &enabled, PluginsDataplaneSetting: &enabled, Experimental: map[string]bool{experimentalFeatureXDPGeneric: true}}
+	cfg := &Config{PluginsEnabledSetting: &enabled, PluginsDataplaneSetting: &enabled}
 	runtime, ok := newOrderedKernelRuleRuntime([]string{kernelEngineXDP, kernelEngineTC}, cfg).(*orderedKernelRuleRuntime)
 	if !ok {
 		t.Fatal("ordered kernel runtime was not created")
@@ -576,7 +575,7 @@ func TestKernelXDPPluginCrashHelper(t *testing.T) {
 	readyPath := os.Getenv("VEER_XDP_PLUGIN_TEST_READY")
 	plugin := kernelXDPPluginTestPlugin(t, root, objectPath, interfaceName)
 	enabled := true
-	cfg := &Config{PluginsEnabledSetting: &enabled, PluginsDataplaneSetting: &enabled, Experimental: map[string]bool{experimentalFeatureXDPGeneric: true}}
+	cfg := &Config{PluginsEnabledSetting: &enabled, PluginsDataplaneSetting: &enabled}
 	runtime := newKernelXDPPluginPipelineRuntime(cfg)
 	snapshot := runtime.Reconcile(PluginCatalog{Plugins: []LoadedPlugin{builtinVeerPlugin(), plugin}})
 	if state := snapshot.Plugins[plugin.ID]; state.Error != "" || !state.Attached {

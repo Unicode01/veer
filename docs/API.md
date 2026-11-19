@@ -405,7 +405,7 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - `ui.page` / `ui.page_title`: 可选的 Web UI 顶部分页 ID 和标题，由 `ui.register({page, page_title})` 注册；前端会自动创建插件页并内嵌加载 `ui.entry`
 - `hooks`: `control.js` 通过 `hooks.attach()` 注册的 dataplane hook。开启外部数据面后，`engine=tc` 的 `stage=forward/reply` 逻辑 Hook，或显式 concrete stage Hook，会被加载到 `tc_prog_chain_v4`。`priority < runtime.core_priority` 进入 core 前链，`priority > runtime.core_priority` 进入 core 后链，等于 core priority 会被拒绝；`pipeline.attach({phase:"after_apply"})` 映射到 `post_apply/post_reply_apply`。插件程序执行后必须 tail-call 到对应 stage 的内置 continue slot，除非它明确返回最终 TC action。`engine=xdp` 只接受显式接口上的 ingress `pre_forward`/pre-core Hook，每个接口最多 14 个、整机最多 32 个，使用独立双 bank Dispatcher 和共享 `xdp_prog_chain`；插件调用 XDP continue slot 后进入下一 Hook，链尾 `XDP_PASS` 继续进入 TC。目标接口已有 XDP 程序时拒绝挂载，不会替换第三方或现有 Veer XDP Core。`engine=netfilter` 使用 `family/hook/phase/namespace` 声明原生 Netfilter placement，宿主自动持有 `bpf_link`；`family=inet` 展开成 IPv4/IPv6 两条 link，接口范围由插件程序和私有 ifindex map 判断，不接受 `interfaces` 或 TC `stage/attach`
 - `hooks[].interfaces`: 可选的真实 Linux 接口名列表。留空或省略时，插件只随已有 forward/egress 规则触发的 `veer` attachment 运行；填写后，即使没有转发规则，TC runtime 也会把 pipeline 挂到这些接口上。无规则模式会禁用内置 forward/reply core，把 pipeline 作为纯插件高速链运行；core 后 Hook 仍可运行，但只能拿到按当前地址族清空的 `tc_plugin_ctx_v4/tc_plugin_ctx_v6`，不会有规则或 flow 匹配上下文。不会自动挂载所有接口；接口不存在会让该插件本轮进入 error。程序排序使用全局 chain，但运行时会按 ifindex 和 attach 方向生成阶段掩码；声明 `interfaces` 的 Hook 只会在对应白名单内执行
-- `runtime.attachments[].priority`: 插件注册 Hook 的排序优先级。TC attachment 的 `stage` 是 `pre_forward/post_lookup/post_apply/pre_reply/post_reply/post_reply_apply` 之一，`chain_slot` 是实际写入 `tc_prog_chain_v4` 的 slot；Netfilter attachment 通过 `family/netfilter_hook/phase/namespace` 和 `filter_handle=bpf_link:priority=...` 描述原生 link
+- `runtime.attachments[].priority`: 插件注册 Hook 的排序优先级。TC attachment 的 `stage` 是 `pre_forward/post_lookup/post_apply/pre_reply/post_reply/post_reply_apply` 之一，`chain_slot` 是实际写入 `tc_prog_chain_v4` 的 slot；Netfilter attachment 通过 `family/netfilter_hook/phase/namespace` 和 `filter_handle=bpf_link:priority=...` 描述原生 link；XDP attachment 的 `xdp_mode` 是该接口上的实际运行方式：Dispatcher 的 `driver` 或 `generic` 模式，或者 `tc`（没有原生 XDP 的接口上运行 Hook 的 `tc_fallback` 程序，排在核心之前）
 - `hooks[].before/hooks[].after`：同一 concrete stage 内的全限定 `plugin_id/hook_id` 拓扑约束。运行时在 reconcile 阶段检测缺失目标、跨 stage 引用和循环，并把最终顺序反映到 `runtime.attachments[].order/chain_slot`；该能力不增加每包热路径开销
 - `hooks[].packet_metadata[]`：可选 TC packet metadata ABI v1 binding。字段为 `slot`（object 本地 `0..15`）、`namespace`（`owner_plugin/name`）、`schema_version`、`max_bytes`（最多 64）和 `access=read|read_write`。只有 namespace owner 可写；所有读写方必须声明相同 schema/长度。宿主最多编排 32 个 namespace，并用双栈 per-CPU generation 阻止跨包陈旧读取。解析后的 binding 会同步到 `runtime.attachments[].packet_metadata`
 - core 后插件如需读取规则匹配上下文，必须在对象里同时声明共享 `tc_plugin_ctx_v4` 和 `tc_plugin_ctx_v6` per-CPU array map；服务会替换为内置稳定 map，并只让插件读取当前包地址族对应的上下文
@@ -814,6 +814,7 @@ TC 连接缓存的字段同样分两层：顶层 `kernel_tc_flow_cache` 是配�
 - map 容量与占用
 - `degraded` / `degraded_reason`：当前 map 容量低于期望容量时的降级状态和原因
 - `flows_map_old_capacity_v4/v6`、`nat_map_old_capacity_v4/v6`：迁移期间仍保留并计入的旧 map bank 容量；非零不代表泄漏
+- `nat_map_entries`、`nat_map_entries_v4/v6`：内核 NAT 映射数，即独占端口（Full Cone 和共享端口之前建立的连接）加共享端口上的映射；`nat_map_peer_entries` 是其中共享端口上的映射数，`nat_map_shared_ports` 是被共享的端口数（含回收中的端口），后者不计入映射数。对称型 Egress NAT 和非透明端口转发按对端共享端口，见 README 的 `kernel_nat_port_min` / `kernel_nat_port_max`
 - attach mode 与 attachment health
 - retry / self-heal / cooldown / backoff
 - netlink recover 与 attachment heal 状态
@@ -891,6 +892,14 @@ TC 连接缓存的字段同样分两层：顶层 `kernel_tc_flow_cache` 是配�
 ```
 
 `plugins.status=error` 表示已启用插件的期望状态尚未完整应用，会触发后台退避重试，并使 `/readyz` 保持 `503`，直到运行态收敛。
+
+首个 generation 应用完成之后，后续 reconcile 进行期间（`dataplane.status=pending`）`/readyz` 仍返回 `200`，因为数据面在此期间继续按已应用的状态转发。例如 guest 启停会触发一次 reconcile，监控和负载均衡不会因此看到短暂的不健康。只有下列情况会返回 `503`：
+
+- reconcile 失败；
+- reconcile 持续 pending 超过 30 秒；
+- 有 worker 出错。
+
+进程启动或热重启后，在第一个 generation 应用完成之前，仍然返回 `503`。
 
 `GET /metrics`
 
@@ -1042,6 +1051,8 @@ curl -fsS -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8080/debug/pprof/g
 - 省略 `engine_preference` 时默认 `auto`
 - 创建后默认 `enabled = true`
 - `transparent = true` 时必须省略 `out_source_ip`
+- `transparent = true` 时 `out_ip` 不能是宿主自己的地址（`127.0.0.0/8` 或宿主网卡上的地址）
+- `out_ip` 是宿主自己的地址时规则由用户态转发，不走内核，`fallback_reason` 说明原因
 - IPv6 规则可创建，但当前透明路径和内核接入条件仍主要按 IPv4 约束理解
 
 ### 2.3 更新规则
@@ -1154,6 +1165,7 @@ curl -fsS -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8080/debug/pprof/g
 - QUIC 路由支持 v1/v2 Initial SNI；Veer 原样转发数据报，不终止 TLS。ECH、连接迁移，以及同一客户端端点复用多条连接时的未知 CID 轮换当前不保证可用
 - `listen_ip` 为空时默认 `0.0.0.0`
 - `transparent = true` 时必须省略 `backend_source_ip`
+- `transparent = true` 时 `backend_ip` 不能是宿主自己的地址（`127.0.0.0/8` 或宿主网卡上的地址）
 - 创建后默认 `enabled = true`
 - IPv6 站点监听和回源可走普通共享代理路径；透明模式仍限 IPv4
 
@@ -1213,6 +1225,7 @@ curl -fsS -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8080/debug/pprof/g
 - `out_start_port = 0` 时自动等于 `start_port`
 - 目标末端 `out_start_port + end_port - start_port` 不得超过 `65535`，历史配置和 worker 收到的范围同样检查
 - `transparent = true` 时必须省略 `out_source_ip`
+- `transparent = true` 时 `out_ip` 不能是宿主自己的地址（`127.0.0.0/8` 或宿主网卡上的地址）
 - 创建后默认 `enabled = true`
 
 用户态 rule/range worker 共用进程级监听预算：Linux 下为 `min(1024, RLIMIT_NOFILE / 8)`（极低限制下至少 1），其他平台为 1024。TCP+UDP 每端口占两个监听名额。超过预算的范围不会启动部分监听，也不会继续分配大批 goroutine；状态会返回明确的预算错误，应缩小范围或使用可用的内核转发。已部分成功的范围只重试失效监听，不重绑健康端口。
@@ -1332,9 +1345,11 @@ curl -fsS -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8080/debug/pprof/g
 - `bridge_mode` 允许：`create`、`existing`
 - 省略 `bridge_mode` 时默认 `create`
 - `ipv6_assignment_mode` 允许：`single_128`、`prefix_64`
+- 客户机接口消失（例如虚拟机销毁）后，Veer 删除自己为它加在 bridge 上的 `/128`（`prefix_64` 时为 `/64`）路由；每次 reconcile（包括 `reload-runtime`）还会清理 bridge 上落在 `ipv6_parent_prefix` 内、长度与分配一致、`proto static` 且没有分配在用的路由，例如热重启期间或旧版本遗留的
 - `bridge_mtu` 仅在 `create` 模式生效，范围为 `0-65535`
 - `existing` 模式下 `bridge_mtu` 和 `bridge_vlan_aware` 会被归零
 - `existing` 模式要求目标 bridge 已存在于宿主机
+- 没有端口的 bridge 在第一个端口加入前没有 MAC（全 0），DHCPv4 在这之前无法监听，状态里会提示；第一个客户机接入后自动恢复，也可以给 bridge 固定一个 MAC（例如 `/etc/network/interfaces` 里的 `hwaddress`）
 - `create` 模式要求 bridge 名称不与非 bridge 接口冲突
 - 创建后默认 `enabled = true`
 
@@ -1518,6 +1533,8 @@ curl -fsS -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8080/debug/pprof/g
 - `dhcpv6_reply_count`
 - `runtime_status`
 - `runtime_detail`
+
+目标接口暂时不存在时（例如 guest 停机或重启时它的 tap 被删除），分配进入 `draining`，`runtime_detail` 说明目标接口已不存在。这时它的路由、proxy NDP、RA 和 DHCPv6 都会撤掉，但不算错误，也不影响就绪状态。同名接口重新出现时（guest 重启后），下一次 reload 会恢复这些配置：接口创建事件会触发这次 reload，每 10 秒一次的漂移检查也会兜底。托管网络的一次 reload 留下问题时，会按 5 秒起、最长 1 分钟的退避自动重试，直到成功。
 
 ### 8.2 新增 IPv6 Assignment
 

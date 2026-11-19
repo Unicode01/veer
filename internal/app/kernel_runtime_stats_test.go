@@ -625,7 +625,7 @@ func TestPruneStaleXDPFlowsMapDeletesInvalidFlow(t *testing.T) {
 		t.Fatalf("flows.Put() error = %v", err)
 	}
 
-	corrections, metrics, err := pruneStaleXDPFlowsMap(nil, flows, nil, &kernelFlowPruneState{}, 1, kernelTCPFlowIdleTimeout)
+	corrections, metrics, err := pruneStaleXDPFlowsMap(nil, flows, kernelNATBankMaps{}, &kernelFlowPruneState{}, 1, kernelTCPFlowIdleTimeout)
 	if err != nil {
 		t.Fatalf("pruneStaleXDPFlowsMap() error = %v", err)
 	}
@@ -705,7 +705,7 @@ func TestDeleteStaleKernelFlowV6DeletesNATReservation(t *testing.T) {
 	}
 
 	corrections := map[uint32]kernelRuleStats{}
-	deleteStaleKernelFlowV6(nil, flows, nat, staleKernelFlowV6{key: replyKey, value: replyValue}, corrections)
+	deleteStaleKernelFlowV6(nil, flows, kernelNATBankMaps{ports: nat}, staleKernelFlowV6{key: replyKey, value: replyValue}, corrections)
 
 	if got := corrections[31]; got.TCPActiveConns != -1 {
 		t.Fatalf("corrections[31] = %+v, want tcp=-1", got)
@@ -1463,7 +1463,7 @@ func TestDeleteStaleKernelFlowPreservesReplacementOwners(t *testing.T) {
 		t.Fatalf("nat.Put(replacement) error = %v", err)
 	}
 
-	deleted := deleteStaleKernelFlow(nil, flows, nat, staleKernelFlow{key: replyKey, value: staleReply}, map[uint32]kernelRuleStats{})
+	deleted := deleteStaleKernelFlow(nil, flows, kernelNATBankMaps{ports: nat}, staleKernelFlow{key: replyKey, value: staleReply}, map[uint32]kernelRuleStats{})
 	if deleted != 1 {
 		t.Fatalf("deleted = %d, want only stale reply", deleted)
 	}
@@ -1488,7 +1488,7 @@ func TestDeleteStaleKernelFlowPreservesReplacementOwners(t *testing.T) {
 	if err := flows.Put(replyKey, replacementReply); err != nil {
 		t.Fatalf("flows.Put(replacement reply) error = %v", err)
 	}
-	deleted = deleteStaleKernelFlow(nil, flows, nat, staleKernelFlow{key: replyKey, value: staleReply}, map[uint32]kernelRuleStats{})
+	deleted = deleteStaleKernelFlow(nil, flows, kernelNATBankMaps{ports: nat}, staleKernelFlow{key: replyKey, value: staleReply}, map[uint32]kernelRuleStats{})
 	if deleted != 0 {
 		t.Fatalf("replacement reply deleted = %d, want 0", deleted)
 	}
@@ -1537,7 +1537,7 @@ func TestDeleteStaleKernelFlowDeletesFullConeFront(t *testing.T) {
 		t.Fatalf("nat.Put() error = %v", err)
 	}
 
-	deleted := deleteStaleKernelFlow(nil, flows, nat, staleKernelFlow{key: replyKey, value: replyValue}, map[uint32]kernelRuleStats{})
+	deleted := deleteStaleKernelFlow(nil, flows, kernelNATBankMaps{ports: nat}, staleKernelFlow{key: replyKey, value: replyValue}, map[uint32]kernelRuleStats{})
 	if deleted != 2 {
 		t.Fatalf("deleted = %d, want reply and full-cone front", deleted)
 	}

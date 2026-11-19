@@ -285,6 +285,109 @@ func TestIPv6AssignmentManagedAddressIntegrationReacquiresAfterForwardRestart(t 
 	}
 }
 
+// TestIPv6AssignmentManagedAddressIntegrationSurvivesTargetRecreation covers a
+// guest restart: its tap goes away and comes back under the same name a few
+// seconds later, inside the suppression window that follows the reload the
+// removal caused. The assignment must come back without a manual reload.
+func TestIPv6AssignmentManagedAddressIntegrationSurvivesTargetRecreation(t *testing.T) {
+	if os.Getenv(ipv6AssignmentIntegrationEnableEnv) != "1" {
+		t.Skipf("set %s=1 to run Linux IPv6 assignment integration test", ipv6AssignmentIntegrationEnableEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+	if _, err := exec.LookPath("ip"); err != nil {
+		t.Skip("ip command is required for Linux network namespace test scaffolding")
+	}
+
+	repoRoot := findRepoRoot(t)
+	requireEmbeddedEBPFObjects(t, repoRoot)
+	baseBinary := buildDataplanePerfBinary(t, repoRoot)
+
+	topology := setupDataplanePerfTopology(t)
+	runtimeDir := makeShortIPv6AssignmentIntegrationDir(t)
+	forwardBinary := filepath.Join(runtimeDir, "forward")
+	copyFile(t, baseBinary, forwardBinary)
+
+	workDir := filepath.Join(runtimeDir, "work-recreate")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("create work dir: %v", err)
+	}
+	webPort := freeTCPPort(t)
+	configPath := filepath.Join(workDir, "config.json")
+	writeDataplanePerfConfig(t, configPath, dataplanePerfMode{
+		Name:     "ipv6-assignment-recreate",
+		Default:  ruleEngineUserspace,
+		Expected: ruleEngineUserspace,
+	}, webPort)
+
+	logPath := filepath.Join(workDir, "forward-ipv6-assignment-recreate.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		t.Fatalf("create forward log file: %v", err)
+	}
+	defer logFile.Close()
+
+	cmd := exec.Command(forwardBinary, "--config", configPath)
+	cmd.Dir = workDir
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start forward: %v", err)
+	}
+	defer stopForwardProcessTree(t, cmd)
+
+	apiBase := fmt.Sprintf("http://127.0.0.1:%d", webPort)
+	waitForDataplanePerfAPI(t, apiBase)
+
+	mustEnsureIPv6AssignmentAddress(t, topology.BackendHostIF, ipv6AssignmentIntegrationParentAddr+"/64")
+	seedIPv6AssignmentIntegrationBackendNeighbors(t, topology)
+	if err := createIPv6AssignmentIntegration(apiBase, topology); err != nil {
+		logForwardLogOnFailure(t, logPath)
+		logIPv6AssignmentIntegrationStateOnFailure(t, topology)
+		t.Fatal(err)
+	}
+	if err := waitForIPv6AssignmentRoute(topology); err != nil {
+		logForwardLogOnFailure(t, logPath)
+		logIPv6AssignmentIntegrationStateOnFailure(t, topology)
+		t.Fatal(err)
+	}
+
+	// The guest stops: its interface pair goes away, which removes the route
+	// and makes the daemon reload.
+	mustRunDataplanePerfCmd(t, "ip", "link", "del", topology.ClientHostIF)
+	time.Sleep(3 * time.Second)
+
+	// It starts again within the suppression window: same names, new ifindex.
+	mustRunDataplanePerfCmd(t, "ip", "link", "add", topology.ClientHostIF, "type", "veth", "peer", "name", topology.ClientNSIF)
+	mustRunDataplanePerfCmd(t, "ip", "link", "set", topology.ClientNSIF, "netns", topology.ClientNS)
+	mustRunDataplanePerfCmd(t, "ip", "addr", "add", dataplanePerfFrontAddr+"/24", "dev", topology.ClientHostIF)
+	mustRunDataplanePerfCmd(t, "ip", "link", "set", topology.ClientHostIF, "up")
+	mustRunDataplanePerfCmd(t, "ip", "netns", "exec", topology.ClientNS, "ip", "addr", "add", dataplanePerfClientAddr+"/24", "dev", topology.ClientNSIF)
+	mustRunDataplanePerfCmd(t, "ip", "netns", "exec", topology.ClientNS, "ip", "link", "set", topology.ClientNSIF, "up")
+	mustRunDataplanePerfCmd(t, "ip", "netns", "exec", topology.ClientNS, "ip", "route", "replace", "default", "via", dataplanePerfFrontAddr, "dev", topology.ClientNSIF)
+
+	if err := waitForIPv6AssignmentRoute(topology); err != nil {
+		logForwardLogOnFailure(t, logPath)
+		logIPv6AssignmentIntegrationStateOnFailure(t, topology)
+		t.Fatalf("after the target was recreated: %v", err)
+	}
+	backendHelper := startIPv6AssignmentIntegrationBackendHelper(t, topology)
+	defer stopIPv6AssignmentIntegrationHelper(t, backendHelper)
+	helper := startIPv6AssignmentIntegrationHelper(t, topology, net.JoinHostPort(ipv6AssignmentIntegrationBackendAddr, fmt.Sprintf("%d", ipv6AssignmentIntegrationBackendPort)))
+	if err := waitForIPv6AssignmentIntegrationHelper(helper, 20*time.Second); err != nil {
+		logForwardLogOnFailure(t, logPath)
+		logIPv6AssignmentIntegrationStateOnFailure(t, topology)
+		t.Fatal(err)
+	}
+	if err := waitForIPv6AssignmentIntegrationHelper(backendHelper, 5*time.Second); err != nil {
+		logForwardLogOnFailure(t, logPath)
+		logIPv6AssignmentIntegrationStateOnFailure(t, topology)
+		t.Fatal(err)
+	}
+}
+
 func TestIPv6AssignmentManagedAddressIntegrationFollowsParentPrefixChange(t *testing.T) {
 	if os.Getenv(ipv6AssignmentIntegrationEnableEnv) != "1" {
 		t.Skipf("set %s=1 to run Linux IPv6 assignment integration test", ipv6AssignmentIntegrationEnableEnv)

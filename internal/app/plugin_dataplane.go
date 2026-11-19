@@ -670,6 +670,9 @@ func (pm *ProcessManager) ApplyPluginResourceReconcileFromControl(plugin LoadedP
 	refreshCorePlans := pluginCatalogMayAffectActiveCorePlans(catalog, catalogCfg) || pluginResourceAffectsActiveCorePlans(plugin, resource, catalogCfg)
 	catalog = applyPluginHookBindingsFromDB(catalog, pm.db)
 	snapshot, redistributed := pm.reconcilePluginDataplaneForCatalog(catalog)
+	if ringer, ok := pm.pluginControlRuntime.(pluginControlRingReconciler); ok {
+		ringer.ReconcilePluginRingSubscriptionsAfterDataplane(snapshot)
+	}
 	for _, plugin := range catalog.Plugins {
 		state, ok := snapshot.stateFor(plugin.ID)
 		if !ok || state.Error == "" {

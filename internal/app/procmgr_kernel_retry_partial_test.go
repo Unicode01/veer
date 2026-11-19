@@ -1268,8 +1268,8 @@ func TestRetryNetlinkTriggeredKernelFallbackOwnersDefersManagedAutoEgressNATRemo
 	if _, ok := pm.kernelFlowOwners[uint32(oldEgressRule.ID)]; ok {
 		t.Fatalf("kernelFlowOwners still contains removed egress rule id %d after stable recheck: %#v", oldEgressRule.ID, pm.kernelFlowOwners)
 	}
-	if got := pm.egressNATPlans[natID]; got.EffectiveEngine != ruleEngineUserspace || !strings.Contains(got.FallbackReason, "no eligible child interfaces") {
-		t.Fatalf("egress nat plan after stable recheck = %+v, want no-child fallback", got)
+	if got := pm.egressNATPlans[natID]; !egressNATPlanIsWaitingForChildren(got) {
+		t.Fatalf("egress nat plan after stable recheck = %+v, want it waiting for child interfaces", got)
 	}
 }
 

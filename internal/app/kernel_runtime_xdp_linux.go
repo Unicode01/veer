@@ -196,6 +196,7 @@ type xdpKernelRuleRuntime struct {
 	memlockErr         error
 	coll               *ebpf.Collection
 	attachments        []xdpAttachment
+	bridgeNeighbors    bridgeNeighborKeepalive
 	preparedRules      []preparedXDPKernelRule
 	programID          uint32
 	prepareOptions     xdpPrepareOptions
@@ -204,6 +205,7 @@ type xdpKernelRuleRuntime struct {
 	lastReconcileMode  string
 	degradedSource     string
 	stateLog           kernelStateLogger
+	vanishedLinkLog    kernelStateLogger
 	pressureState      kernelRuntimePressureState
 	tcpIdleTimeout     kernelTCPIdleTimeoutState
 	observability      kernelRuntimeObservabilityState
@@ -219,7 +221,7 @@ type xdpKernelRuleRuntime struct {
 
 func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 	opts := xdpPrepareOptions{}
-	allowGeneric := false
+	allowGeneric := cfg.XDPGenericEnabled()
 	rulesLimit := 0
 	flowsLimit := 0
 	natLimit := 0
@@ -227,9 +229,6 @@ func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 	tcpIdleTimeoutSeconds := int64(0)
 	if cfg != nil && cfg.ExperimentalFeatureEnabled(experimentalFeatureBridgeXDP) {
 		opts.enableBridge = true
-	}
-	if cfg != nil && cfg.ExperimentalFeatureEnabled(experimentalFeatureXDPGeneric) {
-		allowGeneric = true
 	}
 	if cfg != nil && cfg.ExperimentalFeatureEnabled(experimentalFeatureKernelTraffic) {
 		opts.enableTrafficStats = true
@@ -287,10 +286,8 @@ func (rt *xdpKernelRuleRuntime) ensureAvailabilityInitialized() {
 		if rt.prepareOptions.enableBridge {
 			rt.availableReason += "; bridge_xdp experimental path enabled"
 		}
-		if rt.allowGenericAttach {
-			rt.availableReason += "; xdp_generic experimental path enabled"
-		} else {
-			rt.availableReason += fmt.Sprintf("; generic/mixed attachment requires experimental feature %q", experimentalFeatureXDPGeneric)
+		if !rt.allowGenericAttach {
+			rt.availableReason += "; generic/mixed attachment disabled by xdp_generic=false"
 		}
 		if rt.prepareOptions.enableTrafficStats {
 			rt.availableReason += "; kernel_traffic_stats experimental path enabled"
@@ -360,7 +357,10 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		return results, nil
 	}
 
-	requiredIfIndices := collectXDPInterfaces(prepared)
+	// Rules held through interface inventory jitter can name an interface
+	// that is gone; nothing is attached there (see withoutGoneLinks).
+	requiredIfIndices, vanishedIfIndices := withoutGoneXDPLinks(collectXDPInterfaces(prepared), kernelLinkIndexGone)
+	rt.logVanishedXDPLinksLocked(vanishedIfIndices)
 	samePrepared := rt.samePreparedRulesLocked(prepared, requiredIfIndices)
 	desiredLocal, localIPv4Err := buildKernelEgressNATLocalInventory(rules)
 	desiredLocalMACs := buildXDPKernelLocalMACMap(prepared)
@@ -437,7 +437,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 		)
 	}
 	currentCounts.natEntries = currentNATEntries
-	useNATMaps := preparedXDPKernelRulesNeedFullConeNATMap(prepared) || currentNATEntries > 0
+	useNATMaps := preparedXDPKernelRulesNeedNATMap(prepared) || currentNATEntries > 0
 	desiredCapacities, err := applyKernelMapCapacitiesWithOccupancy(
 		spec,
 		rt.rulesMapLimit,
@@ -544,6 +544,10 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 							ensureFlowMapReplacement()
 							flowMapReplacement[kernelTCNatPortsOldMapNameV4] = natOldMap
 						}
+						if peersOld := rt.coll.Maps[kernelTCNatPeersOldMapNameV4]; peersOld != nil {
+							ensureFlowMapReplacement()
+							flowMapReplacement[kernelTCNatPeersOldMapNameV4] = peersOld
+						}
 					}
 				}
 				if existingMigrationFlags&xdpFlowMigrationFlagV6Old != 0 {
@@ -555,6 +559,10 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 						if natOldMapV6 := rt.coll.Maps[kernelTCNatPortsOldMapNameV6]; natOldMapV6 != nil {
 							ensureFlowMapReplacement()
 							flowMapReplacement[kernelTCNatPortsOldMapNameV6] = natOldMapV6
+						}
+						if peersOldV6 := rt.coll.Maps[kernelTCNatPeersOldMapNameV6]; peersOldV6 != nil {
+							ensureFlowMapReplacement()
+							flowMapReplacement[kernelTCNatPeersOldMapNameV6] = peersOldV6
 						}
 					}
 				}
@@ -571,6 +579,12 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 						flowMapReplacement[kernelNatPortsMapNameV6] = natMapV6
 						if natCapacity := int(natMapV6.MaxEntries()); natCapacity < actualCapacities.NATPorts {
 							actualCapacities.NATPorts = natCapacity
+						}
+					}
+					for _, name := range []string{kernelNatPeersMapNameV4, kernelNatPeersMapNameV6} {
+						if peers := rt.coll.Maps[name]; peers != nil {
+							ensureFlowMapReplacement()
+							flowMapReplacement[name] = peers
 						}
 					}
 				}
@@ -608,6 +622,14 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 					if natMapV6 := rt.coll.Maps[kernelNatPortsMapNameV6]; natMapV6 != nil {
 						ensureFlowMapReplacement()
 						flowMapReplacement[kernelTCNatPortsOldMapNameV6] = natMapV6
+					}
+					if peers := rt.coll.Maps[kernelNatPeersMapNameV4]; peers != nil {
+						ensureFlowMapReplacement()
+						flowMapReplacement[kernelTCNatPeersOldMapNameV4] = peers
+					}
+					if peersV6 := rt.coll.Maps[kernelNatPeersMapNameV6]; peersV6 != nil {
+						ensureFlowMapReplacement()
+						flowMapReplacement[kernelTCNatPeersOldMapNameV6] = peersV6
 					}
 				}
 			}
@@ -670,11 +692,10 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 			oldStatsMap = state.oldStatsMap
 			actualCapacities = state.actualCapacities
 			flowMigrationFlags = state.xdpFlowMigrationFlags
-			if !useNATMaps && (state.replacements[kernelNatPortsMapName] != nil ||
-				state.replacements[kernelNatPortsMapNameV6] != nil ||
-				state.replacements[kernelTCNatPortsOldMapNameV4] != nil ||
-				state.replacements[kernelTCNatPortsOldMapNameV6] != nil) {
-				useNATMaps = true
+			for _, name := range kernelNATMapNames {
+				if state.replacements[name] != nil {
+					useNATMaps = true
+				}
 			}
 			if actualCapacities.Flows < desiredCapacities.Flows {
 				log.Printf(
@@ -887,6 +908,12 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 	attachStartedAt := time.Now()
 	for _, ifindex := range requiredIfIndices {
 		att, err := rt.attachProgramLocked(ifindex, pieces.prog, oldProg, oldAttachments, xdpPreparedRulesNeedGenericOffloadGuard(prepared))
+		if err != nil && kernelLinkIndexGone(ifindex) {
+			// The interface went away after the targets were checked.
+			vanishedIfIndices = append(vanishedIfIndices, ifindex)
+			rt.logVanishedXDPLinksLocked(vanishedIfIndices)
+			continue
+		}
 		if err != nil {
 			rt.discardAttachmentsLocked(newAttachments)
 			coll.Close()
@@ -905,7 +932,7 @@ func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kerne
 	reconcileMetrics.AttachDuration = time.Since(attachStartedAt)
 	reconcileMetrics.Attaches = len(newAttachments)
 
-	if len(newAttachments) == 0 {
+	if len(newAttachments) == 0 && len(vanishedIfIndices) == 0 {
 		coll.Close()
 		msg := "xdp dataplane did not attach to any interface"
 		if rt.applyRetainedRulesOnFailureLocked(results, rules, msg) {
@@ -1018,8 +1045,20 @@ func (rt *xdpKernelRuleRuntime) SnapshotStats() (kernelRuleStatsSnapshot, error)
 	return snapshotKernelStatsFromMap(statsMap, corrections)
 }
 
+// attachedLinkIndexes lists the interfaces the program is attached to.
+func (rt *xdpKernelRuleRuntime) attachedLinkIndexes() []int {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	out := make([]int, 0, len(rt.attachments))
+	for _, att := range rt.attachments {
+		out = append(out, att.ifindex)
+	}
+	return out
+}
+
 func (rt *xdpKernelRuleRuntime) Maintain() error {
 	startedAt := time.Now()
+	rt.bridgeNeighbors.maybeRun(startedAt, rt.attachedLinkIndexes)
 	rt.mu.Lock()
 	rt.expireDeferredFlowRulesLocked(startedAt)
 	pendingFlowPurgeDeleted, pendingFlowPurgeErr := rt.retryPendingFlowPurgesLocked()
@@ -1080,7 +1119,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 	driftDetected := false
 
 	if refs.flowsV4 != nil {
-		v4Corrections, v4Metrics, err := pruneStaleXDPFlowsMap(refs.rulesV4, refs.flowsV4, refs.natV4, &flowPruneState, v4ActiveBudget, tcpIdleTimeoutNS)
+		v4Corrections, v4Metrics, err := pruneStaleXDPFlowsMap(refs.rulesV4, refs.flowsV4, refs.natBankV4(), &flowPruneState, v4ActiveBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v4Metrics.Budget
 		pruneMetrics.Scanned += v4Metrics.Scanned
 		pruneMetrics.Deleted += v4Metrics.Deleted
@@ -1091,7 +1130,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 		mergeKernelStatsCorrections(corrections, v4Corrections)
 	}
 	if refs.flowsOldV4 != nil {
-		v4Corrections, v4Metrics, err := pruneStaleXDPFlowsMap(refs.rulesV4, refs.flowsOldV4, refs.natOldV4, &oldFlowPruneState, v4OldBudget, tcpIdleTimeoutNS)
+		v4Corrections, v4Metrics, err := pruneStaleXDPFlowsMap(refs.rulesV4, refs.flowsOldV4, refs.natOldBankV4(), &oldFlowPruneState, v4OldBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v4Metrics.Budget
 		pruneMetrics.Scanned += v4Metrics.Scanned
 		pruneMetrics.Deleted += v4Metrics.Deleted
@@ -1102,7 +1141,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 		mergeKernelStatsCorrections(corrections, v4Corrections)
 	}
 	if refs.flowsV6 != nil {
-		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, refs.natV6, &flowPruneState, v6ActiveBudget, tcpIdleTimeoutNS)
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, refs.natBankV6(), &flowPruneState, v6ActiveBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v6Metrics.Budget
 		pruneMetrics.Scanned += v6Metrics.Scanned
 		pruneMetrics.Deleted += v6Metrics.Deleted
@@ -1113,7 +1152,7 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 		mergeKernelStatsCorrections(corrections, v6Corrections)
 	}
 	if refs.flowsOldV6 != nil {
-		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsOldV6, refs.natOldV6, &oldFlowPruneState, v6OldBudget, tcpIdleTimeoutNS)
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsOldV6, refs.natOldBankV6(), &oldFlowPruneState, v6OldBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v6Metrics.Budget
 		pruneMetrics.Scanned += v6Metrics.Scanned
 		pruneMetrics.Deleted += v6Metrics.Deleted
@@ -1398,6 +1437,22 @@ func (rt *xdpKernelRuleRuntime) retainMatchingRulesLocked(rules []Rule) (map[int
 	return retained, nil
 }
 
+// yieldToXDPPluginHooks detaches the engine from every interface. Draining
+// (Reconcile(nil)) keeps the program attached so existing connections keep
+// their XDP flows, but an XDP plugin dispatcher cannot attach where another
+// XDP program sits: when plugin hooks pin the core to TC, the engine must let
+// go of the interfaces instead. Its connections continue on the TC engine
+// where it can serve them.
+func (rt *xdpKernelRuleRuntime) yieldToXDPPluginHooks() {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.coll == nil && len(rt.attachments) == 0 {
+		return
+	}
+	rt.stateLog.Logf("xdp dataplane: detaching so XDP plugin hooks can attach; the core runs on TC")
+	rt.cleanupLocked()
+}
+
 func (rt *xdpKernelRuleRuntime) clearActiveRulesLockedPreserveFlows() error {
 	if rt.coll == nil || rt.coll.Maps == nil {
 		if !kernelHotRestartStateExists(kernelEngineXDP) {
@@ -1565,7 +1620,7 @@ func (rt *xdpKernelRuleRuntime) attachProgramLocked(ifindex int, prog *ebpf.Prog
 		}
 	}
 	if !rt.allowGenericAttach {
-		errs = append(errs, "generic skipped: "+xdpGenericAttachmentExperimentalReason())
+		errs = append(errs, "generic skipped: "+xdpGenericAttachmentDisabledReason())
 	}
 	return xdpAttachment{}, errors.New(strings.Join(errs, "; "))
 }
@@ -1722,7 +1777,14 @@ func validateXDPCollectionSpec(spec *ebpf.CollectionSpec) error {
 		kernelTCNatPortsOldMapNameV4,
 		kernelXDPFlowsOldMapNameV6,
 		kernelTCNatPortsOldMapNameV6,
+		kernelNatPeersMapNameV4,
+		kernelNatPeersMapNameV6,
+		kernelTCNatPeersOldMapNameV4,
+		kernelTCNatPeersOldMapNameV6,
 	} {
+		if spec.Maps[name] == nil {
+			return fmt.Errorf("embedded xdp eBPF object is missing map %q", name)
+		}
 		if spec.Maps[name].Type != ebpf.Hash {
 			return fmt.Errorf(
 				"embedded xdp eBPF object map %q has type %v, want %v",
@@ -1914,17 +1976,18 @@ func xdpPreparedRuleFamily(item preparedXDPKernelRule) string {
 	return ipFamilyIPv4
 }
 
-func preparedXDPKernelRulesNeedFullConeNATMap(prepared []preparedXDPKernelRule) bool {
+// preparedXDPKernelRulesNeedNATMap reports whether any rule reserves NAT
+// ports: every full NAT port forward and egress NAT rule, IPv4 or IPv6. Full
+// cone rules hold their ports exclusively, the others share them through the
+// NAT peer maps.
+func preparedXDPKernelRulesNeedNATMap(prepared []preparedXDPKernelRule) bool {
 	for _, item := range prepared {
-		switch xdpPreparedRuleFamily(item) {
-		case ipFamilyIPv6:
-			if item.valueV6.Flags&xdpRuleFlagFullNAT != 0 {
-				return true
-			}
-		default:
-			if item.valueV4.Flags&xdpRuleFlagFullCone != 0 {
-				return true
-			}
+		flags := item.valueV4.Flags
+		if xdpPreparedRuleFamily(item) == ipFamilyIPv6 {
+			flags = item.valueV6.Flags
+		}
+		if flags&(xdpRuleFlagFullNAT|xdpRuleFlagFullCone) != 0 {
+			return true
 		}
 	}
 	return false
@@ -1965,7 +2028,7 @@ func buildXDPKernelLocalMACMap(prepared []preparedXDPKernelRule) map[uint32]kern
 
 func xdpRuntimeNATStateForDecision(prepared []preparedXDPKernelRule, refs kernelRuntimeMapRefs, counts kernelRuntimeMapCountSnapshot, context string) (kernelRuntimeMapCountSnapshot, bool) {
 	counts.natEntries = xdpExactNATEntriesForPreservation(refs, counts.natEntries, context)
-	return counts, preparedXDPKernelRulesNeedFullConeNATMap(prepared) || counts.natEntries > 0
+	return counts, preparedXDPKernelRulesNeedNATMap(prepared) || counts.natEntries > 0
 }
 
 func xdpExactNATEntriesForPreservation(refs kernelRuntimeMapRefs, fallback int, context string) int {
@@ -2068,6 +2131,32 @@ func deletePreparedXDPKernelRuleMapEntry(pieces xdpCollectionPieces, item prepar
 	}
 }
 
+// withoutGoneXDPLinks splits ifindexes into the interfaces that still exist
+// and those that are gone.
+func withoutGoneXDPLinks(ifindexes []int, gone func(int) bool) (kept []int, vanished []int) {
+	kept = make([]int, 0, len(ifindexes))
+	for _, ifindex := range ifindexes {
+		if gone(ifindex) {
+			vanished = append(vanished, ifindex)
+			continue
+		}
+		kept = append(kept, ifindex)
+	}
+	return kept, vanished
+}
+
+// logVanishedXDPLinksLocked logs the interfaces whose attachment is skipped
+// because they are gone, once per change of that set.
+func (rt *xdpKernelRuleRuntime) logVanishedXDPLinksLocked(vanished []int) {
+	if len(vanished) == 0 {
+		rt.vanishedLinkLog.Reset()
+		return
+	}
+	sorted := append([]int(nil), vanished...)
+	sort.Ints(sorted)
+	rt.vanishedLinkLog.Logf("xdp dataplane reconcile: skipping xdp attachment on interface(s) that no longer exist, ifindex %v; their entries stay until the interface inventory drops them", sorted)
+}
+
 func collectXDPInterfaces(prepared []preparedXDPKernelRule) []int {
 	seen := make(map[int]struct{}, len(prepared)*2)
 	for _, item := range prepared {
@@ -2083,8 +2172,8 @@ func collectXDPInterfaces(prepared []preparedXDPKernelRule) []int {
 	return out
 }
 
-func xdpGenericAttachmentExperimentalReason() string {
-	return fmt.Sprintf("xdp dataplane generic/mixed attachment requires experimental feature %q", experimentalFeatureXDPGeneric)
+func xdpGenericAttachmentDisabledReason() string {
+	return "xdp dataplane generic/mixed attachment is disabled by xdp_generic=false"
 }
 
 func xdpAttachOrder(link netlink.Link, oldAttachments []xdpAttachment, allowGeneric bool) []int {
@@ -2226,10 +2315,16 @@ func xdpVethPeerOffloadTargets(link netlink.Link) ([]xdpGenericOffloadTarget, er
 	if peerIndex <= 0 {
 		return nil, fmt.Errorf("resolve veth peer for %s: invalid peer ifindex %d", link.Attrs().Name, peerIndex)
 	}
-	if peer, err := netlink.LinkByIndex(peerIndex); err == nil && peer != nil && peer.Attrs() != nil {
-		return []xdpGenericOffloadTarget{{ifName: peer.Attrs().Name}}, nil
+	// The peer's ifindex counts in the peer's namespace. When the peer lives
+	// elsewhere (IFLA_LINK_NETNSID set), looking the index up here finds an
+	// unrelated interface: a namespace's first veth and the host's uplink
+	// are both often ifindex 2, and the uplink lost its offloads that way.
+	if link.Attrs().NetNsID < 0 {
+		if peer, err := netlink.LinkByIndex(peerIndex); err == nil && peer != nil && peer.Attrs() != nil {
+			return []xdpGenericOffloadTarget{{ifName: peer.Attrs().Name}}, nil
+		}
 	}
-	targets, err := xdpFindNamedNetnsLinksByIndex(peerIndex)
+	targets, err := xdpFindNamedNetnsVethPeers(peerIndex, link.Attrs().Index)
 	if err != nil {
 		return nil, err
 	}
@@ -2239,7 +2334,10 @@ func xdpVethPeerOffloadTargets(link netlink.Link) ([]xdpGenericOffloadTarget, er
 	return targets, nil
 }
 
-func xdpFindNamedNetnsLinksByIndex(ifindex int) ([]xdpGenericOffloadTarget, error) {
+// xdpFindNamedNetnsVethPeers finds, in the named network namespaces, the veth
+// with index peerIndex whose own peer is ownIndex: the index alone matches an
+// interface in nearly every namespace.
+func xdpFindNamedNetnsVethPeers(peerIndex, ownIndex int) ([]xdpGenericOffloadTarget, error) {
 	entries, err := os.ReadDir("/var/run/netns")
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -2268,7 +2366,10 @@ func xdpFindNamedNetnsLinksByIndex(ifindex int) ([]xdpGenericOffloadTarget, erro
 			continue
 		}
 		for _, link := range links {
-			if link == nil || link.Attrs() == nil || link.Attrs().Index != ifindex {
+			if link == nil || link.Attrs() == nil || link.Attrs().Index != peerIndex {
+				continue
+			}
+			if link.Type() != "veth" || link.Attrs().ParentIndex != ownIndex {
 				continue
 			}
 			targets = append(targets, xdpGenericOffloadTarget{namespace: name, ifName: link.Attrs().Name})

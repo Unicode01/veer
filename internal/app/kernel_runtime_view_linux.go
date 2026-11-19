@@ -70,9 +70,14 @@ type kernelRuntimeMapCountSnapshot struct {
 	flowsEntries    int
 	flowsEntriesV4  int
 	flowsEntriesV6  int
-	natEntries      int
-	natEntriesV4    int
-	natEntriesV6    int
+	// NAT entries are mappings: exclusive nat_ports entries and NAT peer
+	// entries. natPeerEntries counts the latter, natSharedPorts the ports
+	// they share.
+	natEntries     int
+	natEntriesV4   int
+	natEntriesV6   int
+	natPeerEntries int
+	natSharedPorts int
 }
 
 type kernelRuntimeMapRefs struct {
@@ -87,6 +92,10 @@ type kernelRuntimeMapRefs struct {
 	natV6                 *ebpf.Map
 	natOldV4              *ebpf.Map
 	natOldV6              *ebpf.Map
+	natPeersV4            *ebpf.Map
+	natPeersV6            *ebpf.Map
+	natPeersOldV4         *ebpf.Map
+	natPeersOldV6         *ebpf.Map
 	occupancy             *ebpf.Map
 	tcFlowMigrationState  *ebpf.Map
 	xdpFlowMigrationState *ebpf.Map
@@ -112,8 +121,11 @@ var kernelRuntimeBatchLookupSupport sync.Map
 var kernelRuntimeXDPFlowV4CountBatchPool = newKernelRuntimeMapCountBatchPool[tcFlowKeyV4, xdpFlowValueV4]()
 var kernelRuntimeTCFlowV4CountBatchPool = newKernelRuntimeMapCountBatchPool[tcFlowKeyV4, tcFlowValueV4]()
 var kernelRuntimeTCFlowV6CountBatchPool = newKernelRuntimeMapCountBatchPool[tcFlowKeyV6, tcFlowValueV6]()
+var kernelRuntimeXDPFlowV6CountBatchPool = newKernelRuntimeMapCountBatchPool[tcFlowKeyV6, xdpFlowValueV6]()
 var kernelRuntimeTCNATV4CountBatchPool = newKernelRuntimeMapCountBatchPool[tcNATPortKeyV4, tcNATPortValue]()
 var kernelRuntimeTCNATV6CountBatchPool = newKernelRuntimeMapCountBatchPool[tcNATPortKeyV6, tcNATPortValue]()
+var kernelRuntimeNATPeerV4CountBatchPool = newKernelRuntimeMapCountBatchPool[tcNATPeerKeyV4, tcNATPeerValue]()
+var kernelRuntimeNATPeerV6CountBatchPool = newKernelRuntimeMapCountBatchPool[tcNATPeerKeyV6, tcNATPeerValue]()
 
 func cloneKernelRuntimeMap(m *ebpf.Map, label string) (*ebpf.Map, error) {
 	if m == nil {
@@ -169,6 +181,22 @@ func cloneKernelRuntimeMapRefs(refs kernelRuntimeMapRefs) (kernelRuntimeMapRefs,
 		closeKernelRuntimeMapRefs(cloned)
 		return kernelRuntimeMapRefs{}, err
 	}
+	if cloned.natPeersV4, err = cloneKernelRuntimeMap(refs.natPeersV4, kernelNatPeersMapNameV4); err != nil {
+		closeKernelRuntimeMapRefs(cloned)
+		return kernelRuntimeMapRefs{}, err
+	}
+	if cloned.natPeersV6, err = cloneKernelRuntimeMap(refs.natPeersV6, kernelNatPeersMapNameV6); err != nil {
+		closeKernelRuntimeMapRefs(cloned)
+		return kernelRuntimeMapRefs{}, err
+	}
+	if cloned.natPeersOldV4, err = cloneKernelRuntimeMap(refs.natPeersOldV4, kernelTCNatPeersOldMapNameV4); err != nil {
+		closeKernelRuntimeMapRefs(cloned)
+		return kernelRuntimeMapRefs{}, err
+	}
+	if cloned.natPeersOldV6, err = cloneKernelRuntimeMap(refs.natPeersOldV6, kernelTCNatPeersOldMapNameV6); err != nil {
+		closeKernelRuntimeMapRefs(cloned)
+		return kernelRuntimeMapRefs{}, err
+	}
 	if cloned.occupancy, err = cloneKernelRuntimeMap(refs.occupancy, kernelOccupancyMapName); err != nil {
 		closeKernelRuntimeMapRefs(cloned)
 		return kernelRuntimeMapRefs{}, err
@@ -196,6 +224,10 @@ func closeKernelRuntimeMapRefs(refs kernelRuntimeMapRefs) {
 		refs.natV6,
 		refs.natOldV4,
 		refs.natOldV6,
+		refs.natPeersV4,
+		refs.natPeersV6,
+		refs.natPeersOldV4,
+		refs.natPeersOldV6,
 		refs.occupancy,
 		refs.tcFlowMigrationState,
 		refs.xdpFlowMigrationState,
@@ -719,7 +751,9 @@ func preparedKernelInterfaceRuleSets(prepared []preparedKernelRule) (map[int][]i
 }
 
 func effectiveKernelAttachmentRuleSets(prepared []preparedKernelRule, stored kernelAttachmentRuleSets) kernelAttachmentRuleSets {
-	if stored.hasTargets() {
+	// Sets whose only targets vanished still describe the attachments; the
+	// prepared rules would name those interfaces again.
+	if stored.hasTargets() || len(stored.Vanished) > 0 {
 		return stored
 	}
 	forwardIfRules, replyIfRules := preparedKernelInterfaceRuleSets(prepared)
@@ -1141,6 +1175,13 @@ func countKernelFlowMapEntriesV6(m *ebpf.Map) (int, error) {
 }
 
 func countKernelRuntimeMapEntriesBatch[K, V any](m *ebpf.Map, pool *kernelRuntimeMapCountBatchPool[K, V]) (int, bool, error) {
+	return visitKernelRuntimeMapValuesBatch(m, pool, nil)
+}
+
+// visitKernelRuntimeMapValuesBatch counts a map's entries in batches and
+// passes each value to visit, if set. false means the kernel has no batch
+// lookup for the map.
+func visitKernelRuntimeMapValuesBatch[K, V any](m *ebpf.Map, pool *kernelRuntimeMapCountBatchPool[K, V], visit func(*V)) (int, bool, error) {
 	cursor := ebpf.MapBatchCursor{}
 	batch := pool.get()
 	defer pool.put(batch)
@@ -1154,6 +1195,11 @@ func countKernelRuntimeMapEntriesBatch[K, V any](m *ebpf.Map, pool *kernelRuntim
 			return 0, true, err
 		}
 		count += n
+		if visit != nil {
+			for i := 0; i < n; i++ {
+				visit(&batch.values[i])
+			}
+		}
 		if n == 0 || errors.Is(err, ebpf.ErrKeyNotExist) {
 			return count, true, nil
 		}
@@ -1169,6 +1215,9 @@ func countKernelFlowMapEntriesBatch(m *ebpf.Map) (int, bool, error) {
 }
 
 func countKernelFlowMapEntriesBatchV6(m *ebpf.Map) (int, bool, error) {
+	if int(m.ValueSize()) == xdpFlowValueV6Size {
+		return countKernelRuntimeMapEntriesBatch(m, kernelRuntimeXDPFlowV6CountBatchPool)
+	}
 	return countKernelRuntimeMapEntriesBatch(m, kernelRuntimeTCFlowV6CountBatchPool)
 }
 
@@ -1205,41 +1254,75 @@ func countKernelFlowMapEntriesIterV6(m *ebpf.Map) (int, error) {
 	return count, iter.Err()
 }
 
+// countKernelNATMapEntries counts the NAT mappings a nat_ports map holds:
+// its exclusive entries. Its shared and draining entries are ports that the
+// mappings in the NAT peer maps use.
 func countKernelNATMapEntries(m *ebpf.Map) (int, error) {
-	if m == nil {
-		return 0, nil
-	}
-	var batchErr error
-	if supported, known := kernelRuntimeBatchLookupSupportForType(m.Type()); !known || supported {
-		count, supported, err := countKernelNATMapEntriesBatch(m)
-		if err == nil {
-			kernelRuntimeBatchLookupSupport.Store(m.Type(), true)
-			return count, nil
-		}
-		if !supported {
-			kernelRuntimeBatchLookupSupport.Store(m.Type(), false)
-		} else {
-			batchErr = err
-		}
-	}
-	count, err := countKernelNATMapEntriesIter(m)
-	if err == nil {
-		return count, nil
-	}
-	if batchErr != nil {
-		return 0, fmt.Errorf("count kernel nat map entries: batch lookup failed: %v; iterate fallback failed: %w", batchErr, err)
-	}
-	return 0, err
+	counts, err := countKernelNATPortModes(m, kernelRuntimeTCNATV4CountBatchPool)
+	return counts.exclusive, err
 }
 
 func countKernelNATMapEntriesV6(m *ebpf.Map) (int, error) {
+	counts, err := countKernelNATPortModes(m, kernelRuntimeTCNATV6CountBatchPool)
+	return counts.exclusive, err
+}
+
+// kernelNATPortModeCounts counts a nat_ports map's entries: exclusive ones,
+// and shared ones, draining included.
+type kernelNATPortModeCounts struct {
+	exclusive int
+	shared    int
+}
+
+func countKernelNATPortModes[K any](m *ebpf.Map, pool *kernelRuntimeMapCountBatchPool[K, tcNATPortValue]) (kernelNATPortModeCounts, error) {
+	var counts kernelNATPortModeCounts
+	if m == nil {
+		return counts, nil
+	}
+	visit := func(value *tcNATPortValue) {
+		if value.Mode == kernelNATPortExclusive {
+			counts.exclusive++
+		} else {
+			counts.shared++
+		}
+	}
+	var batchErr error
+	if supported, known := kernelRuntimeBatchLookupSupportForType(m.Type()); !known || supported {
+		_, supported, err := visitKernelRuntimeMapValuesBatch(m, pool, visit)
+		if err == nil && supported {
+			kernelRuntimeBatchLookupSupport.Store(m.Type(), true)
+			return counts, nil
+		}
+		counts = kernelNATPortModeCounts{}
+		if !supported {
+			kernelRuntimeBatchLookupSupport.Store(m.Type(), false)
+		} else {
+			batchErr = err
+		}
+	}
+	iter := m.Iterate()
+	var key K
+	var value tcNATPortValue
+	for iter.Next(&key, &value) {
+		visit(&value)
+	}
+	if err := iter.Err(); err != nil {
+		if batchErr != nil {
+			return kernelNATPortModeCounts{}, fmt.Errorf("count kernel nat map entries: batch lookup failed: %v; iterate fallback failed: %w", batchErr, err)
+		}
+		return kernelNATPortModeCounts{}, err
+	}
+	return counts, nil
+}
+
+func countKernelRuntimeMapEntriesExact[K, V any](m *ebpf.Map, pool *kernelRuntimeMapCountBatchPool[K, V]) (int, error) {
 	if m == nil {
 		return 0, nil
 	}
 	var batchErr error
 	if supported, known := kernelRuntimeBatchLookupSupportForType(m.Type()); !known || supported {
-		count, supported, err := countKernelNATMapEntriesBatchV6(m)
-		if err == nil {
+		count, supported, err := countKernelRuntimeMapEntriesBatch(m, pool)
+		if err == nil && supported {
 			kernelRuntimeBatchLookupSupport.Store(m.Type(), true)
 			return count, nil
 		}
@@ -1249,44 +1332,88 @@ func countKernelNATMapEntriesV6(m *ebpf.Map) (int, error) {
 			batchErr = err
 		}
 	}
-	count, err := countKernelNATMapEntriesIterV6(m)
-	if err == nil {
-		return count, nil
-	}
-	if batchErr != nil {
-		return 0, fmt.Errorf("count kernel ipv6 nat map entries: batch lookup failed: %v; iterate fallback failed: %w", batchErr, err)
-	}
-	return 0, err
-}
-
-func countKernelNATMapEntriesBatch(m *ebpf.Map) (int, bool, error) {
-	return countKernelRuntimeMapEntriesBatch(m, kernelRuntimeTCNATV4CountBatchPool)
-}
-
-func countKernelNATMapEntriesBatchV6(m *ebpf.Map) (int, bool, error) {
-	return countKernelRuntimeMapEntriesBatch(m, kernelRuntimeTCNATV6CountBatchPool)
-}
-
-func countKernelNATMapEntriesIter(m *ebpf.Map) (int, error) {
 	iter := m.Iterate()
 	count := 0
-	var key tcNATPortKeyV4
-	var value tcNATPortValue
+	var key K
+	var value V
 	for iter.Next(&key, &value) {
 		count++
 	}
-	return count, iter.Err()
+	if err := iter.Err(); err != nil {
+		if batchErr != nil {
+			return 0, fmt.Errorf("count kernel map entries: batch lookup failed: %v; iterate fallback failed: %w", batchErr, err)
+		}
+		return 0, err
+	}
+	return count, nil
 }
 
-func countKernelNATMapEntriesIterV6(m *ebpf.Map) (int, error) {
-	iter := m.Iterate()
-	count := 0
-	var key tcNATPortKeyV6
-	var value tcNATPortValue
-	for iter.Next(&key, &value) {
-		count++
+// kernelNATFamilyCounts is what the NAT maps of one address family hold,
+// over both banks.
+type kernelNATFamilyCounts struct {
+	mappings    int
+	peers       int
+	sharedPorts int
+}
+
+func countKernelNATFamily[K any, PK any](ports []*ebpf.Map, peers []*ebpf.Map, portPool *kernelRuntimeMapCountBatchPool[K, tcNATPortValue], peerPool *kernelRuntimeMapCountBatchPool[PK, tcNATPeerValue]) (kernelNATFamilyCounts, error) {
+	var out kernelNATFamilyCounts
+	for _, m := range ports {
+		counts, err := countKernelNATPortModes(m, portPool)
+		if err != nil {
+			return kernelNATFamilyCounts{}, err
+		}
+		out.mappings += counts.exclusive
+		out.sharedPorts += counts.shared
 	}
-	return count, iter.Err()
+	for _, m := range peers {
+		count, err := countKernelRuntimeMapEntriesExact(m, peerPool)
+		if err != nil {
+			return kernelNATFamilyCounts{}, err
+		}
+		out.mappings += count
+		out.peers += count
+	}
+	return out, nil
+}
+
+func countKernelRuntimeNATFamilies(refs kernelRuntimeMapRefs) (kernelNATFamilyCounts, kernelNATFamilyCounts, error) {
+	v4, err := countKernelNATFamily(
+		[]*ebpf.Map{refs.natV4, refs.natOldV4},
+		[]*ebpf.Map{refs.natPeersV4, refs.natPeersOldV4},
+		kernelRuntimeTCNATV4CountBatchPool,
+		kernelRuntimeNATPeerV4CountBatchPool,
+	)
+	if err != nil {
+		return kernelNATFamilyCounts{}, kernelNATFamilyCounts{}, err
+	}
+	v6, err := countKernelNATFamily(
+		[]*ebpf.Map{refs.natV6, refs.natOldV6},
+		[]*ebpf.Map{refs.natPeersV6, refs.natPeersOldV6},
+		kernelRuntimeTCNATV6CountBatchPool,
+		kernelRuntimeNATPeerV6CountBatchPool,
+	)
+	if err != nil {
+		return kernelNATFamilyCounts{}, kernelNATFamilyCounts{}, err
+	}
+	return v4, v6, nil
+}
+
+// countKernelRuntimeNATEntryDetails fills a detail sample's NAT counts, or
+// leaves them as cached and returns false when a map cannot be read.
+func countKernelRuntimeNATEntryDetails(refs kernelRuntimeMapRefs, counts *kernelRuntimeMapCountSnapshot) bool {
+	v4, v6, err := countKernelRuntimeNATFamilies(refs)
+	if err != nil {
+		return false
+	}
+	counts.natEntriesV4 = v4.mappings
+	counts.natEntriesV6 = v6.mappings
+	counts.natPeerEntries = v4.peers + v6.peers
+	counts.natSharedPorts = v4.sharedPorts + v6.sharedPorts
+	if refs.hasNAT() {
+		counts.natEntries = v4.mappings + v6.mappings
+	}
+	return true
 }
 
 func (refs kernelRuntimeMapRefs) hasRules() bool {
@@ -1298,7 +1425,8 @@ func (refs kernelRuntimeMapRefs) hasFlows() bool {
 }
 
 func (refs kernelRuntimeMapRefs) hasNAT() bool {
-	return refs.natV4 != nil || refs.natV6 != nil || refs.natOldV4 != nil || refs.natOldV6 != nil
+	return refs.natV4 != nil || refs.natV6 != nil || refs.natOldV4 != nil || refs.natOldV6 != nil ||
+		refs.natPeersV4 != nil || refs.natPeersV6 != nil || refs.natPeersOldV4 != nil || refs.natPeersOldV6 != nil
 }
 
 func lookupKernelFlowMigrationStateFlags(m *ebpf.Map) (uint32, bool, error) {
@@ -1486,37 +1614,14 @@ func countKernelRuntimeFlowEntriesExactV4(m *ebpf.Map) (int, error) {
 	return 0, fmt.Errorf("count runtime ipv4 flow map entries: tc decode failed: %v; xdp decode failed: %w", kernelErr, xdpErr)
 }
 
+// countKernelRuntimeNATEntriesExact counts the NAT mappings of every bank and
+// family: exclusive nat_ports entries and NAT peer entries.
 func countKernelRuntimeNATEntriesExact(refs kernelRuntimeMapRefs) (int, error) {
-	total := 0
-	if refs.natV4 != nil {
-		count, err := countKernelNATMapEntries(refs.natV4)
-		if err != nil {
-			return 0, err
-		}
-		total += count
+	v4, v6, err := countKernelRuntimeNATFamilies(refs)
+	if err != nil {
+		return 0, err
 	}
-	if refs.natV6 != nil {
-		count, err := countKernelNATMapEntriesV6(refs.natV6)
-		if err != nil {
-			return 0, err
-		}
-		total += count
-	}
-	if refs.natOldV4 != nil {
-		count, err := countKernelNATMapEntries(refs.natOldV4)
-		if err != nil {
-			return 0, err
-		}
-		total += count
-	}
-	if refs.natOldV6 != nil {
-		count, err := countKernelNATMapEntriesV6(refs.natOldV6)
-		if err != nil {
-			return 0, err
-		}
-		total += count
-	}
-	return total, nil
+	return v4.mappings + v6.mappings, nil
 }
 
 func countTCKernelRuntimeMapEntryDetails(now time.Time, refs kernelRuntimeMapRefs, cached kernelRuntimeMapCountSnapshot, includeNAT bool) kernelRuntimeMapCountSnapshot {
@@ -1585,51 +1690,15 @@ func countTCKernelRuntimeMapEntryDetails(now time.Time, refs kernelRuntimeMapRef
 	}
 
 	if includeNAT {
-		natExact := true
-		natTotal := 0
-		if refs.natV4 == nil {
-			counts.natEntriesV4 = 0
-		} else if count, err := countKernelNATMapEntries(refs.natV4); err == nil {
-			counts.natEntriesV4 = count
-			natTotal += count
-		} else {
-			natExact = false
+		if !countKernelRuntimeNATEntryDetails(refs, &counts) {
 			exact = false
-		}
-		if refs.natOldV4 != nil {
-			if count, err := countKernelNATMapEntries(refs.natOldV4); err == nil {
-				counts.natEntriesV4 += count
-				natTotal += count
-			} else {
-				natExact = false
-				exact = false
-			}
-		}
-		if refs.natV6 == nil {
-			counts.natEntriesV6 = 0
-		} else if count, err := countKernelNATMapEntriesV6(refs.natV6); err == nil {
-			counts.natEntriesV6 = count
-			natTotal += count
-		} else {
-			natExact = false
-			exact = false
-		}
-		if refs.natOldV6 != nil {
-			if count, err := countKernelNATMapEntriesV6(refs.natOldV6); err == nil {
-				counts.natEntriesV6 += count
-				natTotal += count
-			} else {
-				natExact = false
-				exact = false
-			}
-		}
-		if refs.hasNAT() && natExact {
-			counts.natEntries = natTotal
 		}
 	} else {
 		counts.natEntries = 0
 		counts.natEntriesV4 = 0
 		counts.natEntriesV6 = 0
+		counts.natPeerEntries = 0
+		counts.natSharedPorts = 0
 	}
 
 	if exact {
@@ -1700,46 +1769,8 @@ func countXDPKernelRuntimeMapEntryDetails(now time.Time, refs kernelRuntimeMapRe
 		counts.flowsEntries = flowsTotal
 	}
 
-	natExact := true
-	natTotal := 0
-	if refs.natV4 == nil {
-		counts.natEntriesV4 = 0
-	} else if count, err := countKernelNATMapEntries(refs.natV4); err == nil {
-		counts.natEntriesV4 = count
-		natTotal += count
-	} else {
-		natExact = false
+	if !countKernelRuntimeNATEntryDetails(refs, &counts) {
 		exact = false
-	}
-	if refs.natOldV4 != nil {
-		if count, err := countKernelNATMapEntries(refs.natOldV4); err == nil {
-			counts.natEntriesV4 += count
-			natTotal += count
-		} else {
-			natExact = false
-			exact = false
-		}
-	}
-	if refs.natV6 == nil {
-		counts.natEntriesV6 = 0
-	} else if count, err := countKernelNATMapEntriesV6(refs.natV6); err == nil {
-		counts.natEntriesV6 = count
-		natTotal += count
-	} else {
-		natExact = false
-		exact = false
-	}
-	if refs.natOldV6 != nil {
-		if count, err := countKernelNATMapEntriesV6(refs.natOldV6); err == nil {
-			counts.natEntriesV6 += count
-			natTotal += count
-		} else {
-			natExact = false
-			exact = false
-		}
-	}
-	if refs.hasNAT() && natExact {
-		counts.natEntries = natTotal
 	}
 
 	if exact {
@@ -1826,6 +1857,10 @@ func kernelRuntimeMapRefsFromCollection(coll *ebpf.Collection) kernelRuntimeMapR
 		natV6:                 coll.Maps[kernelNatPortsMapNameV6],
 		natOldV4:              coll.Maps[kernelTCNatPortsOldMapNameV4],
 		natOldV6:              coll.Maps[kernelTCNatPortsOldMapNameV6],
+		natPeersV4:            coll.Maps[kernelNatPeersMapNameV4],
+		natPeersV6:            coll.Maps[kernelNatPeersMapNameV6],
+		natPeersOldV4:         coll.Maps[kernelTCNatPeersOldMapNameV4],
+		natPeersOldV6:         coll.Maps[kernelTCNatPeersOldMapNameV6],
 		occupancy:             coll.Maps[kernelOccupancyMapName],
 		tcFlowMigrationState:  coll.Maps[kernelTCFlowMigrationStateMapName],
 		xdpFlowMigrationState: coll.Maps[kernelXDPFlowMigrationStateMapName],
@@ -1844,6 +1879,10 @@ func kernelRuntimeMapRefsEqual(a, b kernelRuntimeMapRefs) bool {
 		a.natV6 == b.natV6 &&
 		a.natOldV4 == b.natOldV4 &&
 		a.natOldV6 == b.natOldV6 &&
+		a.natPeersV4 == b.natPeersV4 &&
+		a.natPeersV6 == b.natPeersV6 &&
+		a.natPeersOldV4 == b.natPeersOldV4 &&
+		a.natPeersOldV6 == b.natPeersOldV6 &&
 		a.occupancy == b.occupancy &&
 		a.tcFlowMigrationState == b.tcFlowMigrationState &&
 		a.xdpFlowMigrationState == b.xdpFlowMigrationState
@@ -1962,6 +2001,8 @@ func applyKernelRuntimeMapBreakdown(view *KernelEngineRuntimeView, refs kernelRu
 	if includeNAT {
 		view.NATMapEntriesV4 = counts.natEntriesV4
 		view.NATMapEntriesV6 = counts.natEntriesV6
+		view.NATMapPeerEntries = counts.natPeerEntries
+		view.NATMapSharedPorts = counts.natSharedPorts
 		view.NATMapCapacityV4, view.NATMapOldCapacityV4, view.NATMapCapacityV6, view.NATMapOldCapacityV6 = kernelRuntimeNATMapCapacityBreakdown(refs)
 	}
 }

@@ -79,6 +79,8 @@ const (
 	kernelTCFlowsOldMapNameV6                 = "flows_old_v6"
 	kernelTCNatPortsOldMapNameV4              = "nat_ports_old_v4"
 	kernelTCNatPortsOldMapNameV6              = "nat_ports_old_v6"
+	kernelTCNatPeersOldMapNameV4              = "nat_peers_old_v4"
+	kernelTCNatPeersOldMapNameV6              = "nat_peers_old_v6"
 	kernelTCFlowMigrationStateMapName         = "tc_flow_migration_state"
 	kernelReplyFilterPrio                     = 10
 	kernelReplyFilterPrioV6                   = 11
@@ -144,6 +146,22 @@ const (
 	kernelFlowFlagCounted      = 0x20
 	kernelFlowFlagFullCone     = 0x80
 	kernelFlowFlagReplyClosing = 0x100
+	// kernelFlowFlagNATPeer marks a flow that holds its NAT port shared,
+	// through an entry in nat_peers_v4/v6; any other NAT flow holds an
+	// exclusive nat_ports entry.
+	kernelFlowFlagNATPeer = 0x200
+)
+
+// tcNATPortValue.Mode: how a nat_ports entry holds its port. An exclusive
+// port serves one mapping, the entry's session (full cone, and every entry
+// made before ports were shared). A shared one serves one mapping per peer,
+// each a nat_peers entry, and belongs to no session. Maintenance marks a
+// shared port without mappings draining, so that no new mapping takes it,
+// and deletes it if it is still unused a pass later.
+const (
+	kernelNATPortExclusive = 0
+	kernelNATPortShared    = 1
+	kernelNATPortDraining  = 2
 )
 
 const (
@@ -197,8 +215,10 @@ type tcRuleValueV4 struct {
 	DstMAC       [6]byte
 	EgressSrcMAC [6]byte
 	EgressDstMAC [6]byte
-	Pad          uint32
-	Revision     uint64
+	// HairpinInIfIndex is set in hairpin_v4 entries only: the forward's
+	// inbound interface, whose own guests reach it without hairpin.
+	HairpinInIfIndex uint32
+	Revision         uint64
 }
 
 type kernelLocalMACValue struct {
@@ -235,8 +255,8 @@ type tcFlowValueV4 struct {
 }
 
 // tcFlowFastV4 mirrors struct flow_fast_v4: the flow cache's record of how
-// the core's fast path last sent this direction of the flow. Only the BPF
-// programs read it; user space copies it along with the entry.
+// the core last sent this direction of the flow. Only the BPF programs read
+// it; user space copies it along with the entry.
 type tcFlowFastV4 struct {
 	Stamp      uint32
 	OutIfIndex uint32
@@ -246,10 +266,35 @@ type tcFlowFastV4 struct {
 	DMAC       [6]byte
 	SMAC       [6]byte
 	InDMAC     [6]byte
-	Pad        [4]byte
+	// DstPort and DstAddr name the backend in a port forward's front record.
+	DstPort uint16
+	Pad     [2]byte
 }
 
 type tcNATPortValue struct {
+	RuleID    uint32
+	Mode      uint32
+	SessionID uint64
+}
+
+// tcNATPeerKeyV4 mirrors struct nat_peer_key_v4: one mapping on a shared
+// NAT port, the port's nat_ports key and the peer it talks to (an egress NAT
+// flow's destination, a port forward's backend).
+type tcNATPeerKeyV4 struct {
+	Port     tcNATPortKeyV4
+	PeerAddr uint32
+	PeerPort uint16
+	Pad      [2]byte
+}
+
+type tcNATPeerKeyV6 struct {
+	Port     tcNATPortKeyV6
+	PeerAddr [16]byte
+	PeerPort uint16
+	Pad      [2]byte
+}
+
+type tcNATPeerValue struct {
 	RuleID    uint32
 	Pad       uint32
 	SessionID uint64
@@ -613,6 +658,7 @@ type linuxKernelRuleRuntime struct {
 	memlockErr                   error
 	coll                         *ebpf.Collection
 	attachments                  []kernelAttachment
+	bridgeNeighbors              bridgeNeighborKeepalive
 	preparedRules                []preparedKernelRule
 	attachmentRuleSets           kernelAttachmentRuleSets
 	attachmentMode               kernelTCAttachmentProgramMode
@@ -620,6 +666,8 @@ type linuxKernelRuleRuntime struct {
 	lastReconcileMode            string
 	degradedSource               string
 	stateLog                     kernelStateLogger
+	vanishedLinkLog              kernelStateLogger
+	hairpinLog                   kernelStateLogger
 	pressureState                kernelRuntimePressureState
 	tcpIdleTimeout               kernelTCPIdleTimeoutState
 	observability                kernelRuntimeObservabilityState
@@ -833,6 +881,17 @@ func (rt *linuxKernelRuleRuntime) ReconcileWithPluginCatalog(rules []Rule, catal
 	return rt.reconcileWithPluginCatalog(rules, &catalog)
 }
 
+// logVanishedAttachLinksLocked logs the interfaces whose hooks are skipped
+// because they are gone, once per change of that set.
+func (rt *linuxKernelRuleRuntime) logVanishedAttachLinksLocked(sets kernelAttachmentRuleSets) {
+	summary := sets.vanishedSummary()
+	if summary == "" {
+		rt.vanishedLinkLog.Reset()
+		return
+	}
+	rt.vanishedLinkLog.Logf("kernel dataplane reconcile: skipping tc hooks on interface(s) that no longer exist, ifindex %s; their entries stay until the interface inventory drops them", summary)
+}
+
 func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, pluginCatalogOverride *PluginCatalog) (results map[int64]kernelRuleApplyResult, reconcileErr error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -902,6 +961,8 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		rt.pluginPipelineActive = kernelPluginPipelineDesiredHasHooks(pluginDesired)
 	}
 	mergeKernelPluginPipelineAttachmentRuleSets(&attachmentRuleSets, pluginAttachmentTargets)
+	attachmentRuleSets = attachmentRuleSets.withoutGoneLinks(kernelLinkIndexGone)
+	rt.logVanishedAttachLinksLocked(attachmentRuleSets)
 	pluginOnlyPipeline := len(prepared) == 0 && rt.pluginPipelineActive && attachmentRuleSets.hasTargets()
 	if len(prepared) == 0 {
 		if pluginOnlyPipeline {
@@ -1076,6 +1137,8 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	actualCapacities := desiredCapacities
 	var oldStatsMap *ebpf.Map
 	var hotRestartState *kernelHotRestartMapState
+	// Every way out lets go of the preserved maps the layout copies read.
+	defer func() { hotRestartState.closeLayoutCopies() }()
 	hotRestartStatsCorrection := map[uint32]kernelRuleStats{}
 	tcFlowMigrationFlags := uint32(0)
 	ensureMapReplacements := func() {
@@ -1107,6 +1170,8 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 				{name: kernelFlowsMapNameV6, m: rt.coll.Maps[kernelFlowsMapNameV6], isFlow: true},
 				{name: kernelNatPortsMapName, m: rt.coll.Maps[kernelNatPortsMapName], isNAT: true},
 				{name: kernelNatPortsMapNameV6, m: rt.coll.Maps[kernelNatPortsMapNameV6], isNAT: true},
+				{name: kernelNatPeersMapNameV4, m: rt.coll.Maps[kernelNatPeersMapNameV4], isNAT: true},
+				{name: kernelNatPeersMapNameV6, m: rt.coll.Maps[kernelNatPeersMapNameV6], isNAT: true},
 			} {
 				if item.m == nil {
 					continue
@@ -1133,6 +1198,10 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 					ensureMapReplacements()
 					mapReplacements[kernelTCNatPortsOldMapNameV4] = old
 				}
+				if old := rt.coll.Maps[kernelTCNatPeersOldMapNameV4]; old != nil {
+					ensureMapReplacements()
+					mapReplacements[kernelTCNatPeersOldMapNameV4] = old
+				}
 			}
 			if existingMigrationFlags&tcFlowMigrationFlagV6Old != 0 {
 				if old := rt.coll.Maps[kernelTCFlowsOldMapNameV6]; old != nil {
@@ -1142,6 +1211,10 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 				if old := rt.coll.Maps[kernelTCNatPortsOldMapNameV6]; old != nil {
 					ensureMapReplacements()
 					mapReplacements[kernelTCNatPortsOldMapNameV6] = old
+				}
+				if old := rt.coll.Maps[kernelTCNatPeersOldMapNameV6]; old != nil {
+					ensureMapReplacements()
+					mapReplacements[kernelTCNatPeersOldMapNameV6] = old
 				}
 			}
 			tcFlowMigrationFlags = existingMigrationFlags
@@ -1169,11 +1242,18 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 				ensureMapReplacements()
 				mapReplacements[kernelTCNatPortsOldMapNameV4] = natMap
 			}
+			if peers := rt.coll.Maps[kernelNatPeersMapNameV4]; peers != nil {
+				ensureMapReplacements()
+				mapReplacements[kernelTCNatPeersOldMapNameV4] = peers
+			}
 			if flowsMap := rt.coll.Maps[kernelFlowsMapNameV6]; flowsMap != nil {
 				if natMap := rt.coll.Maps[kernelNatPortsMapNameV6]; natMap != nil {
 					ensureMapReplacements()
 					mapReplacements[kernelTCFlowsOldMapNameV6] = flowsMap
 					mapReplacements[kernelTCNatPortsOldMapNameV6] = natMap
+					if peers := rt.coll.Maps[kernelNatPeersMapNameV6]; peers != nil {
+						mapReplacements[kernelTCNatPeersOldMapNameV6] = peers
+					}
 					tcFlowMigrationFlags |= tcFlowMigrationFlagV6Old
 				}
 			}
@@ -1218,7 +1298,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 			clearKernelHotRestartState(kernelEngineTC)
 		}
 	} else if state != nil {
-		if err := validateKernelHotRestartMapReplacements(spec, state.replacements, kernelTCHotRestartFlexibleCapacityMaps()); err != nil {
+		if err := state.planLayoutCopies(spec, kernelTCHotRestartFlexibleCapacityMaps(), kernelTCMapLayoutRules); err != nil {
 			log.Printf(
 				"kernel dataplane hot restart: preserved tc maps are incompatible, abandoning handoff and falling back to fresh maps (cold restart): %s",
 				kernelHotRestartIncompatibilityReason(err),
@@ -1263,11 +1343,19 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 				strings.Join(state.replacementMapNames(), ","),
 				kernelHotRestartEngineDir(kernelEngineTC),
 			)
+			for _, c := range state.layoutCopies {
+				log.Printf(
+					"kernel dataplane hot restart: copying a pinned tc map into %s instead: its %d-byte values grew to %d, and the appended fields start zeroed",
+					c.name,
+					c.fromValueSize,
+					c.toValueSize,
+				)
+			}
 		}
 	}
 	loadSpec := spec
-	if len(mapReplacements) > 0 {
-		loadSpec, err = kernelCollectionSpecWithReplacementMapCapacities(spec, mapReplacements)
+	if capacitySources := hotRestartState.capacitySources(mapReplacements); len(capacitySources) > 0 {
+		loadSpec, err = kernelCollectionSpecWithReplacementMapCapacities(spec, capacitySources)
 		if err == nil {
 			coll, err = ebpf.NewCollectionWithOptions(loadSpec, kernelCollectionOptions(mapReplacements))
 		} else {
@@ -1275,6 +1363,18 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		}
 	} else {
 		coll, err = ebpf.NewCollectionWithOptions(spec, kernelCollectionOptions(nil))
+	}
+	if err == nil && hotRestartState != nil && len(hotRestartState.layoutCopies) > 0 {
+		// The predecessor's programs still run on the pinned maps; catchUpLayouts
+		// applies what they change until the successor attaches.
+		copied, copyErr := hotRestartState.copyLayouts(coll.Maps)
+		if copyErr != nil {
+			coll.Close()
+			coll = nil
+			err = fmt.Errorf("copy pinned tc maps into the new layout: %w", copyErr)
+		} else {
+			log.Printf("kernel dataplane hot restart: copied pinned tc maps: %s", strings.Join(copied, ", "))
+		}
 	}
 	if err != nil && hotRestartState != nil {
 		log.Printf(
@@ -1425,6 +1525,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		}
 		return results, nil
 	}
+	rt.syncKernelHairpinLocked(coll, prepared)
 	// The hints map starts out unknown, which makes every lookup, so a failure
 	// here leaves the programs correct.
 	if err := narrowKernelTCIfindexHints(coll, prepared); err != nil {
@@ -1483,8 +1584,17 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 	attachStartedAt := time.Now()
 
 	for _, plan := range attachmentPlans {
+		if _, gone := attachmentRuleSets.Vanished[plan.ifindex]; gone {
+			continue
+		}
 		ruleIDs := attachmentRuleSets.rules(plan.reply, plan.attach)[plan.ifindex]
 		if err := rt.attachProgramLocked(&newAttachments, plan, oldAttachments); err != nil {
+			if kernelLinkIndexGone(plan.ifindex) {
+				// The interface went away after the targets were checked.
+				attachmentRuleSets = attachmentRuleSets.withoutLinks(map[int]struct{}{plan.ifindex: {}})
+				rt.logVanishedAttachLinksLocked(attachmentRuleSets)
+				continue
+			}
 			log.Printf("kernel dataplane attach failed: program=%s ifindex=%d rules=%v err=%v", plan.name, plan.ifindex, ruleIDs, err)
 			label := "forward"
 			if plan.reply {
@@ -1532,6 +1642,7 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		return results, nil
 	}
 
+	attachmentRuleSets.markVanishedReady(forwardReady, replyReady)
 	runningAny := false
 	for _, item := range prepared {
 		if current, ok := results[item.rule.ID]; ok && current.Error != "" {
@@ -1560,6 +1671,15 @@ func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, plugi
 		coll.Close()
 		rt.cleanupLocked()
 		return results, nil
+	}
+	if hotRestartState != nil && len(hotRestartState.layoutCopies) > 0 {
+		caughtUp, catchUpErr := hotRestartState.catchUpLayouts(coll.Maps)
+		if catchUpErr != nil {
+			log.Printf("kernel dataplane hot restart: bring copied tc maps up to date after attach: %v", catchUpErr)
+		}
+		if len(caughtUp) > 0 {
+			log.Printf("kernel dataplane hot restart: brought copied tc maps up to date after attach: %s", strings.Join(caughtUp, ", "))
+		}
 	}
 	if hotRestartFlowAliases != nil {
 		finalized, finalizeErr := hotRestartFlowAliases.finalize()
@@ -1667,8 +1787,22 @@ func (rt *linuxKernelRuleRuntime) SnapshotStats() (kernelRuleStatsSnapshot, erro
 	return snapshotKernelStatsFromMap(statsMap, corrections)
 }
 
+// attachedLinkIndexes lists the interfaces the programs are attached to.
+func (rt *linuxKernelRuleRuntime) attachedLinkIndexes() []int {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	out := make([]int, 0, len(rt.attachments))
+	for _, att := range rt.attachments {
+		if key, ok := att.key(); ok {
+			out = append(out, key.linkIndex)
+		}
+	}
+	return out
+}
+
 func (rt *linuxKernelRuleRuntime) Maintain() error {
 	startedAt := time.Now()
+	rt.bridgeNeighbors.maybeRun(startedAt, rt.attachedLinkIndexes)
 	rt.mu.Lock()
 	rt.expireDeferredFlowRulesLocked(startedAt)
 	rt.checkBridgePathHoldsLocked()
@@ -1744,7 +1878,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 	driftDetected := false
 
 	if refs.flowsV4 != nil {
-		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsV4, refs.natV4, &flowPruneState, v4ActiveBudget, tcpIdleTimeoutNS)
+		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsV4, refs.natBankV4(), &flowPruneState, v4ActiveBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v4Metrics.Budget
 		pruneMetrics.Scanned += v4Metrics.Scanned
 		pruneMetrics.Deleted += v4Metrics.Deleted
@@ -1755,7 +1889,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 		mergeKernelStatsCorrections(corrections, v4Corrections)
 	}
 	if refs.flowsOldV4 != nil {
-		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsOldV4, refs.natOldV4, &oldFlowPruneState, v4OldBudget, tcpIdleTimeoutNS)
+		v4Corrections, v4Metrics, err := pruneStaleKernelFlowsMap(refs.rulesV4, refs.flowsOldV4, refs.natOldBankV4(), &oldFlowPruneState, v4OldBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v4Metrics.Budget
 		pruneMetrics.Scanned += v4Metrics.Scanned
 		pruneMetrics.Deleted += v4Metrics.Deleted
@@ -1766,7 +1900,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 		mergeKernelStatsCorrections(corrections, v4Corrections)
 	}
 	if refs.flowsV6 != nil {
-		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, refs.natV6, &flowPruneState, v6ActiveBudget, tcpIdleTimeoutNS)
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsV6, refs.natBankV6(), &flowPruneState, v6ActiveBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v6Metrics.Budget
 		pruneMetrics.Scanned += v6Metrics.Scanned
 		pruneMetrics.Deleted += v6Metrics.Deleted
@@ -1777,7 +1911,7 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 		mergeKernelStatsCorrections(corrections, v6Corrections)
 	}
 	if refs.flowsOldV6 != nil {
-		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsOldV6, refs.natOldV6, &oldFlowPruneState, v6OldBudget, tcpIdleTimeoutNS)
+		v6Corrections, v6Metrics, err := pruneStaleKernelFlowsV6InCollection(refs.rulesV6, refs.flowsOldV6, refs.natOldBankV6(), &oldFlowPruneState, v6OldBudget, tcpIdleTimeoutNS)
 		pruneMetrics.Budget += v6Metrics.Budget
 		pruneMetrics.Scanned += v6Metrics.Scanned
 		pruneMetrics.Deleted += v6Metrics.Deleted
@@ -2699,10 +2833,10 @@ func purgeKernelFlowsForTargets(refs kernelRuntimeMapRefs, targets map[kernelFlo
 	var purgeErrs []error
 	for _, item := range []struct {
 		flows *ebpf.Map
-		nat   *ebpf.Map
+		nat   kernelNATBankMaps
 	}{
-		{refs.flowsV4, refs.natV4},
-		{refs.flowsOldV4, refs.natOldV4},
+		{refs.flowsV4, refs.natBankV4()},
+		{refs.flowsOldV4, refs.natOldBankV4()},
 	} {
 		itemCorrections, itemDeleted, err := purgeKernelFlowsForTargetsV4(item.flows, item.nat, targets, xdp)
 		mergeKernelStatsCorrections(corrections, itemCorrections)
@@ -2713,10 +2847,10 @@ func purgeKernelFlowsForTargets(refs kernelRuntimeMapRefs, targets map[kernelFlo
 	}
 	for _, item := range []struct {
 		flows *ebpf.Map
-		nat   *ebpf.Map
+		nat   kernelNATBankMaps
 	}{
-		{refs.flowsV6, refs.natV6},
-		{refs.flowsOldV6, refs.natOldV6},
+		{refs.flowsV6, refs.natBankV6()},
+		{refs.flowsOldV6, refs.natOldBankV6()},
 	} {
 		itemCorrections, itemDeleted, err := purgeKernelFlowsForTargetsV6(item.flows, item.nat, targets)
 		mergeKernelStatsCorrections(corrections, itemCorrections)
@@ -2776,7 +2910,7 @@ func kernelFlowMatchesInterfaceScopedPurgeTarget(ifindex uint32, value tcFlowVal
 	return ok
 }
 
-func purgeKernelFlowsForTargetsV4(flowsMap, natPortsMap *ebpf.Map, targets map[kernelFlowPurgeTarget]struct{}, xdp bool) (map[uint32]kernelRuleStats, int, error) {
+func purgeKernelFlowsForTargetsV4(flowsMap *ebpf.Map, nat kernelNATBankMaps, targets map[kernelFlowPurgeTarget]struct{}, xdp bool) (map[uint32]kernelRuleStats, int, error) {
 	corrections := make(map[uint32]kernelRuleStats)
 	if flowsMap == nil || len(targets) == 0 {
 		return corrections, 0, nil
@@ -2854,7 +2988,7 @@ func purgeKernelFlowsForTargetsV4(flowsMap, natPortsMap *ebpf.Map, targets map[k
 	deleted := 0
 	var deleteErrs []error
 	for _, item := range orderKernelFlowPurgeCandidates(stale) {
-		itemDeleted, err := deleteKernelFlowSessionWithError(flowsMap, natPortsMap, item, corrections, false)
+		itemDeleted, err := deleteKernelFlowSessionWithError(flowsMap, nat, item, corrections, false)
 		deleted += itemDeleted
 		if err != nil {
 			deleteErrs = append(deleteErrs, err)
@@ -2863,7 +2997,7 @@ func purgeKernelFlowsForTargetsV4(flowsMap, natPortsMap *ebpf.Map, targets map[k
 	return corrections, deleted, errors.Join(deleteErrs...)
 }
 
-func purgeKernelFlowsForTargetsV6(flowsMap, natPortsMap *ebpf.Map, targets map[kernelFlowPurgeTarget]struct{}) (map[uint32]kernelRuleStats, int, error) {
+func purgeKernelFlowsForTargetsV6(flowsMap *ebpf.Map, nat kernelNATBankMaps, targets map[kernelFlowPurgeTarget]struct{}) (map[uint32]kernelRuleStats, int, error) {
 	corrections := make(map[uint32]kernelRuleStats)
 	if flowsMap == nil || len(targets) == 0 {
 		return corrections, 0, nil
@@ -2911,7 +3045,7 @@ func purgeKernelFlowsForTargetsV6(flowsMap, natPortsMap *ebpf.Map, targets map[k
 		if item.value.Flags&kernelFlowFlagFrontEntry != 0 {
 			continue
 		}
-		itemDeleted, err := deleteKernelFlowSessionV6WithError(flowsMap, natPortsMap, item, corrections, false)
+		itemDeleted, err := deleteKernelFlowSessionV6WithError(flowsMap, nat, item, corrections, false)
 		deleted += itemDeleted
 		if err != nil {
 			deleteErrs = append(deleteErrs, err)
@@ -2921,7 +3055,7 @@ func purgeKernelFlowsForTargetsV6(flowsMap, natPortsMap *ebpf.Map, targets map[k
 		if item.value.Flags&kernelFlowFlagFrontEntry == 0 {
 			continue
 		}
-		itemDeleted, err := deleteKernelFlowSessionV6WithError(flowsMap, natPortsMap, item, corrections, false)
+		itemDeleted, err := deleteKernelFlowSessionV6WithError(flowsMap, nat, item, corrections, false)
 		deleted += itemDeleted
 		if err != nil {
 			deleteErrs = append(deleteErrs, err)
@@ -3130,10 +3264,19 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	attachStartedAt := time.Now()
 
 	for _, plan := range plans {
+		if _, gone := attachmentRuleSets.Vanished[plan.ifindex]; gone {
+			continue
+		}
 		if current, ok := currentAttachments[plan.key]; ok && kernelAttachmentObservationMatchesExpectation(observedAttachments[plan.key], expectedAttachments[plan.key]) {
 			newAttachments = append(newAttachments, current)
 		} else {
 			if err := rt.attachProgramLocked(&createdAttachments, plan, rt.attachments); err != nil {
+				if kernelLinkIndexGone(plan.ifindex) {
+					// The interface went away after the targets were checked.
+					attachmentRuleSets = attachmentRuleSets.withoutLinks(map[int]struct{}{plan.ifindex: {}})
+					rt.logVanishedAttachLinksLocked(attachmentRuleSets)
+					continue
+				}
 				rt.discardAttachmentsLocked(createdAttachments)
 				return fmt.Errorf("attach %s on ifindex %d: %w", plan.name, plan.ifindex, err)
 			}
@@ -3178,6 +3321,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 		rt.discardAttachmentsLocked(createdAttachments)
 		return fmt.Errorf("sync kernel reply parent map: %w", err)
 	}
+	rt.syncKernelHairpinLocked(rt.coll, prepared)
 	if err := narrowKernelTCIfindexHints(rt.coll, prepared); err != nil {
 		log.Printf("kernel dataplane reconcile: narrow tc ifindex hints failed: %v", err)
 	}
@@ -3204,6 +3348,7 @@ func (rt *linuxKernelRuleRuntime) reconcileInPlaceLocked(prepared []preparedKern
 	detachedAttachments := kernelAttachmentDeleteCount(oldAttachments, finalAttachments)
 	preservedAttachments := len(finalAttachments) - len(newAttachments)
 
+	attachmentRuleSets.markVanishedReady(forwardReady, replyReady)
 	runningAny := false
 	for _, item := range prepared {
 		if current, ok := results[item.rule.ID]; ok && current.Error != "" {
@@ -3764,6 +3909,9 @@ func validateKernelCollectionSpec(spec *ebpf.CollectionSpec) error {
 		kernelTCNatPortsOldMapNameV4,
 		kernelTCFlowsOldMapNameV6,
 		kernelTCNatPortsOldMapNameV6,
+		kernelNatPeersMapNameV4,
+		kernelTCNatPeersOldMapNameV4,
+		kernelTCNatPeersOldMapNameV6,
 		kernelTCFlowMigrationStateMapName,
 	} {
 		if _, ok := spec.Maps[name]; !ok {

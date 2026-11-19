@@ -431,7 +431,14 @@ func (srv *managedNetworkDHCPv4Server) run() {
 							default:
 							}
 						}
-						srv.logIssue(fmt.Sprintf("read: %v", err))
+						if isLinkGoneOrDownError(err) && sockets[i].state.IfName != srv.snapshot().Bridge {
+							// A bridge port went down or away, as a guest's
+							// tap does when the guest stops; the sockets are
+							// reopened on the ports there are now.
+							srv.noteIssue(fmt.Sprintf("read on %s: %v", sockets[i].state.IfName, err))
+						} else {
+							srv.logIssue(fmt.Sprintf("read: %v", err))
+						}
 						reopen = true
 						break
 					}
@@ -462,6 +469,17 @@ func (srv *managedNetworkDHCPv4Server) run() {
 		default:
 		}
 	}
+}
+
+// noteIssue records an issue for the runtime status without logging it.
+func (srv *managedNetworkDHCPv4Server) noteIssue(text string) {
+	if srv == nil {
+		return
+	}
+	srv.mu.Lock()
+	srv.lastIssueText = text
+	srv.lastIssueAt = time.Now()
+	srv.mu.Unlock()
 }
 
 func (srv *managedNetworkDHCPv4Server) logIssue(text string) {
@@ -502,6 +520,18 @@ func (srv *managedNetworkDHCPv4Server) logSeenMessage(text string) {
 	}
 }
 
+func usableManagedNetworkBridgeMAC(mac net.HardwareAddr) bool {
+	if len(mac) < 6 {
+		return false
+	}
+	for _, octet := range mac {
+		if octet != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func openManagedNetworkDHCPv4Sockets(config managedNetworkDHCPv4Config, stickyIfaces []string) ([]managedNetworkDHCPv4Socket, error) {
 	bridgeName := strings.TrimSpace(config.Bridge)
 	if bridgeName == "" {
@@ -515,8 +545,10 @@ func openManagedNetworkDHCPv4Sockets(config managedNetworkDHCPv4Config, stickyIf
 	if err != nil {
 		return nil, err
 	}
-	if len(bridgeIface.HardwareAddr) < 6 {
-		return nil, fmt.Errorf("bridge %q has no usable ethernet address", bridgeName)
+	if !usableManagedNetworkBridgeMAC(bridgeIface.HardwareAddr) {
+		// A bridge takes its MAC from its ports unless one is set, so a bridge
+		// without ports has none. DHCPv4 retries on the next reconcile.
+		return nil, fmt.Errorf("bridge %q has no usable ethernet address yet: a bridge without ports has none until its first port joins; DHCPv4 starts once a guest attaches, or give the bridge a fixed MAC (for example hwaddress in /etc/network/interfaces)", bridgeName)
 	}
 
 	sockets := make([]managedNetworkDHCPv4Socket, 0, len(listenInterfaces))

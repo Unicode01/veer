@@ -148,6 +148,45 @@ func TestLoadConfigKernelTCFlowCacheSetting(t *testing.T) {
 	}
 }
 
+// Generic XDP attachment is on unless the setting turns it off. The former
+// experimental feature is ignored either way: deploy wrote it as false into
+// every config while it was off by default.
+func TestLoadConfigXDPGenericSetting(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		extra string
+		want  bool
+	}{
+		{name: "default", want: true},
+		{name: "enabled", extra: `"xdp_generic": true`, want: true},
+		{name: "disabled", extra: `"xdp_generic": false`},
+		{name: "legacy experimental feature off", extra: `"experimental_features": {"xdp_generic": false}`, want: true},
+		{name: "legacy experimental feature on", extra: `"experimental_features": {"xdp_generic": true}`, want: true},
+		{name: "setting overrides experimental feature", extra: `"xdp_generic": false, "experimental_features": {"xdp_generic": true}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			body := `{"web_port": 8080, "web_token": "test-token"`
+			if tc.extra != "" {
+				body += ", " + tc.extra
+			}
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(body+"}"), 0o644); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+			cfg, err := loadConfig(path)
+			if err != nil {
+				t.Fatalf("loadConfig() error = %v", err)
+			}
+			if got := cfg.XDPGenericEnabled(); got != tc.want {
+				t.Fatalf("XDPGenericEnabled() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadConfigDefaultsWebBindToLoopback(t *testing.T) {
 	t.Parallel()
 

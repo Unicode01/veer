@@ -300,6 +300,9 @@ func TestValidateXDPCollectionSpecRequiresIPv6MapSet(t *testing.T) {
 	spec.Maps[kernelFlowsMapNameV6] = &ebpf.MapSpec{Type: ebpf.Hash}
 	spec.Maps[kernelNatPortsMapNameV6] = &ebpf.MapSpec{Type: ebpf.Hash}
 	spec.Maps[kernelTCNatPortsOldMapNameV6] = &ebpf.MapSpec{Type: ebpf.Hash}
+	for _, name := range []string{kernelNatPeersMapNameV4, kernelNatPeersMapNameV6, kernelTCNatPeersOldMapNameV4, kernelTCNatPeersOldMapNameV6} {
+		spec.Maps[name] = &ebpf.MapSpec{Type: ebpf.Hash}
+	}
 	setPresentKernelMapABISizesForTest(t, spec, xdpKernelMapABIContracts())
 	if err := validateXDPCollectionSpec(spec); err != nil {
 		t.Fatalf("validateXDPCollectionSpec() error = %v, want nil with dual-stack map set", err)
@@ -343,6 +346,10 @@ func TestValidateXDPCollectionSpecRejectsLRUFlowBanks(t *testing.T) {
 			kernelTCNatPortsOldMapNameV4:       &ebpf.MapSpec{Type: ebpf.Hash},
 			kernelXDPFlowsOldMapNameV6:         &ebpf.MapSpec{Type: ebpf.Hash},
 			kernelTCNatPortsOldMapNameV6:       &ebpf.MapSpec{Type: ebpf.Hash},
+			kernelNatPeersMapNameV4:            &ebpf.MapSpec{Type: ebpf.Hash},
+			kernelNatPeersMapNameV6:            &ebpf.MapSpec{Type: ebpf.Hash},
+			kernelTCNatPeersOldMapNameV4:       &ebpf.MapSpec{Type: ebpf.Hash},
+			kernelTCNatPeersOldMapNameV6:       &ebpf.MapSpec{Type: ebpf.Hash},
 		},
 	}
 
@@ -526,18 +533,53 @@ func TestBuildPreparedXDPKernelRuleBatchesSplitsFamilies(t *testing.T) {
 	}
 }
 
-func TestPreparedXDPKernelRulesNeedFullConeNATMapIncludesIPv6FullNAT(t *testing.T) {
-	prepared := []preparedXDPKernelRule{
+func TestPreparedXDPKernelRulesNeedNATMapForEveryNATRule(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		item preparedXDPKernelRule
+		want bool
+	}{
 		{
-			rule: Rule{ID: 1, InIP: "2001:db8::10", OutIP: "2001:db8::20"},
-			spec: kernelPreparedRuleSpec{Family: ipFamilyIPv6},
-			valueV6: xdpRuleValueV6{
-				Flags: xdpRuleFlagFullNAT,
+			name: "IPv6 full NAT",
+			item: preparedXDPKernelRule{
+				rule:    Rule{ID: 1, InIP: "2001:db8::10", OutIP: "2001:db8::20"},
+				spec:    kernelPreparedRuleSpec{Family: ipFamilyIPv6},
+				valueV6: xdpRuleValueV6{Flags: xdpRuleFlagFullNAT},
 			},
+			want: true,
 		},
-	}
-	if !preparedXDPKernelRulesNeedFullConeNATMap(prepared) {
-		t.Fatal("preparedXDPKernelRulesNeedFullConeNATMap() = false, want true for IPv6 fullnat rules")
+		{
+			// Shared NAT ports take class and peer entries for every IPv4
+			// full NAT and egress NAT rule, not only full cone ones.
+			name: "IPv4 full NAT",
+			item: preparedXDPKernelRule{
+				rule:    Rule{ID: 2, InIP: "192.0.2.10", OutIP: "198.51.100.20"},
+				spec:    kernelPreparedRuleSpec{Family: ipFamilyIPv4},
+				valueV4: xdpRuleValueV4{Flags: xdpRuleFlagFullNAT},
+			},
+			want: true,
+		},
+		{
+			name: "IPv4 symmetric egress NAT",
+			item: preparedXDPKernelRule{
+				rule:    Rule{ID: 3, InIP: "0.0.0.0", OutIP: "0.0.0.0"},
+				spec:    kernelPreparedRuleSpec{Family: ipFamilyIPv4},
+				valueV4: xdpRuleValueV4{Flags: xdpRuleFlagFullNAT | xdpRuleFlagEgressNAT},
+			},
+			want: true,
+		},
+		{
+			name: "IPv4 transparent",
+			item: preparedXDPKernelRule{
+				rule: Rule{ID: 4, InIP: "192.0.2.10", OutIP: "198.51.100.20", Transparent: true},
+				spec: kernelPreparedRuleSpec{Family: ipFamilyIPv4},
+			},
+			want: false,
+		},
+	} {
+		if got := preparedXDPKernelRulesNeedNATMap([]preparedXDPKernelRule{tc.item}); got != tc.want {
+			t.Errorf("%s: preparedXDPKernelRulesNeedNATMap() = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -617,30 +659,27 @@ func TestXDPRuntimeNATStateForDecisionIncludesPreparedNATMapsWithoutLiveEntries(
 	}
 }
 
-func TestNewXDPKernelRuleRuntimeDisablesGenericAttachByDefault(t *testing.T) {
+func TestNewXDPKernelRuleRuntimeAllowsGenericAttachByDefault(t *testing.T) {
 	stubHostEphemeralPortRange(t, 32768, 60999, nil)
 	rt, ok := newXDPKernelRuleRuntime(nil).(*xdpKernelRuleRuntime)
 	if !ok {
 		t.Fatal("newXDPKernelRuleRuntime(nil) did not return *xdpKernelRuleRuntime")
 	}
-	if rt.allowGenericAttach {
-		t.Fatal("allowGenericAttach = true, want false by default")
+	if !rt.allowGenericAttach {
+		t.Fatal("allowGenericAttach = false, want true by default")
 	}
 	// The default pool less Linux's default ephemeral range.
 	if rt.natPortMin != kernelDefaultNATPortMin || rt.natPortMax != 32767 {
 		t.Fatalf("default nat port range = (%d, %d), want (%d, 32767)", rt.natPortMin, rt.natPortMax, kernelDefaultNATPortMin)
 	}
 
-	rt, ok = newXDPKernelRuleRuntime(&Config{
-		Experimental: map[string]bool{
-			experimentalFeatureXDPGeneric: true,
-		},
-	}).(*xdpKernelRuleRuntime)
+	disabled := false
+	rt, ok = newXDPKernelRuleRuntime(&Config{XDPGenericSetting: &disabled}).(*xdpKernelRuleRuntime)
 	if !ok {
 		t.Fatal("newXDPKernelRuleRuntime(config) did not return *xdpKernelRuleRuntime")
 	}
-	if !rt.allowGenericAttach {
-		t.Fatal("allowGenericAttach = false, want true when xdp_generic is enabled")
+	if rt.allowGenericAttach {
+		t.Fatal("allowGenericAttach = true, want false with xdp_generic=false")
 	}
 
 	rt, ok = newXDPKernelRuleRuntime(&Config{
@@ -707,11 +746,22 @@ func TestXDPAttachOrderHonorsGenericExperiment(t *testing.T) {
 	}
 }
 
-func TestXDPGenericAttachmentExperimentalReason(t *testing.T) {
-	got := xdpGenericAttachmentExperimentalReason()
-	want := `xdp dataplane generic/mixed attachment requires experimental feature "xdp_generic"`
+func TestXDPGenericAttachmentDisabledReason(t *testing.T) {
+	got := xdpGenericAttachmentDisabledReason()
+	want := `xdp dataplane generic/mixed attachment is disabled by xdp_generic=false`
 	if got != want {
-		t.Fatalf("xdpGenericAttachmentExperimentalReason() = %q, want %q", got, want)
+		t.Fatalf("xdpGenericAttachmentDisabledReason() = %q, want %q", got, want)
+	}
+}
+
+// Plugin hooks try driver mode first everywhere, including the veth and
+// bridge ports where the core XDP engine starts with generic mode.
+func TestXDPPluginAttachOrderPrefersDriverMode(t *testing.T) {
+	if got, want := xdpPluginAttachOrder(true), []int{nl.XDP_FLAGS_DRV_MODE, nl.XDP_FLAGS_SKB_MODE}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("xdpPluginAttachOrder(true) = %v, want %v", got, want)
+	}
+	if got, want := xdpPluginAttachOrder(false), []int{nl.XDP_FLAGS_DRV_MODE}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("xdpPluginAttachOrder(false) = %v, want %v", got, want)
 	}
 }
 

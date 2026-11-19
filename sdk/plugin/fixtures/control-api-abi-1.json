@@ -47,6 +47,8 @@
     "process.binaryStatus",
     "process.binarySelect",
     "process.binaryRemove",
-    "net.link.ensureHelperWAN"
+    "net.link.ensureHelperWAN",
+    "plugin.attachments",
+    "ebpf.monotonicMs"
   ]
 }

@@ -74,6 +74,7 @@ const (
 	workerConfigACKTimeout                = 15 * time.Second
 	userspaceWorkerReconnectGrace         = 3 * time.Second
 	workerRegistrationFailureUnhealthyFor = 10 * time.Second
+	readinessReconcileGrace               = 30 * time.Second // a pending reconcile keeps readiness this long
 	kernelDegradedRebuildCooldown         = 30 * time.Second
 	redistributeRetryDelay                = 250 * time.Millisecond
 	kernelStatsRefreshInterval            = 5 * time.Second
@@ -94,6 +95,8 @@ const (
 	managedNetworkDriftCheckEvery         = 10 * time.Second
 	managedNetworkSelfEventSuppressFor    = 2 * time.Second
 	managedNetworkLinkChangeSuppressFor   = 10 * time.Second
+	managedNetworkReloadRetryMin          = 5 * time.Second
+	managedNetworkReloadRetryMax          = time.Minute
 	pluginCatalogDriftCheckEvery          = 2 * time.Second
 )
 
@@ -240,6 +243,7 @@ type ProcessManager struct {
 	desiredGeneration                              uint64
 	preparedGeneration                             uint64
 	appliedGeneration                              uint64
+	reconcilePendingSince                          time.Time
 	reconcileLastError                             string
 	reconcileRetryCount                            int
 	reconcileLastAttemptAt                         time.Time
@@ -362,6 +366,8 @@ type ProcessManager struct {
 	managedRuntimeReloadDueAt                      time.Time
 	managedRuntimeReloadInterfaces                 map[string]struct{}
 	managedRuntimeReloadSuppressUntil              map[string]time.Time
+	managedRuntimeReloadRetryDelay                 time.Duration
+	managedRuntimeLinkInstances                    map[string]managedRuntimeLinkInstance
 	managedRuntimeReloadLastRequestedAt            time.Time
 	managedRuntimeReloadLastRequestSource          string
 	managedRuntimeReloadLastRequestSummary         string
@@ -470,7 +476,8 @@ func (pm *ProcessManager) isReadyLocked(now time.Time) bool {
 	if !pm.ready {
 		return false
 	}
-	if pm.desiredGeneration > pm.appliedGeneration || strings.TrimSpace(pm.reconcileLastError) != "" ||
+	settling := pm.reconcileSettlingLocked(now)
+	if (pm.desiredGeneration > pm.appliedGeneration && !settling) || strings.TrimSpace(pm.reconcileLastError) != "" ||
 		pm.workerReconcileErrorLocked() != "" || strings.TrimSpace(pm.pluginReconcileLastError) != "" {
 		return false
 	}
@@ -481,7 +488,7 @@ func (pm *ProcessManager) isReadyLocked(now time.Time) bool {
 		if wi != nil && len(wi.rules) > 0 && !userspaceWorkerControlReady(wi) {
 			return false
 		}
-		if pm.desiredGeneration > 0 && wi != nil && len(wi.rules) > 0 && !workerGenerationApplied(wi, pm.desiredGeneration) {
+		if pm.desiredGeneration > 0 && wi != nil && len(wi.rules) > 0 && !workerReadyForGeneration(wi, pm.desiredGeneration, settling) {
 			return false
 		}
 	}
@@ -489,7 +496,7 @@ func (pm *ProcessManager) isReadyLocked(now time.Time) bool {
 		if wi != nil && len(wi.ranges) > 0 && !userspaceWorkerControlReady(wi) {
 			return false
 		}
-		if pm.desiredGeneration > 0 && wi != nil && len(wi.ranges) > 0 && !workerGenerationApplied(wi, pm.desiredGeneration) {
+		if pm.desiredGeneration > 0 && wi != nil && len(wi.ranges) > 0 && !workerReadyForGeneration(wi, pm.desiredGeneration, settling) {
 			return false
 		}
 	}
@@ -498,7 +505,7 @@ func (pm *ProcessManager) isReadyLocked(now time.Time) bool {
 		if !ok {
 			return false
 		}
-		if egressNATPlanIsFullyOverridden(plan) {
+		if egressNATPlanHasNothingToApply(plan) {
 			continue
 		}
 		if !plan.KernelEligible || plan.EffectiveEngine != ruleEngineKernel || !pm.kernelEgressNATs[id] || strings.TrimSpace(pm.kernelEgressNATEngines[id]) == "" {
@@ -511,7 +518,27 @@ func (pm *ProcessManager) isReadyLocked(now time.Time) bool {
 	if !userspaceWorkerControlReady(pm.sharedProxy) {
 		return false
 	}
-	return pm.desiredGeneration == 0 || workerGenerationApplied(pm.sharedProxy, pm.desiredGeneration)
+	return pm.desiredGeneration == 0 || workerReadyForGeneration(pm.sharedProxy, pm.desiredGeneration, settling)
+}
+
+// reconcileSettlingLocked reports whether a reconcile is being applied on top
+// of a generation that was applied already, for less than the grace period.
+// The dataplane keeps serving the applied state meanwhile, so readiness holds:
+// every guest started or stopped would otherwise make monitoring and load
+// balancers see the service flap. A failed reconcile, one stuck past the
+// grace period, or the first one after startup still makes it unready.
+func (pm *ProcessManager) reconcileSettlingLocked(now time.Time) bool {
+	return pm.desiredGeneration > pm.appliedGeneration && pm.appliedGeneration > 0 &&
+		!pm.reconcilePendingSince.IsZero() && now.Sub(pm.reconcilePendingSince) < readinessReconcileGrace
+}
+
+// workerReadyForGeneration tells whether a worker counts as ready: it applied
+// generation, or, while a reconcile settles, it has not failed.
+func workerReadyForGeneration(wi *WorkerInfo, generation uint64, settling bool) bool {
+	if settling {
+		return wi == nil || !wi.errored
+	}
+	return workerGenerationApplied(wi, generation)
 }
 
 func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessManager, error) {
@@ -1205,6 +1232,11 @@ func (pm *ProcessManager) redistributeWorkersGeneration(generation uint64) error
 			} else {
 				ipv6RuntimeReconcileOK = true
 			}
+			if sweeper, ok := pm.ipv6Runtime.(ipv6AssignmentStaleRouteSweeper); ok {
+				if err := sweeper.SweepStaleRoutes(runtimeManagedNetworks, ipv6Assignments); err != nil {
+					log.Printf("ipv6 assignment runtime: sweep stale routes: %v", err)
+				}
+			}
 		}
 		ipv6Interfaces, ipv6ConfiguredCount := collectIPv6AssignmentInterfaceNames(ipv6Assignments)
 		for name := range managedNetworkCompiled.RedistributeIfaces {
@@ -1281,7 +1313,7 @@ func (pm *ProcessManager) redistributeWorkersGeneration(generation uint64) error
 	)
 	applyKernelOwnerConstraints(candidates, rulePlans, rangePlans)
 	applyKernelPressurePolicy(kernelPressure, candidates, previousKernelRules, previousKernelRanges, rulePlans, rangePlans)
-	candidates = pm.prewarmKernelToUserspaceHandoffs(rules, ranges, candidates, rulePlans, rangePlans)
+	candidates = pm.prewarmKernelToUserspaceHandoffs(rules, ranges, sites, candidates, rulePlans, rangePlans)
 
 	activeRuleRangeKernelCandidateCount := countActiveKernelCandidates(candidates, rulePlans, rangePlans, nil)
 	maxCandidateRuleID := int64(0)
@@ -1438,11 +1470,12 @@ func (pm *ProcessManager) redistributeWorkersGeneration(generation uint64) error
 	pm.mu.Unlock()
 
 	enabledRules, enabledRanges, ruleAssignments, rangeAssignments := buildUserspaceAssignments(rules, ranges, rulePlans, rangePlans, pm.cfg.MaxWorkers)
+	releaseUserspaceListenInterfaces(ruleAssignments, rangeAssignments, rules, ranges, sites)
 	// Auto-configure transparent proxy routing BEFORE dispatching config to workers,
 	// so iptables rules are in place before any worker starts using IP_TRANSPARENT sockets.
 	pm.updateTransparentRouting(enabledRules, enabledRanges)
 
-	pm.updateSharedProxy(sites, generation)
+	pm.updateSharedProxy(releaseSharedSiteListenInterfaces(sites, rules, ranges), generation)
 
 	pm.applyRuleAssignmentsGeneration(ruleAssignments, generation)
 	pm.applyRangeAssignmentsGeneration(rangeAssignments, generation)
@@ -2750,7 +2783,7 @@ func (pm *ProcessManager) waitForUserspaceWorkers(ruleIndexes []int, rangeIndexe
 	}
 }
 
-func (pm *ProcessManager) prewarmKernelToUserspaceHandoffs(rules []Rule, ranges []PortRange, candidates []kernelCandidateRule, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) []kernelCandidateRule {
+func (pm *ProcessManager) prewarmKernelToUserspaceHandoffs(rules []Rule, ranges []PortRange, sites []Site, candidates []kernelCandidateRule, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) []kernelCandidateRule {
 	if pm.kernelRuntime == nil || pm.cfg == nil {
 		return candidates
 	}
@@ -2773,6 +2806,7 @@ func (pm *ProcessManager) prewarmKernelToUserspaceHandoffs(rules []Rule, ranges 
 	}
 
 	enabledRules, enabledRanges, ruleAssignments, rangeAssignments := buildUserspaceAssignments(rules, ranges, rulePlans, rangePlans, pm.cfg.MaxWorkers)
+	releaseUserspaceListenInterfaces(ruleAssignments, rangeAssignments, rules, ranges, sites)
 	ruleWorkerIndexes := collectRuleWorkerIndexesForIDs(ruleAssignments, transitionRuleIDs)
 	rangeWorkerIndexes := collectRangeWorkerIndexesForIDs(rangeAssignments, transitionRangeIDs)
 	if len(ruleWorkerIndexes) == 0 && len(rangeWorkerIndexes) == 0 {
@@ -3251,6 +3285,9 @@ func (pm *ProcessManager) egressNATRuntimeStatus(id int64, enabled bool) string 
 	if ok && egressNATPlanIsFullyOverridden(plan) {
 		return "overridden"
 	}
+	if ok && egressNATPlanIsWaitingForChildren(plan) {
+		return "idle"
+	}
 	if ok && egressNATPlanIsUnavailable(plan) {
 		return "error"
 	}
@@ -3267,6 +3304,18 @@ func egressNATPlanIsUnavailable(plan ruleDataplanePlan) bool {
 func egressNATPlanIsFullyOverridden(plan ruleDataplanePlan) bool {
 	return plan.KernelEligible && plan.EffectiveEngine == ruleEngineKernel &&
 		plan.KernelReason == egressNATFullyOverriddenReason && plan.FallbackReason == ""
+}
+
+func egressNATPlanIsWaitingForChildren(plan ruleDataplanePlan) bool {
+	return plan.KernelEligible && plan.EffectiveEngine == ruleEngineKernel &&
+		plan.KernelReason == egressNATWaitingForChildrenReason && plan.FallbackReason == ""
+}
+
+// egressNATPlanHasNothingToApply covers the NATs that need no kernel entries:
+// every child is covered by a more specific NAT, or there is no child yet.
+// Readiness does not wait for them.
+func egressNATPlanHasNothingToApply(plan ruleDataplanePlan) bool {
+	return egressNATPlanIsFullyOverridden(plan) || egressNATPlanIsWaitingForChildren(plan)
 }
 
 func (pm *ProcessManager) buildEgressNATStatus(item EgressNAT, status string) EgressNATStatus {
@@ -4773,6 +4822,11 @@ func (pm *ProcessManager) stopAll() {
 	if pm.managedNetworkRuntime != nil {
 		logShutdownStep("stop managed network runtime", pm.managedNetworkRuntime.Close)
 	}
+	// Before any runtime closes its plugin objects: a hot restart keeps their
+	// preserved state maps for the successor.
+	logShutdownStep("hand off plugin state maps", func() error {
+		return handOffPluginStateMapsForHotRestart(pm.kernelRuntime, pm.pluginRuntime)
+	})
 	if pm.pluginRuntime != nil {
 		logShutdownStep("stop plugin runtime", pm.pluginRuntime.Close)
 	}

@@ -1,5 +1,5 @@
 {
-  "version": 15,
+  "version": 16,
   "runtime": {
     "api_version": "v1",
     "runtime_version": "1.0.0",
@@ -38,6 +38,7 @@
       "control.goja.v1",
       "control.modules.v1",
       "control.action_schema.v1",
+      "control.attachment_status.v1",
       "control.blobs.v1",
       "control.cross_plugin_events.v1",
       "control.durable_events.v1",
@@ -80,10 +81,12 @@
       "dataplane.hook_order.v1",
       "dataplane.hook_bindings.v1",
       "dataplane.xdp_pipeline.v1",
+      "dataplane.xdp_tc_fallback.v1",
       "dataplane.netfilter_pipeline.v1",
       "dataplane.netfilter_skb_dynptr.v1",
       "ebpf.bounded_reads.v1",
       "ebpf.map_transactions.v1",
+      "ebpf.monotonic_clock.v1",
       "ebpf.ring_push.v1",
       "ebpf.private_maps",
       "ebpf.map_state.v1",
@@ -550,6 +553,19 @@
         "permissions": [
           "ebpf.map_write"
         ],
+        "phases": [
+          "runtime",
+          "dataplane_migration"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
+        "method": "ebpf.monotonicMs",
         "phases": [
           "runtime",
           "dataplane_migration"
@@ -2398,6 +2414,18 @@
         "max_response_bytes": 75497472
       },
       {
+        "method": "plugin.attachments",
+        "phases": [
+          "runtime"
+        ],
+        "contexts": [
+          "main",
+          "worker"
+        ],
+        "max_request_bytes": 20971520,
+        "max_response_bytes": 75497472
+      },
+      {
         "method": "plugin.capabilities",
         "permissions": [
           "plugin.register"
@@ -3072,6 +3100,7 @@
     "ebpf.mapPut",
     "ebpf.mapScan",
     "ebpf.mapTransaction",
+    "ebpf.monotonicMs",
     "ebpf.ringRead",
     "ebpf.ringStats",
     "ebpf.ringSubscribe",
@@ -3181,6 +3210,7 @@
     "pipeline.handoff",
     "pipeline.node",
     "plugin.action",
+    "plugin.attachments",
     "plugin.capabilities",
     "plugin.handoff",
     "plugin.host",

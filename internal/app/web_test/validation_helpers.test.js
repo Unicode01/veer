@@ -138,7 +138,7 @@ function createHarness() {
     'validation.rangeOrder': 'The start port must not exceed the end port.',
     'runtimeReason.kernelMixedFamily': 'The kernel dataplane does not support mixed IPv4/IPv6 forwarding yet.',
     'runtimeReason.kernelTransparentIPv6': 'The kernel dataplane does not support transparent IPv6 rules yet.',
-    'runtimeReason.xdpGenericExperimental': 'XDP generic/mixed attachment is disabled by default; enable the experimental `xdp_generic` feature to allow it.',
+    'runtimeReason.xdpGenericDisabled': 'XDP generic/mixed attachment is turned off (`xdp_generic` is false); only native (driver) mode can be used.',
     'runtimeReason.xdpVethNatRedirectLegacyKernel': 'XDP NAT redirect on veth is disabled on this kernel; fall back to TC or upgrade to a newer kernel.',
     'transparent.info.ipv6Unavailable': 'Transparent mode currently supports IPv4 targets only. Disable it for IPv6 targets.',
     'validation.issueJoiner': '; ',
@@ -1403,12 +1403,12 @@ test('translateRuntimeReason covers IPv6 kernel fallback reasons', () => {
     'The kernel dataplane does not support transparent IPv6 rules yet.'
   );
   assert.equal(
-    app.translateRuntimeReason('xdp dataplane generic/mixed attachment requires experimental feature "xdp_generic"'),
-    'XDP generic/mixed attachment is disabled by default; enable the experimental `xdp_generic` feature to allow it.'
+    app.translateRuntimeReason('xdp dataplane generic/mixed attachment is disabled by xdp_generic=false'),
+    'XDP generic/mixed attachment is turned off (`xdp_generic` is false); only native (driver) mode can be used.'
   );
   assert.equal(
-    app.translateRuntimeReason('attach xdp program on ifindex 3: driver=operation not supported; generic skipped: xdp dataplane generic/mixed attachment requires experimental feature "xdp_generic"'),
-    'attach xdp program on ifindex 3: driver=operation not supported; generic skipped: XDP generic/mixed attachment is disabled by default; enable the experimental `xdp_generic` feature to allow it.'
+    app.translateRuntimeReason('attach xdp program on ifindex 3: driver=operation not supported; generic skipped: xdp dataplane generic/mixed attachment is disabled by xdp_generic=false'),
+    'attach xdp program on ifindex 3: driver=operation not supported; generic skipped: XDP generic/mixed attachment is turned off (`xdp_generic` is false); only native (driver) mode can be used.'
   );
   assert.equal(
     app.translateRuntimeReason('xdp dataplane nat redirect over veth is disabled on 5.10.0-39-amd64; use tc or upgrade to kernel 5.11+'),

@@ -22,6 +22,8 @@ type kernelFlowLiveStateSnapshot struct {
 	ByRuleID           map[uint32]kernelStatsValueV4
 	UsedNATV4          map[kernelNATReservationOwnerV4]struct{}
 	UsedNATV6          map[kernelNATReservationOwnerV6]struct{}
+	UsedNATPeersV4     map[kernelNATPeerOwnerV4]struct{}
+	UsedNATPeersV6     map[kernelNATPeerOwnerV6]struct{}
 	NATByBank          kernelNATBankUsage
 	OrphanFrontsByBank kernelFlowOrphanBankSnapshot
 	FlowEntries        int
@@ -30,10 +32,14 @@ type kernelFlowLiveStateSnapshot struct {
 }
 
 type kernelNATBankUsage struct {
-	activeV4 map[kernelNATReservationOwnerV4]struct{}
-	oldV4    map[kernelNATReservationOwnerV4]struct{}
-	activeV6 map[kernelNATReservationOwnerV6]struct{}
-	oldV6    map[kernelNATReservationOwnerV6]struct{}
+	activeV4      map[kernelNATReservationOwnerV4]struct{}
+	oldV4         map[kernelNATReservationOwnerV4]struct{}
+	activeV6      map[kernelNATReservationOwnerV6]struct{}
+	oldV6         map[kernelNATReservationOwnerV6]struct{}
+	peersActiveV4 map[kernelNATPeerOwnerV4]struct{}
+	peersOldV4    map[kernelNATPeerOwnerV4]struct{}
+	peersActiveV6 map[kernelNATPeerOwnerV6]struct{}
+	peersOldV6    map[kernelNATPeerOwnerV6]struct{}
 }
 
 type kernelNATReservationOwnerV4 struct {
@@ -46,6 +52,49 @@ type kernelNATReservationOwnerV6 struct {
 	SessionID uint64
 }
 
+// kernelNATPeerOwner is the flow session a NAT peer entry belongs to.
+type kernelNATPeerOwner[K comparable] struct {
+	Key       K
+	SessionID uint64
+}
+
+type kernelNATPeerOwnerV4 = kernelNATPeerOwner[tcNATPeerKeyV4]
+type kernelNATPeerOwnerV6 = kernelNATPeerOwner[tcNATPeerKeyV6]
+
+// kernelNATPeerKey is a NAT peer map key; class gives the key of the shared
+// port it uses.
+type kernelNATPeerKey[C comparable] interface {
+	comparable
+	class() C
+}
+
+func (key tcNATPeerKeyV4) class() tcNATPortKeyV4 { return key.Port }
+
+func (key tcNATPeerKeyV6) class() tcNATPortKeyV6 { return key.Port }
+
+// kernelNATBankMaps are one bank's NAT maps of one address family: the port
+// classes and the mappings on shared ports.
+type kernelNATBankMaps struct {
+	ports *ebpf.Map
+	peers *ebpf.Map
+}
+
+func (refs kernelRuntimeMapRefs) natBankV4() kernelNATBankMaps {
+	return kernelNATBankMaps{ports: refs.natV4, peers: refs.natPeersV4}
+}
+
+func (refs kernelRuntimeMapRefs) natOldBankV4() kernelNATBankMaps {
+	return kernelNATBankMaps{ports: refs.natOldV4, peers: refs.natPeersOldV4}
+}
+
+func (refs kernelRuntimeMapRefs) natBankV6() kernelNATBankMaps {
+	return kernelNATBankMaps{ports: refs.natV6, peers: refs.natPeersV6}
+}
+
+func (refs kernelRuntimeMapRefs) natOldBankV6() kernelNATBankMaps {
+	return kernelNATBankMaps{ports: refs.natOldV6, peers: refs.natPeersOldV6}
+}
+
 func newKernelFlowLiveStateSnapshot(includeNAT bool) kernelFlowLiveStateSnapshot {
 	out := kernelFlowLiveStateSnapshot{
 		ByRuleID: make(map[uint32]kernelStatsValueV4),
@@ -53,6 +102,8 @@ func newKernelFlowLiveStateSnapshot(includeNAT bool) kernelFlowLiveStateSnapshot
 	if includeNAT {
 		out.UsedNATV4 = make(map[kernelNATReservationOwnerV4]struct{})
 		out.UsedNATV6 = make(map[kernelNATReservationOwnerV6]struct{})
+		out.UsedNATPeersV4 = make(map[kernelNATPeerOwnerV4]struct{})
+		out.UsedNATPeersV6 = make(map[kernelNATPeerOwnerV6]struct{})
 	}
 	return out
 }

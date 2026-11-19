@@ -2,11 +2,14 @@
 """Load veer's embedded eBPF collections on pinned distribution kernels.
 
 Each kernel boots in a disposable QEMU guest whose initramfs holds busybox,
-the cross-built `internal/app` test binary and the repository's eBPF sources
-and objects. The guest runs TestLoadEmbeddedKernelCollectionsSmoke, which
-loads the TC, TC-stats, XDP and XDP-stats collections and the XDP plugin
-dispatcher the way the runtime does. A verifier that rejects any program, or
-a skipped test, fails the check.
+the cross-built `internal/app` test binary, the repository's eBPF sources and
+objects, and the bundled plugins' objects listed in PLUGIN_OBJECTS. The guest
+runs TestLoadEmbeddedKernelCollectionsSmoke, which loads the TC, TC-stats, XDP
+and XDP-stats collections and the XDP plugin dispatcher the way the runtime
+does, and TestLoadBundledPluginObjectsSmoke, which loads each plugin object
+behind that dispatcher the way the XDP plugin runtime does. A verifier that
+rejects any program, or a skipped test, fails the check. With --host the same
+tests also run on the kernel this script runs on, such as a CI runner's.
 
 Older verifiers are the ones that break: on Ubuntu 22.04's first kernel
 (5.15.0-25) a single BPF-to-BPF call in the TC object once pushed
@@ -59,7 +62,11 @@ KERNELS = {
          "https://snapshot.debian.org/archive/debian/20260704T211317Z" + DEBIAN_SIGNED),
     ),
 }
-TEST_NAME = "TestLoadEmbeddedKernelCollectionsSmoke"
+TESTS = ("TestLoadEmbeddedKernelCollectionsSmoke", "TestLoadBundledPluginObjectsSmoke")
+TEST_PATTERN = "^(" + "|".join(TESTS) + ")$"
+# Bundled plugin objects TestLoadBundledPluginObjectsSmoke loads, relative to
+# the repository root (scripts/build-plugin-ebpf.sh builds them).
+PLUGIN_OBJECTS = ("plugins/firewall/firewall.o",)
 INIT = f"""#!/bin/sh
 export PATH=/bin
 mount -t proc proc /proc
@@ -68,7 +75,7 @@ mount -t devtmpfs dev /dev 2>/dev/null
 mount -t tmpfs tmp /tmp
 echo "GUEST_KERNEL $(uname -r)"
 cd /repo/internal/app
-FORWARD_RUN_KERNEL_LOAD_SMOKE=1 ./veer.test -test.run '^{TEST_NAME}$' -test.count=1 -test.v > /tmp/out.txt 2>&1
+FORWARD_RUN_KERNEL_LOAD_SMOKE=1 ./veer.test -test.run '{TEST_PATTERN}' -test.count=1 -test.v > /tmp/out.txt 2>&1
 echo "GUEST_RC $?"
 cat /tmp/out.txt
 echo "GUEST_END"
@@ -196,6 +203,14 @@ def build_initramfs(path, busybox, test_binary):
                 archive.directory(name)
             elif source.is_file():
                 archive.file(name, source)
+        for relative in PLUGIN_OBJECTS:
+            parts = relative.split("/")
+            for depth in range(1, len(parts)):
+                directory = "repo/" + "/".join(parts[:depth])
+                if directory not in made:
+                    archive.directory(directory)
+                    made.add(directory)
+            archive.file("repo/" + relative, ROOT / relative)
         archive.file("repo/internal/app/veer.test", test_binary, 0o755)
         archive.close()
 
@@ -221,7 +236,31 @@ def boot(name, kernel, initramfs, memory, output):
     text = console.read_text(encoding="utf-8", errors="replace").replace("\r", "") if console.exists() else ""
     start, end = text.find("GUEST_KERNEL"), text.find("GUEST_END")
     report = text[start:end] if start >= 0 and end > start else text[-6000:]
-    passed = ("GUEST_RC 0\n" in report and f"--- PASS: {TEST_NAME} " in report
+    return summarize(name, report, started)
+
+
+def run_host(test_binary, output):
+    """Runs the tests on this machine's kernel, as root, from the checkout."""
+    started = time.monotonic()
+    print(f"run on the host kernel {os.uname().release}", flush=True)
+    env = dict(os.environ, FORWARD_RUN_KERNEL_LOAD_SMOKE="1")
+    try:
+        result = subprocess.run([str(test_binary), "-test.run", TEST_PATTERN, "-test.count=1", "-test.v"],
+                                cwd=ROOT / "internal/app", env=env, capture_output=True, text=True,
+                                errors="replace", timeout=900, check=False)
+        text, code = result.stdout + result.stderr, result.returncode
+    except subprocess.TimeoutExpired as expired:
+        partial = expired.stdout or b""
+        if isinstance(partial, bytes):
+            partial = partial.decode(errors="replace")
+        text, code = partial + "\nhost run timed out\n", "timeout"
+    (output / "host-console.log").write_text(text, encoding="utf-8")
+    report = f"GUEST_KERNEL {os.uname().release}\nGUEST_RC {code}\n{text}"
+    return summarize("host", report, started)
+
+
+def summarize(name, report, started):
+    passed = ("GUEST_RC 0\n" in report and all(f"--- PASS: {test} " in report for test in TESTS)
               and "--- SKIP" not in report and "--- FAIL" not in report)
     if passed:
         lines = [line for line in report.splitlines() if line.startswith(("GUEST_", "=== RUN", "--- "))]
@@ -241,38 +280,54 @@ def main():
     parser.add_argument("--memory", type=int, default=1024)
     parser.add_argument("--output", type=Path, default=ROOT / "dist/kernel-load")
     parser.add_argument("--cache", type=Path, help="keep downloaded kernel packages here")
+    parser.add_argument("--host", action="store_true",
+                        help="also run the tests on the kernel this script runs on (needs root)")
     args = parser.parse_args()
     names = [name.strip() for name in args.kernels.split(",") if name.strip()]
     unknown = [name for name in names if name not in KERNELS]
     if unknown:
         parser.error(f"unknown kernels: {', '.join(unknown)}")
+    if not names and not args.host:
+        parser.error("nothing to check: no --kernels and no --host")
     if args.memory < 512:
         parser.error("the guest needs at least 512 MiB")
-    for command in ("qemu-system-x86_64", "dpkg-deb", "curl", "ldd"):
-        if shutil.which(command) is None:
-            parser.error(f"required command is unavailable: {command}")
-    busybox = shutil.which("busybox")
-    if busybox is None:
-        parser.error("busybox is unavailable (install busybox-static)")
+    busybox = None
+    if names:
+        for command in ("qemu-system-x86_64", "dpkg-deb", "curl", "ldd"):
+            if shutil.which(command) is None:
+                parser.error(f"required command is unavailable: {command}")
+        busybox = shutil.which("busybox")
+        if busybox is None:
+            parser.error("busybox is unavailable (install busybox-static)")
+    if args.host and os.geteuid() != 0:
+        parser.error("--host loads eBPF programs and needs root")
     if not args.test_binary.is_file():
         parser.error(f"missing test binary: {args.test_binary}")
     for name in ("forward-tc-bpf.o", "forward-xdp-bpf.o"):
         if not (ROOT / "internal/app/ebpf" / name).is_file():
             parser.error(f"missing eBPF object {name}; run sh scripts/build-ebpf.sh first")
+    for relative in PLUGIN_OBJECTS:
+        if not (ROOT / relative).is_file():
+            parser.error(f"missing plugin object {relative}; run sh scripts/build-plugin-ebpf.sh first")
     args.output.mkdir(parents=True, exist_ok=True)
+    failed = []
     with tempfile.TemporaryDirectory(prefix="veer-kernel-load-") as temporary:
         directory = Path(temporary)
         cache = args.cache.resolve() if args.cache else directory
         cache.mkdir(parents=True, exist_ok=True)
         initramfs = directory / "initramfs.gz"
-        build_initramfs(initramfs, Path(busybox).resolve(), args.test_binary.resolve())
-        failed = []
+        if names:
+            build_initramfs(initramfs, Path(busybox).resolve(), args.test_binary.resolve())
         for name in names:
             if not boot(name, fetch_kernel(name, cache), initramfs, args.memory, args.output.resolve()):
                 failed.append(name)
+    if args.host:
+        names.append("host")
+        if not run_host(args.test_binary.resolve(), args.output.resolve()):
+            failed.append("host")
     if failed:
-        raise SystemExit(f"embedded eBPF collections failed to load on: {', '.join(failed)}")
-    print(f"embedded eBPF collections loaded on: {', '.join(names)}", flush=True)
+        raise SystemExit(f"embedded eBPF collections or plugin objects failed to load on: {', '.join(failed)}")
+    print(f"embedded eBPF collections and plugin objects loaded on: {', '.join(names)}", flush=True)
 
 
 if __name__ == "__main__":

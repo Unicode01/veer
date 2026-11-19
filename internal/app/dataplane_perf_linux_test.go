@@ -340,6 +340,7 @@ func TestDataplanePerfMatrix(t *testing.T) {
 	modes := []dataplanePerfMode{
 		{Name: "iptables", Expected: "iptables"},
 		{Name: "nftables", Expected: "nftables"},
+		{Name: "nftables-flowtable", Expected: "nftables"},
 		{Name: "userspace", Default: ruleEngineUserspace, Expected: ruleEngineUserspace},
 		{Name: "tc", Default: ruleEngineKernel, Order: []string{kernelEngineTC}, Expected: ruleEngineKernel, ExpectedKern: kernelEngineTC},
 		{
@@ -348,9 +349,6 @@ func TestDataplanePerfMatrix(t *testing.T) {
 			Order:        []string{kernelEngineXDP},
 			Expected:     ruleEngineKernel,
 			ExpectedKern: kernelEngineXDP,
-			Experimental: map[string]bool{
-				experimentalFeatureXDPGeneric: true,
-			},
 		},
 	}
 	modes = selectDataplanePerfModes(t, modes)
@@ -625,8 +623,8 @@ func runDataplanePerfMode(t *testing.T, baseBinary string, topology dataplanePer
 	if mode.Name == "iptables" {
 		return runDataplanePerfIptablesMode(t, topology, scenario, steadySeconds)
 	}
-	if mode.Name == "nftables" {
-		return runDataplanePerfNFTablesMode(t, topology, scenario, steadySeconds)
+	if mode.Name == "nftables" || mode.Name == "nftables-flowtable" {
+		return runDataplanePerfNFTablesMode(t, topology, scenario, steadySeconds, mode.Name)
 	}
 
 	modeDir := t.TempDir()
@@ -740,10 +738,15 @@ func runDataplanePerfIptablesMode(t *testing.T, topology dataplanePerfTopology, 
 	return result
 }
 
-func runDataplanePerfNFTablesMode(t *testing.T, topology dataplanePerfTopology, scenario dataplanePerfScenario, steadySeconds int) dataplanePerfResult {
+// runDataplanePerfNFTablesMode measures nftables DNAT; the nftables-flowtable
+// mode also puts established flows on a software flowtable.
+func runDataplanePerfNFTablesMode(t *testing.T, topology dataplanePerfTopology, scenario dataplanePerfScenario, steadySeconds int, modeName string) dataplanePerfResult {
 	t.Helper()
 	backend := setupDataplanePerfNFTablesDNAT(t, topology)
 	defer cleanupDataplanePerfNFTablesDNAT(topology)
+	if modeName == "nftables-flowtable" {
+		addDataplanePerfNFTablesFlowtable(t, "forward_perf_filter_nft", topology.ClientHostIF, topology.BackendHostIF)
+	}
 
 	seedDataplanePerfNeighbors(t, topology)
 
@@ -760,9 +763,18 @@ func runDataplanePerfNFTablesMode(t *testing.T, topology dataplanePerfTopology, 
 	}
 	hostCPUEnd := readDataplanePerfCPUStat(t)
 
-	result := dataplanePerfBuildResult("nftables", scenario, clientResult, 0, "nftables", backend)
+	result := dataplanePerfBuildResult(modeName, scenario, clientResult, 0, "nftables", backend)
 	result.HostBusyCores = dataplanePerfBusyCores(hostCPUStart, hostCPUEnd, hz, clientResult.Elapsed)
 	return result
+}
+
+// addDataplanePerfNFTablesFlowtable offloads the forward chain's TCP and UDP
+// flows to a software flowtable over devices: nftables' own fast path, which
+// skips the netfilter hooks once conntrack has seen both directions.
+func addDataplanePerfNFTablesFlowtable(t *testing.T, table string, devices ...string) {
+	t.Helper()
+	mustRunDataplanePerfCmd(t, "nft", "add", "flowtable", "ip", table, "ft", "{ hook ingress priority 0; devices = { "+strings.Join(devices, ", ")+" }; }")
+	mustRunDataplanePerfCmd(t, "nft", "insert", "rule", "ip", table, "forward", "meta", "l4proto", "{ tcp, udp }", "flow", "add", "@ft")
 }
 
 func dataplanePerfBuildResult(modeName string, scenario dataplanePerfScenario, clientResult dataplanePerfClientResult, cpuSeconds float64, effectiveEngine string, kernelEngine string) dataplanePerfResult {
@@ -2064,6 +2076,20 @@ func setupDataplanePerfTopology(t *testing.T) dataplanePerfTopology {
 	cleanup()
 	t.Cleanup(cleanup)
 
+	// The host routes between the namespaces, as a router does. Without IPv4
+	// forwarding the TC core's FIB lookups fail ("forwarding disabled") and
+	// every packet takes the bpf_redirect_neigh fallback, which a router
+	// never runs on, so every mode runs with it on.
+	originalIPForward := strings.TrimSpace(readDataplanePerfProcFile(t, "/proc/sys/net/ipv4/ip_forward"))
+	t.Cleanup(func() {
+		if originalIPForward != "" {
+			if output, err := exec.Command("sysctl", "-w", "net.ipv4.ip_forward="+originalIPForward).CombinedOutput(); err != nil {
+				t.Logf("dataplane perf: restore net.ipv4.ip_forward=%s failed: %v (%s)", originalIPForward, err, strings.TrimSpace(string(output)))
+			}
+		}
+	})
+	mustRunDataplanePerfCmd(t, "sysctl", "-w", "net.ipv4.ip_forward=1")
+
 	mustRunDataplanePerfCmd(t, "ip", "netns", "add", topology.ClientNS)
 	mustRunDataplanePerfCmd(t, "ip", "netns", "add", topology.BackendNS)
 	mustRunDataplanePerfCmd(t, "ip", "link", "add", topology.ClientHostIF, "type", "veth", "peer", "name", topology.ClientNSIF)
@@ -2935,14 +2961,16 @@ func createDataplanePerfRule(t *testing.T, apiBase string, topology dataplanePer
 	t.Helper()
 
 	payload := map[string]any{
-		"in_interface":      topology.ClientHostIF,
-		"in_ip":             dataplanePerfFrontAddr,
-		"in_port":           dataplanePerfFrontPort,
-		"out_interface":     topology.BackendHostIF,
-		"out_ip":            dataplanePerfBackendAddr,
-		"out_port":          dataplanePerfBackendPort,
-		"protocol":          dataplanePerfProtocol(),
-		"transparent":       true,
+		"in_interface":  topology.ClientHostIF,
+		"in_ip":         dataplanePerfFrontAddr,
+		"in_port":       dataplanePerfFrontPort,
+		"out_interface": topology.BackendHostIF,
+		"out_ip":        dataplanePerfBackendAddr,
+		"out_port":      dataplanePerfBackendPort,
+		"protocol":      dataplanePerfProtocol(),
+		// FORWARD_PERF_FULLNAT=1 measures a full-NAT port forward instead of
+		// a transparent one; the iptables and nftables modes stay DNAT only.
+		"transparent":       os.Getenv("FORWARD_PERF_FULLNAT") != "1",
 		"engine_preference": mode.Default,
 		"remark":            "dataplane-perf",
 		"tag":               "perf",

@@ -343,3 +343,172 @@ func sameStrings(got []string, want []string) bool {
 	slices.Sort(want)
 	return slices.Equal(got, want)
 }
+
+// fakeGoneIPv6RuntimeOps can report interfaces as gone, as the tap of a
+// destroyed guest is while the interface inventory still plans its
+// assignment.
+type fakeGoneIPv6RuntimeOps struct {
+	fakeIPv6RuntimeOps
+	gone      map[string]bool
+	routeErrs map[string]error
+	// goneOnRouteErr makes a target gone once its route failed: the
+	// interface disappeared between the first check and the route.
+	goneOnRouteErr bool
+}
+
+func (ops *fakeGoneIPv6RuntimeOps) EnsureIPv6Route(spec IPv6RouteSpec) error {
+	_ = ops.fakeIPv6RuntimeOps.EnsureIPv6Route(spec)
+	err := ops.routeErrs[spec.TargetInterface]
+	if err != nil && ops.goneOnRouteErr {
+		ops.gone[spec.TargetInterface] = true
+	}
+	return err
+}
+
+func (ops *fakeGoneIPv6RuntimeOps) IPv6InterfaceGone(name string) bool {
+	return ops.gone[name]
+}
+
+// SnapshotIPv6AssignmentCounters reports lan1's services as running.
+func (ops *fakeGoneIPv6RuntimeOps) SnapshotIPv6AssignmentCounters() map[string]IPv6RuntimeCounter {
+	return map[string]IPv6RuntimeCounter{"lan1": {RAStatus: "running", DHCPv6Status: "running"}}
+}
+
+func testIPv6RuntimePlansWithLiveTarget() []IPv6AssignmentPlan {
+	return append(testIPv6RuntimePlans(), IPv6AssignmentPlan{
+		ID:              3,
+		ParentInterface: "wan1",
+		TargetInterface: "lan1",
+		ParentPrefix:    "2001:db8:2::/64",
+		AssignedPrefix:  "2001:db8:2::20/128",
+		AssignedAddress: "2001:db8:2::20",
+		ProxyAddress:    "2001:db8:2::20",
+		NeedsForwarding: true,
+		NeedsProxyNDP:   true,
+		IsSingleAddress: true,
+	})
+}
+
+func TestIPv6AssignmentRuntimeLeavesAssignmentsOfGoneTargetDormant(t *testing.T) {
+	t.Parallel()
+
+	ops := &fakeGoneIPv6RuntimeOps{gone: map[string]bool{}}
+	rt := NewIPv6AssignmentRuntime(ops)
+	if err := rt.Reconcile(testIPv6RuntimePlansWithLiveTarget(), nil); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	ops.gone["lan0"] = true
+	ops.fakeIPv6RuntimeOps = fakeIPv6RuntimeOps{}
+	if err := rt.Reconcile(testIPv6RuntimePlansWithLiveTarget(), nil); err != nil {
+		t.Fatalf("Reconcile() with lan0 gone error = %v, want the planned assignments on it to wait", err)
+	}
+	for _, route := range ops.ensureRoutes {
+		if route.TargetInterface == "lan0" {
+			t.Fatalf("route %+v re-added on a gone target", route)
+		}
+	}
+	if sameStrings(ops.forwardingInterfaces, []string{"lan1", "wan1"}) == false {
+		t.Fatalf("forwarding enabled on %v, want only the live assignment's lan1 and wan1", ops.forwardingInterfaces)
+	}
+	// What the dormant assignments had is removed as for assignments that
+	// went away: the route and proxy lead nowhere and the services have no
+	// interface to run on.
+	assertIPv6DeleteCallCounts(t, &ops.fakeIPv6RuntimeOps, 2, 1, 1, 1, 1, 1)
+	if !slices.Equal(ops.deleteRAs, []string{"lan0"}) || !slices.Equal(ops.deleteDHCPv6, []string{"lan0"}) {
+		t.Fatalf("services removed from %v / %v, want lan0", ops.deleteRAs, ops.deleteDHCPv6)
+	}
+	if len(ops.ensureProxies) != 1 || ops.ensureProxies[0].Address != "2001:db8:2::20" {
+		t.Fatalf("proxies ensured = %+v, want only the live assignment's", ops.ensureProxies)
+	}
+
+	stats := rt.SnapshotStats()
+	for _, id := range []int64{1, 2} {
+		if stats[id].RuntimeStatus != "draining" || !strings.Contains(stats[id].RuntimeDetail, "target interface lan0 is gone") {
+			t.Fatalf("stats[%d] = %+v, want a draining assignment waiting on its gone target", id, stats[id])
+		}
+	}
+	if stats[3].RuntimeStatus != "running" {
+		t.Fatalf("stats[3] = %+v, want the live assignment running", stats[3])
+	}
+
+	// The next reconcile has nothing left to remove.
+	ops.fakeIPv6RuntimeOps = fakeIPv6RuntimeOps{}
+	if err := rt.Reconcile(testIPv6RuntimePlansWithLiveTarget(), nil); err != nil {
+		t.Fatalf("second Reconcile() with lan0 gone error = %v", err)
+	}
+	assertIPv6DeleteCallCounts(t, &ops.fakeIPv6RuntimeOps, 0, 0, 0, 0, 0, 0)
+}
+
+func TestIPv6AssignmentRuntimeTargetGoneDuringReconcileDoesNotFail(t *testing.T) {
+	t.Parallel()
+
+	ops := &fakeGoneIPv6RuntimeOps{
+		gone:           map[string]bool{},
+		routeErrs:      map[string]error{"lan0": errors.New("Link not found")},
+		goneOnRouteErr: true,
+	}
+	rt := NewIPv6AssignmentRuntime(ops)
+	if err := rt.Reconcile(testIPv6RuntimePlansWithLiveTarget(), nil); err != nil {
+		t.Fatalf("Reconcile() error = %v, want a target that vanished mid-reconcile to wait", err)
+	}
+	stats := rt.SnapshotStats()
+	if stats[1].RuntimeStatus != "draining" || stats[3].RuntimeStatus != "running" {
+		t.Fatalf("stats = %+v, want 1 draining and 3 running", stats)
+	}
+}
+
+func TestIPv6AssignmentRuntimeReportsRouteFailureOnPresentTarget(t *testing.T) {
+	t.Parallel()
+
+	ops := &fakeGoneIPv6RuntimeOps{
+		gone:      map[string]bool{},
+		routeErrs: map[string]error{"lan1": errors.New("route rejected")},
+	}
+	rt := NewIPv6AssignmentRuntime(ops)
+	err := rt.Reconcile(testIPv6RuntimePlansWithLiveTarget(), nil)
+	if err == nil || !strings.Contains(err.Error(), "assignment #3 route 2001:db8:2::20/128 via lan1: route rejected") {
+		t.Fatalf("Reconcile() error = %v, want the route failure on a present target", err)
+	}
+	if stats := rt.SnapshotStats(); stats[3].RuntimeStatus != "error" {
+		t.Fatalf("stats[3] = %+v, want error", stats[3])
+	}
+}
+
+func TestIPv6AssignmentRuntimeReportsAndRevivesReturnedDormantTargets(t *testing.T) {
+	t.Parallel()
+
+	ops := &fakeGoneIPv6RuntimeOps{gone: map[string]bool{"lan0": true}}
+	rt := NewIPv6AssignmentRuntime(ops)
+	if err := rt.Reconcile(testIPv6RuntimePlansWithLiveTarget(), nil); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if got := rt.DormantTargets(); !slices.Equal(got, []string{"lan0"}) {
+		t.Fatalf("DormantTargets() = %v, want [lan0]", got)
+	}
+	if got := rt.ReturnedDormantTargets(); len(got) != 0 {
+		t.Fatalf("ReturnedDormantTargets() = %v while lan0 is gone, want none", got)
+	}
+
+	// The guest restarted: its tap is back under the same name.
+	ops.gone["lan0"] = false
+	if got := rt.ReturnedDormantTargets(); !slices.Equal(got, []string{"lan0"}) {
+		t.Fatalf("ReturnedDormantTargets() = %v, want [lan0]", got)
+	}
+	ops.fakeIPv6RuntimeOps = fakeIPv6RuntimeOps{}
+	if err := rt.Reconcile(testIPv6RuntimePlansWithLiveTarget(), nil); err != nil {
+		t.Fatalf("Reconcile() after lan0 returned error = %v", err)
+	}
+	routes := 0
+	for _, route := range ops.ensureRoutes {
+		if route.TargetInterface == "lan0" {
+			routes++
+		}
+	}
+	if routes != 2 || len(ops.ensureProxies) != 2 {
+		t.Fatalf("after lan0 returned: lan0 routes=%d proxies=%+v, want both assignments applied again", routes, ops.ensureProxies)
+	}
+	if got := rt.DormantTargets(); len(got) != 0 {
+		t.Fatalf("DormantTargets() = %v after the target returned, want none", got)
+	}
+}

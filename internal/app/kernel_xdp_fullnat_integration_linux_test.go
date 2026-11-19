@@ -599,9 +599,6 @@ func xdpFullNATIntegrationMode(name string) dataplanePerfMode {
 		Order:        []string{kernelEngineXDP},
 		Expected:     ruleEngineKernel,
 		ExpectedKern: kernelEngineXDP,
-		Experimental: map[string]bool{
-			experimentalFeatureXDPGeneric: true,
-		},
 	}
 }
 

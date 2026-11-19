@@ -138,7 +138,11 @@ func (srv *ipv6DHCPv6Server) run() {
 		config := srv.snapshot()
 		state, fd, err := openIPv6DHCPv6Socket(config)
 		if err != nil {
-			srv.logIssue(fmt.Sprintf("open socket: %v", err))
+			if isLinkGoneOrDownError(err) {
+				srv.noteIssue(fmt.Sprintf("open socket: %v", err))
+			} else {
+				srv.logIssue(fmt.Sprintf("open socket: %v", err))
+			}
 			select {
 			case <-srv.stopCh:
 				return
@@ -183,6 +187,13 @@ func (srv *ipv6DHCPv6Server) run() {
 						}
 						continue
 					}
+					if isLinkGoneOrDownError(err) {
+						// The interface went down or away, as a guest's tap
+						// does when the guest stops; the socket is reopened
+						// once it is back. Expected, so not logged.
+						srv.noteIssue(fmt.Sprintf("read: %v", err))
+						return
+					}
 					srv.logIssue(fmt.Sprintf("read: %v", err))
 					return
 				}
@@ -208,6 +219,17 @@ func (srv *ipv6DHCPv6Server) run() {
 		default:
 		}
 	}
+}
+
+// noteIssue records an issue for the runtime status without logging it.
+func (srv *ipv6DHCPv6Server) noteIssue(text string) {
+	if srv == nil {
+		return
+	}
+	srv.mu.Lock()
+	srv.lastIssueText = text
+	srv.lastIssueAt = time.Now()
+	srv.mu.Unlock()
 }
 
 func (srv *ipv6DHCPv6Server) logIssue(text string) {

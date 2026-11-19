@@ -78,9 +78,10 @@ func TestBuildKernelTCIfindexHintsMarksFullConeEgressNAT(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildKernelTCIfindexHints() error = %v", err)
 	}
+	// Every egress NAT interface may carry hairpin traffic.
 	want := kernelTCIfindexHints{
-		3: kernelTCIfindexHintRuleAny | kernelTCIfindexHintFullCone,
-		4: kernelTCIfindexHintRuleAny,
+		3: kernelTCIfindexHintRuleAny | kernelTCIfindexHintFullCone | kernelTCIfindexHintHairpin,
+		4: kernelTCIfindexHintRuleAny | kernelTCIfindexHintHairpin,
 		5: kernelTCIfindexHintRuleAny,
 	}
 	if !maps.Equal(hints, want) {

@@ -70,6 +70,7 @@ func mustBuildPluginHostControlCapabilities() []pluginHostControlCapability {
 	}
 
 	add([]string{"plugin.host"}, pluginHostCapabilityOptions{phases: allPhases})
+	add([]string{"plugin.attachments"}, pluginHostCapabilityOptions{})
 	add([]string{"process.exec"}, pluginHostCapabilityOptions{permissions: []string{"exec"}})
 	add([]string{"process.start", "process.status", "process.stop", "process.restart", "process.list", "process.logs"}, pluginHostCapabilityOptions{permissions: []string{"exec"}, contexts: mainOnly})
 	add([]string{"process.binaryInstall", "process.binaryStatus", "process.binarySelect", "process.binaryRemove"}, pluginHostCapabilityOptions{permissions: []string{"exec"}, contexts: mainOnly})
@@ -97,6 +98,7 @@ func mustBuildPluginHostControlCapabilities() []pluginHostControlCapability {
 	add([]string{"plugins.services.call"}, pluginHostCapabilityOptions{permissions: []string{"plugin.action"}})
 	add([]string{"ebpf.mapPut", "ebpf.mapTransaction", "ebpf.mapDelete", "ebpf.mapClear"}, pluginHostCapabilityOptions{permissions: []string{"ebpf.map_write"}, phases: runtimeAndDataplaneMigration})
 	add([]string{"ebpf.mapGet", "ebpf.mapGetPerCPU", "ebpf.mapScan", "ebpf.ringRead", "ebpf.ringStats"}, pluginHostCapabilityOptions{permissions: []string{"ebpf.map_read"}, phases: runtimeAndDataplaneMigration})
+	add([]string{"ebpf.monotonicMs"}, pluginHostCapabilityOptions{phases: runtimeAndDataplaneMigration})
 
 	namespaceConditional := []string{"net.namespace"}
 	add([]string{"net.l2.send", "net.l2.recv", "net.l2.recvMany", "net.l2.exchange", "net.l2.exchangeMany"}, pluginHostCapabilityOptions{

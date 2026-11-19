@@ -143,17 +143,17 @@
   app.translateRuntimeReason = function translateRuntimeReason(reason) {
     const text = String(reason || '').trim();
     if (!text) return '';
-    const xdpGenericExperimentalReason = 'xdp dataplane generic/mixed attachment requires experimental feature "xdp_generic"';
+    const xdpGenericDisabledReason = 'xdp dataplane generic/mixed attachment is disabled by xdp_generic=false';
     const xdpVethNATRedirectPrefix = 'xdp dataplane nat redirect over veth is disabled on ';
 
     const translated = {
       'kernel dataplane does not support mixed IPv4/IPv6 forwarding': app.t('runtimeReason.kernelMixedFamily'),
       'kernel dataplane currently does not support transparent IPv6 rules': app.t('runtimeReason.kernelTransparentIPv6'),
-      'xdp dataplane generic/mixed attachment requires experimental feature "xdp_generic"': app.t('runtimeReason.xdpGenericExperimental')
+      'xdp dataplane generic/mixed attachment is disabled by xdp_generic=false': app.t('runtimeReason.xdpGenericDisabled')
     };
 
-    if (text.indexOf(xdpGenericExperimentalReason) >= 0) {
-      return text.replace(xdpGenericExperimentalReason, app.t('runtimeReason.xdpGenericExperimental'));
+    if (text.indexOf(xdpGenericDisabledReason) >= 0) {
+      return text.replace(xdpGenericDisabledReason, app.t('runtimeReason.xdpGenericDisabled'));
     }
     if (text.indexOf(xdpVethNATRedirectPrefix) === 0) {
       return app.t('runtimeReason.xdpVethNatRedirectLegacyKernel');

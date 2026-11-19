@@ -21,6 +21,13 @@ func (rt *linuxKernelRuleRuntime) attachmentHealthSnapshot() []kernelAttachmentH
 	healthy := true
 	if attachmentRuleSets.hasTargets() {
 		healthy = kernelAttachmentsHealthyForRuleSets(attachmentRuleSets, attachments, programs)
+		if !healthy {
+			// A hook on an interface that is gone is not missing: no packet
+			// arrives there, and the next reconcile drops it from the sets.
+			if live := attachmentRuleSets.withoutGoneLinks(kernelLinkIndexGone); len(live.Vanished) > len(attachmentRuleSets.Vanished) {
+				healthy = kernelAttachmentsHealthyForRuleSets(live, attachments, programs)
+			}
+		}
 	}
 	return []kernelAttachmentHealthSnapshot{{
 		Engine:        kernelEngineTC,
@@ -42,6 +49,12 @@ func (rt *xdpKernelRuleRuntime) attachmentHealthSnapshot() []kernelAttachmentHea
 	if len(preparedRules) > 0 {
 		requiredIfIndices := collectXDPInterfaces(preparedRules)
 		healthy = xdpAttachmentsHealthy(requiredIfIndices, attachments, programID)
+		if !healthy {
+			// An interface that is gone needs no attachment.
+			if live, vanished := withoutGoneXDPLinks(requiredIfIndices, kernelLinkIndexGone); len(vanished) > 0 {
+				healthy = xdpAttachmentsHealthy(live, attachments, programID)
+			}
+		}
 	}
 	return []kernelAttachmentHealthSnapshot{{
 		Engine:        kernelEngineXDP,
@@ -77,8 +90,11 @@ func (rt *linuxKernelRuleRuntime) healAttachments() ([]kernelAttachmentHealResul
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
-	attachmentRuleSets := effectiveKernelAttachmentRuleSets(rt.preparedRules, rt.attachmentRuleSets)
-	if rt.coll == nil || rt.coll.Maps == nil || !attachmentRuleSets.hasTargets() {
+	if rt.coll == nil || rt.coll.Maps == nil {
+		return nil, nil
+	}
+	attachmentRuleSets := effectiveKernelAttachmentRuleSets(rt.preparedRules, rt.attachmentRuleSets).withoutGoneLinks(kernelLinkIndexGone)
+	if !attachmentRuleSets.hasTargets() {
 		return nil, nil
 	}
 
@@ -155,7 +171,7 @@ func (rt *xdpKernelRuleRuntime) healAttachments() ([]kernelAttachmentHealResult,
 		return nil, nil
 	}
 
-	requiredIfIndices := collectXDPInterfaces(rt.preparedRules)
+	requiredIfIndices, _ := withoutGoneXDPLinks(collectXDPInterfaces(rt.preparedRules), kernelLinkIndexGone)
 	if xdpAttachmentsHealthy(requiredIfIndices, rt.attachments, rt.programID) {
 		return nil, nil
 	}

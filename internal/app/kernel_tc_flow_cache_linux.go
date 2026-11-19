@@ -12,14 +12,17 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// The flow cache (the kernel_tc_flow_cache setting): the core's fast path
-// records in the flow entry of an established egress NAT flow how it sent
-// the packet (tcFlowFastV4), and the dispatcher sends the flow's next packets
-// the same way straight from its flow lookup, before the rule lookup. The
-// core never records for a packet entering an interface where a plugin hook
-// runs on ingress, so such interfaces keep the full path. A record lasts
-// until its entry's fast-path window ends; bumping the generation in
-// tc_flow_cache_state_v4 retires all of them at once.
+// The flow cache (the kernel_tc_flow_cache setting): the core records in the
+// flow entry of an established flow how it sent the packet (tcFlowFastV4,
+// tcFlowFastV6), and the dispatcher sends the flow's next packets the same
+// way straight from its flow lookup, before the rule lookup. It covers both
+// directions of egress NAT flows and of full-NAT port forwards, IPv4 and
+// IPv6 (a port forward's forward record names its backend), and the replies
+// of transparent IPv4 port forwards, whose single entry is keyed by the
+// reply. The core never records for a packet entering an interface where a
+// plugin hook runs on ingress, so such interfaces keep the full path. A
+// record lasts until its entry's fast-path window ends; bumping the
+// generation in tc_flow_cache_state_v4 retires all of them at once.
 const (
 	kernelTCFlowCacheStateMapName = "tc_flow_cache_state_v4"
 	// Earlier releases attached a separate tc_flow_cache program here, ahead

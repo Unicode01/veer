@@ -12,7 +12,6 @@ import (
 
 const (
 	experimentalFeatureBridgeXDP                 = "bridge_xdp"
-	experimentalFeatureXDPGeneric                = "xdp_generic"
 	experimentalFeatureKernelTraffic             = "kernel_traffic_stats"
 	experimentalFeatureKernelTCDiag              = "kernel_tc_diag"
 	experimentalFeatureKernelTCDiagVerbose       = "kernel_tc_diag_verbose"
@@ -20,12 +19,15 @@ const (
 	experimentalFeatureKernelTCPreparedL2        = "kernel_tc_prepared_l2"
 	experimentalFeatureKernelTCReplyL2Cache      = "kernel_tc_reply_l2_cache"
 	experimentalFeatureKernelTCLegacyAttach      = "kernel_tc_legacy_attach"
-	insecureDefaultWebToken                      = "change-me-to-a-secure-token"
-	insecureDefaultPluginAdminToken              = "change-me-to-a-separate-plugin-admin-token"
-	remoteManagementMinimumTokenCharacters       = 24
-	kernelTCPEstablishedIdleTimeoutModeAuto      = "auto"
-	kernelTCPEstablishedIdleTimeoutModeFixed     = "fixed"
-	kernelTCPEstablishedIdleTimeoutMaxSeconds    = int64(9_223_372_036)
+	// experimentalFeatureXDPPluginNoTCFallback runs XDP plugin hooks in generic
+	// mode where native XDP is missing, ignoring their tc_fallback programs.
+	experimentalFeatureXDPPluginNoTCFallback  = "xdp_plugin_no_tc_fallback"
+	insecureDefaultWebToken                   = "change-me-to-a-secure-token"
+	insecureDefaultPluginAdminToken           = "change-me-to-a-separate-plugin-admin-token"
+	remoteManagementMinimumTokenCharacters    = 24
+	kernelTCPEstablishedIdleTimeoutModeAuto   = "auto"
+	kernelTCPEstablishedIdleTimeoutModeFixed  = "fixed"
+	kernelTCPEstablishedIdleTimeoutMaxSeconds = int64(9_223_372_036)
 )
 
 // The flow cache was an experimental feature before kernel_tc_flow_cache
@@ -37,6 +39,9 @@ type Config struct {
 	WebBind                                string                    `json:"web_bind"`
 	WebUIEnabledSetting                    *bool                     `json:"web_ui_enabled,omitempty"`
 	WebToken                               string                    `json:"web_token"`
+	WebTLSSetting                          *bool                     `json:"web_tls,omitempty"` // unset: off (see WebTLSEnabled)
+	WebTLSCertFile                         string                    `json:"web_tls_cert_file,omitempty"`
+	WebTLSKeyFile                          string                    `json:"web_tls_key_file,omitempty"`
 	PluginAdminToken                       string                    `json:"plugin_admin_token,omitempty"`
 	MaxWorkers                             int                       `json:"max_workers"`
 	DrainTimeoutHours                      int                       `json:"drain_timeout_hours"`
@@ -62,6 +67,7 @@ type Config struct {
 	KernelNATPortMin                       int                       `json:"kernel_nat_port_min"`
 	KernelNATPortMax                       int                       `json:"kernel_nat_port_max"`
 	KernelTCFlowCacheSetting               *bool                     `json:"kernel_tc_flow_cache,omitempty"`
+	XDPGenericSetting                      *bool                     `json:"xdp_generic,omitempty"`
 	Experimental                           map[string]bool           `json:"experimental_features"`
 	Tags                                   []string                  `json:"tags"`
 
@@ -115,6 +121,11 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.PluginAdminToken != "" && cfg.PluginAdminToken == cfg.WebToken {
 		return nil, fmt.Errorf("plugin_admin_token must differ from web_token")
+	}
+	cfg.WebTLSCertFile = strings.TrimSpace(cfg.WebTLSCertFile)
+	cfg.WebTLSKeyFile = strings.TrimSpace(cfg.WebTLSKeyFile)
+	if (cfg.WebTLSCertFile == "") != (cfg.WebTLSKeyFile == "") {
+		return nil, fmt.Errorf("web_tls_cert_file and web_tls_key_file must be set together")
 	}
 	if cfg.MaxWorkers < 0 {
 		cfg.MaxWorkers = 0
@@ -253,6 +264,24 @@ func (cfg *Config) KernelTCFlowCacheEnabled() bool {
 		return legacy
 	}
 	return true
+}
+
+// XDPGenericEnabled reports whether an XDP program may attach in generic (skb)
+// mode on an interface whose driver has no native XDP. It is on by default and
+// only the setting turns it off. The former experimental feature of the same
+// name is ignored: deploy wrote it into every config as false while generic
+// attachment was off by default, so a false there was never a choice.
+// WebTLSEnabled reports whether the panel serves HTTPS. A config without
+// web_tls predates the setting and keeps plain HTTP.
+func (cfg *Config) WebTLSEnabled() bool {
+	return cfg != nil && cfg.WebTLSSetting != nil && *cfg.WebTLSSetting
+}
+
+func (cfg *Config) XDPGenericEnabled() bool {
+	if cfg == nil || cfg.XDPGenericSetting == nil {
+		return true
+	}
+	return *cfg.XDPGenericSetting
 }
 
 func (cfg *Config) ManagedNetworkAutoRepairEnabled() bool {

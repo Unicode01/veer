@@ -154,6 +154,98 @@ func TestManagedNetworkIntegration(t *testing.T) {
 	}
 }
 
+// TestManagedNetworkIntegrationRestoresIPv6AfterGuestRestart covers a guest
+// restart on a managed bridge: the tap goes away and comes back under the
+// same name a few seconds later, inside the suppression window that follows
+// the reload the removal caused. Its generated /128 must come back on the
+// bridge, with IPv6 working, without a manual reload.
+func TestManagedNetworkIntegrationRestoresIPv6AfterGuestRestart(t *testing.T) {
+	if os.Getenv(managedNetworkIntegrationEnableEnv) != "1" {
+		t.Skipf("set %s=1 to run Linux managed network integration test", managedNetworkIntegrationEnableEnv)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("root privileges are required")
+	}
+	if _, err := exec.LookPath("ip"); err != nil {
+		t.Skip("ip command is required")
+	}
+
+	harness := startEgressNATIntegrationHarness(t, "managed-network-guest-restart")
+	topology := harness.Topology
+	perfTopology := dataplanePerfTopology{
+		ClientNS:      topology.ClientNS,
+		BackendNS:     topology.BackendNS,
+		ClientHostIF:  topology.ChildHostIF,
+		ClientNSIF:    topology.ClientNSIF,
+		BackendHostIF: topology.UplinkHostIF,
+		BackendNSIF:   topology.BackendNSIF,
+	}
+
+	prepareManagedNetworkIntegrationClientNamespace(t, topology)
+	mustEnsureIPv6AssignmentAddress(t, perfTopology.BackendHostIF, ipv6AssignmentIntegrationParentAddr+"/64")
+	mustEnsureManagedNetworkIntegrationIPv6AddressInNamespace(t, perfTopology.BackendNS, perfTopology.BackendNSIF, ipv6AssignmentIntegrationBackendAddr+"/64")
+	mustEnsureManagedNetworkIntegrationIPv6DefaultRouteInNamespace(t, perfTopology.BackendNS, perfTopology.BackendNSIF, ipv6AssignmentIntegrationParentAddr)
+	seedIPv6AssignmentIntegrationBackendNeighbors(t, perfTopology)
+
+	network := createManagedNetworkIntegrationNetwork(t, harness.APIBase, topology)
+	managedIPv6 := mustBuildManagedNetworkIntegrationIPv6Assignment(t, network, topology.ChildHostIF)
+	clientMAC := mustReadDataplanePerfNetnsMAC(t, topology.ClientNS, topology.ClientNSIF)
+	createManagedNetworkIntegrationReservation(t, harness.APIBase, network.ID, clientMAC, managedNetworkIntegrationIPv4Lease)
+	waitForManagedNetworkIntegrationReady(t, harness.APIBase, network.ID, topology)
+	if err := waitForIPv6AssignmentRouteForPrefix(perfTopology, managedIPv6.AssignedPrefix); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
+		t.Fatal(err)
+	}
+
+	// Let the startup settle, so that no reload left from it (a drift check
+	// catching up, address events) restores the route by chance later on.
+	time.Sleep(managedNetworkDriftCheckEvery + 2*time.Second)
+
+	// The guest stops: its tap goes away and the daemon reloads.
+	mustRunDataplanePerfCmd(t, "ip", "link", "del", topology.ChildHostIF)
+	time.Sleep(3 * time.Second)
+
+	// It starts again within the suppression window: same tap name, new
+	// ifindex, enslaved to the bridge again.
+	mustRunDataplanePerfCmd(t, "ip", "link", "add", topology.ChildHostIF, "type", "veth", "peer", "name", topology.ClientNSIF)
+	mustRunDataplanePerfCmd(t, "ip", "link", "set", topology.ChildHostIF, "master", topology.BridgeIF)
+	mustRunDataplanePerfCmd(t, "ip", "link", "set", topology.ChildHostIF, "up")
+	mustRunDataplanePerfCmd(t, "ip", "link", "set", topology.ClientNSIF, "netns", topology.ClientNS)
+	mustRunDataplanePerfCmd(t, "ip", "netns", "exec", topology.ClientNS, "ip", "link", "set", topology.ClientNSIF, "up")
+
+	if err := waitForIPv6AssignmentRouteForPrefix(perfTopology, managedIPv6.AssignedPrefix); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
+		t.Fatalf("after the guest restarted: %v", err)
+	}
+	backendHelper := startIPv6AssignmentIntegrationBackendHelperWithAddrs(t, perfTopology, ipv6AssignmentIntegrationBackendAddr, ipv6AssignmentIntegrationParentAddr, managedIPv6.Address)
+	defer stopIPv6AssignmentIntegrationHelper(t, backendHelper)
+	ipv6Helper := startIPv6AssignmentIntegrationHelperWithExpectedAddr(
+		t,
+		perfTopology,
+		managedIPv6.Address,
+		net.JoinHostPort(ipv6AssignmentIntegrationBackendAddr, strconv.Itoa(ipv6AssignmentIntegrationBackendPort)),
+	)
+	if err := waitForIPv6AssignmentIntegrationHelper(ipv6Helper, 20*time.Second); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
+		t.Fatal(err)
+	}
+	if err := waitForIPv6AssignmentIntegrationHelper(backendHelper, 5*time.Second); err != nil {
+		logForwardLogOnFailure(t, harness.LogPath)
+		logManagedNetworkIntegrationStateOnFailure(t, perfTopology)
+		t.Fatal(err)
+	}
+	// The tap going away is a guest stopping, not a fault worth a log line.
+	if data, err := os.ReadFile(harness.LogPath); err != nil {
+		t.Fatalf("read forward log: %v", err)
+	} else if strings.Contains(string(data), "network is down") || strings.Contains(string(data), "no such network interface") {
+		logForwardLogOnFailure(t, harness.LogPath)
+		t.Fatal("forward log reports the restarted guest's tap going away as an issue")
+	}
+}
+
 func TestManagedNetworkIntegrationDelegatedPrefixSLAAC(t *testing.T) {
 	if os.Getenv(managedNetworkIntegrationEnableEnv) != "1" {
 		t.Skipf("set %s=1 to run Linux managed network integration test", managedNetworkIntegrationEnableEnv)

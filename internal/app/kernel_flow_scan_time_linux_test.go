@@ -71,23 +71,23 @@ func TestKernelFlowPrunePreservesRefreshAfterScanStart(t *testing.T) {
 					var err error
 					switch engine + "/" + mode {
 					case "tc4/full":
-						_, metrics, err = pruneStaleKernelFlowsFullInCollection(nil, flows, nil, nowNS, true, metrics, kernelTCPFlowIdleTimeout)
+						_, metrics, err = pruneStaleKernelFlowsFullInCollection(nil, flows, kernelNATBankMaps{}, nowNS, true, metrics, kernelTCPFlowIdleTimeout)
 					case "tc4/batch":
-						_, metrics, err = pruneStaleKernelFlowsBatch(nil, flows, nil, nowNS, true, state, metrics, kernelTCPFlowIdleTimeout)
+						_, metrics, err = pruneStaleKernelFlowsBatch(nil, flows, kernelNATBankMaps{}, nowNS, true, state, metrics, kernelTCPFlowIdleTimeout)
 					case "tc4/incremental":
-						_, metrics, err = pruneStaleKernelFlowsIncrementalInCollection(nil, flows, nil, nowNS, true, state, metrics, kernelTCPFlowIdleTimeout)
+						_, metrics, err = pruneStaleKernelFlowsIncrementalInCollection(nil, flows, kernelNATBankMaps{}, nowNS, true, state, metrics, kernelTCPFlowIdleTimeout)
 					case "xdp4/full":
-						_, metrics, err = pruneStaleXDPFlowsFullInCollection(nil, flows, nil, nowNS, true, metrics, kernelTCPFlowIdleTimeout)
+						_, metrics, err = pruneStaleXDPFlowsFullInCollection(nil, flows, kernelNATBankMaps{}, nowNS, true, metrics, kernelTCPFlowIdleTimeout)
 					case "xdp4/batch":
-						_, metrics, err = pruneStaleXDPFlowsBatch(nil, flows, nil, nowNS, true, state, metrics, kernelTCPFlowIdleTimeout)
+						_, metrics, err = pruneStaleXDPFlowsBatch(nil, flows, kernelNATBankMaps{}, nowNS, true, state, metrics, kernelTCPFlowIdleTimeout)
 					case "xdp4/incremental":
-						_, metrics, err = pruneStaleXDPFlowsIncrementalInCollection(nil, flows, nil, nowNS, true, state, metrics, kernelTCPFlowIdleTimeout)
+						_, metrics, err = pruneStaleXDPFlowsIncrementalInCollection(nil, flows, kernelNATBankMaps{}, nowNS, true, state, metrics, kernelTCPFlowIdleTimeout)
 					case "ipv6/full":
-						_, metrics, err = pruneStaleKernelFlowsV6FullInCollection(nil, flows, nil, nowNS, true, metrics, kernelTCPFlowIdleTimeout)
+						_, metrics, err = pruneStaleKernelFlowsV6FullInCollection(nil, flows, kernelNATBankMaps{}, nowNS, true, metrics, kernelTCPFlowIdleTimeout)
 					case "ipv6/batch":
-						_, metrics, err = pruneStaleKernelFlowsBatchV6(nil, flows, nil, nowNS, true, state, metrics, kernelTCPFlowIdleTimeout)
+						_, metrics, err = pruneStaleKernelFlowsBatchV6(nil, flows, kernelNATBankMaps{}, nowNS, true, state, metrics, kernelTCPFlowIdleTimeout)
 					case "ipv6/incremental":
-						_, metrics, err = pruneStaleKernelFlowsIncrementalV6InCollection(nil, flows, nil, nowNS, true, state, metrics, kernelTCPFlowIdleTimeout)
+						_, metrics, err = pruneStaleKernelFlowsIncrementalV6InCollection(nil, flows, kernelNATBankMaps{}, nowNS, true, state, metrics, kernelTCPFlowIdleTimeout)
 					}
 					if err != nil {
 						t.Fatal(err)

@@ -131,7 +131,6 @@ func TestEgressNATXDPLeavesLocalNetworksToKernel(t *testing.T) {
 		Order:        []string{kernelEngineXDP, kernelEngineTC},
 		Expected:     ruleEngineKernel,
 		ExpectedKern: egressNATExpectedXDPKernel,
-		Experimental: map[string]bool{experimentalFeatureXDPGeneric: true},
 	}, webPort)
 	logPath := filepath.Join(workDir, "forward.log")
 	logFile, err := os.Create(logPath)

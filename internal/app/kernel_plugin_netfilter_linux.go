@@ -540,7 +540,9 @@ func (rt *kernelNetfilterPluginPipelineRuntime) loadProgramsLocked(desired []ker
 		if object == nil {
 			previous, unchanged := previousKernelNetfilterPluginObject(rt.loaded, plan)
 			var err error
-			object, err = loadKernelNetfilterPluginObject(plan, previous, unchanged)
+			object, err = loadPluginObjectWithHandoff(plan.PluginID, plan.ObjectID, previous, unchanged, func(previous *loadedPluginObjectRef, unchanged bool) (*loadedPluginObject, error) {
+				return loadKernelNetfilterPluginObject(plan, previous, unchanged)
+			})
 			if err != nil {
 				cleanupLoadedPluginObjectCache(cache)
 				return nil, nil, fmt.Errorf("load plugin %s object %s: %w", plan.PluginID, plan.ObjectID, err)

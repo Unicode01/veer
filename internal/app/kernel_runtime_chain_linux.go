@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 type orderedKernelRuntimeEntry struct {
@@ -22,6 +23,21 @@ type orderedKernelRuleRuntime struct {
 	xdpPlugins        *kernelXDPPluginPipelineRuntime
 	assignmentLog     kernelKeyedStateLogger
 	engineFallbackLog kernelKeyedStateLogger
+	// corePinnedToTC records whether the last reconcile restricted the core
+	// to the TC engine because runtime plugin hooks were active. It is read
+	// without rt.mu so plugin handlers can query it while a reconcile that
+	// runs their migration handlers holds the lock.
+	corePinnedToTC atomic.Bool
+	// yieldXDPToPlugins is set for a reconcile whose catalog has active XDP
+	// plugin hooks: the unassigned XDP engine then detaches rather than
+	// drains, because the plugin dispatcher needs those interfaces.
+	yieldXDPToPlugins bool
+}
+
+// kernelXDPPluginYielder is an engine that can let go of its interfaces for
+// XDP plugin hooks.
+type kernelXDPPluginYielder interface {
+	yieldToXDPPluginHooks()
 }
 
 func newOrderedKernelRuleRuntime(order []string, cfg *Config) kernelRuleRuntime {
@@ -69,6 +85,13 @@ func (rt *orderedKernelRuleRuntime) ReconcilePlugins(catalog PluginCatalog) plug
 		snapshots = append(snapshots, xdpPlugins.Reconcile(catalog))
 	}
 	return combinePluginDataplaneSnapshots(catalog, snapshots...)
+}
+
+// CoreEnginePinnedToTC reports whether the last reconcile restricted the core
+// forwarding rules to the TC engine because runtime TC or XDP plugin hooks
+// were active.
+func (rt *orderedKernelRuleRuntime) CoreEnginePinnedToTC() bool {
+	return rt != nil && rt.corePinnedToTC.Load()
 }
 
 func (rt *orderedKernelRuleRuntime) PluginSnapshot() pluginRuntimeSnapshot {
@@ -306,9 +329,17 @@ func (rt *orderedKernelRuleRuntime) ReconcileWithPluginCatalog(rules []Rule, cat
 func (rt *orderedKernelRuleRuntime) reconcileWithOptionalPluginCatalog(rules []Rule, catalog *PluginCatalog) (map[int64]kernelRuleApplyResult, error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	rt.yieldXDPToPlugins = catalog != nil && kernelXDPPluginCatalogHasRuntimeHooks(*catalog, rt.cfg)
 	if catalog != nil && rt.xdpPlugins != nil {
 		xdpCatalog := *catalog
-		defer rt.xdpPlugins.Reconcile(xdpCatalog)
+		if rt.yieldXDPToPlugins {
+			// Attach once the core's XDP engine has left the interfaces.
+			defer rt.xdpPlugins.Reconcile(xdpCatalog)
+		} else {
+			// Detach first, so the core's XDP engine finds the interfaces
+			// free instead of falling back past the plugin's program.
+			rt.xdpPlugins.Reconcile(xdpCatalog)
+		}
 	}
 
 	entries := rt.entriesForCatalogLocked(catalog)
@@ -426,9 +457,17 @@ func (rt *orderedKernelRuleRuntime) ReconcileRetainingAssignmentsWithPluginCatal
 func (rt *orderedKernelRuleRuntime) reconcileRetainingAssignmentsWithOptionalPluginCatalog(retainedByEngine map[string][]Rule, newRules []Rule, catalog *PluginCatalog) (map[int64]kernelRuleApplyResult, error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	rt.yieldXDPToPlugins = catalog != nil && kernelXDPPluginCatalogHasRuntimeHooks(*catalog, rt.cfg)
 	if catalog != nil && rt.xdpPlugins != nil {
 		xdpCatalog := *catalog
-		defer rt.xdpPlugins.Reconcile(xdpCatalog)
+		if rt.yieldXDPToPlugins {
+			// Attach once the core's XDP engine has left the interfaces.
+			defer rt.xdpPlugins.Reconcile(xdpCatalog)
+		} else {
+			// Detach first, so the core's XDP engine finds the interfaces
+			// free instead of falling back past the plugin's program.
+			rt.xdpPlugins.Reconcile(xdpCatalog)
+		}
 	}
 
 	entries := rt.entriesForCatalogLocked(catalog)
@@ -608,6 +647,10 @@ func (rt *orderedKernelRuleRuntime) cleanupUnassignedLocked(entries []orderedKer
 		if assignedEntries[entry.name] {
 			continue
 		}
+		if yielder, ok := entry.rt.(kernelXDPPluginYielder); ok && rt.yieldXDPToPlugins && entry.name == kernelEngineXDP {
+			yielder.yieldToXDPPluginHooks()
+			continue
+		}
 		if _, cleanupErr := entry.rt.Reconcile(nil); cleanupErr != nil {
 			log.Printf("kernel dataplane engine cleanup after assignment (%s): %v", entry.name, cleanupErr)
 		}
@@ -617,8 +660,10 @@ func (rt *orderedKernelRuleRuntime) cleanupUnassignedLocked(entries []orderedKer
 func (rt *orderedKernelRuleRuntime) entriesForCatalogLocked(catalog *PluginCatalog) []orderedKernelRuntimeEntry {
 	entries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
 	if catalog == nil || (!kernelPluginPipelineCatalogHasRuntimeHooks(*catalog, rt.cfg) && !kernelXDPPluginCatalogHasRuntimeHooks(*catalog, rt.cfg)) {
+		rt.corePinnedToTC.Store(false)
 		return entries
 	}
+	rt.corePinnedToTC.Store(true)
 	out := make([]orderedKernelRuntimeEntry, 0, len(entries))
 	for _, entry := range entries {
 		if entry.name == kernelEngineTC {

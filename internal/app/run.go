@@ -64,6 +64,10 @@ func Main(buildNonce string) {
 		exitOnVeerCLIError("hot-restart", err)
 		return
 	}
+	if handled, err := runTLSCLI(os.Args[1:], os.Stdout, os.Stderr); handled {
+		exitOnVeerCLIError("tls", err)
+		return
+	}
 
 	workerMode := flag.Bool("worker", false, "run in worker mode")
 	rangeWorkerMode := flag.Bool("range-worker", false, "run in range worker mode")
@@ -181,6 +185,9 @@ func Main(buildNonce string) {
 	phaseStartedAt = time.Now()
 	pm.reconcilePluginsForRuntime()
 	logStartupPhase("plugin runtime reconcile", phaseStartedAt, startupStartedAt)
+	// Every plugin object has loaded and taken what it could of the state
+	// maps a predecessor handed off; drop the rest.
+	releasePluginMapHandoff()
 	pm.startAccepting()
 
 	phaseStartedAt = time.Now()

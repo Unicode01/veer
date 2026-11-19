@@ -103,3 +103,46 @@ func TestApplyKernelMapCapacitiesWithOccupancyAllowsSpecWithoutIPv6Maps(t *testi
 		t.Fatalf("applyKernelMapCapacitiesWithOccupancy() error = %v, want nil", err)
 	}
 }
+
+// The mappings on shared NAT ports take the NAT capacity like exclusive
+// ports, and their old banks wait as placeholders like the other old banks.
+func TestApplyKernelMapCapacitiesWithOccupancySizesNATPeerMaps(t *testing.T) {
+	newSpec := func() *ebpf.CollectionSpec {
+		maps := map[string]*ebpf.MapSpec{}
+		for _, name := range []string{
+			kernelRulesMapNameV4, kernelStatsMapName, kernelFlowsMapNameV4,
+			kernelNatPortsMapNameV4, kernelNatPortsMapNameV6,
+			kernelNatPeersMapNameV4, kernelNatPeersMapNameV6,
+			kernelTCNatPeersOldMapNameV4, kernelTCNatPeersOldMapNameV6,
+		} {
+			maps[name] = &ebpf.MapSpec{Name: name}
+		}
+		return &ebpf.CollectionSpec{Maps: maps}
+	}
+
+	spec := newSpec()
+	capacities, err := applyKernelMapCapacitiesWithOccupancy(spec, 0, 0, 0, 64, kernelRuntimeMapCountSnapshot{}, true, false, false)
+	if err != nil {
+		t.Fatalf("applyKernelMapCapacitiesWithOccupancy() error = %v", err)
+	}
+	for name, want := range map[string]uint32{
+		kernelNatPeersMapNameV4:      uint32(capacities.NATPorts),
+		kernelNatPeersMapNameV6:      uint32(capacities.NATPorts),
+		kernelTCNatPeersOldMapNameV4: kernelOldBankPlaceholderEntries,
+		kernelTCNatPeersOldMapNameV6: kernelOldBankPlaceholderEntries,
+	} {
+		if got := spec.Maps[name].MaxEntries; got != want {
+			t.Errorf("with NAT: %s MaxEntries = %d, want %d", name, got, want)
+		}
+	}
+
+	spec = newSpec()
+	if _, err := applyKernelMapCapacitiesWithOccupancy(spec, 0, 0, 0, 64, kernelRuntimeMapCountSnapshot{}, false, false, false); err != nil {
+		t.Fatalf("applyKernelMapCapacitiesWithOccupancy(without NAT) error = %v", err)
+	}
+	for _, name := range []string{kernelNatPeersMapNameV4, kernelNatPeersMapNameV6, kernelTCNatPeersOldMapNameV4, kernelTCNatPeersOldMapNameV6} {
+		if got := spec.Maps[name].MaxEntries; got != kernelOldBankPlaceholderEntries {
+			t.Errorf("without NAT: %s MaxEntries = %d, want %d", name, got, kernelOldBankPlaceholderEntries)
+		}
+	}
+}

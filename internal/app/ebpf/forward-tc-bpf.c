@@ -65,7 +65,8 @@ struct rule_value_v4 {
 	__u8 dst_mac[ETH_ALEN];
 	__u8 egress_src_mac[ETH_ALEN];
 	__u8 egress_dst_mac[ETH_ALEN];
-	__u32 pad;
+	/* In hairpin_v4 entries only: the forward's inbound interface. */
+	__u32 hairpin_in_ifindex;
 	__u64 revision;
 };
 
@@ -80,22 +81,26 @@ struct flow_key_v4 {
 };
 
 /*
- * How the core's fast path last sent one direction of an egress NAT flow,
- * kept in that direction's flow entry so the dispatcher can send the next
- * packet straight from its flow lookup (try_front_flow_fast_v4,
- * try_reply_flow_fast_v4). stamp ties the record to the fast-path window
- * that began at the entry's last_seen_ns and to one generation of
- * tc_flow_cache_state_v4 (flow_fast_stamp_v4): the slow path renewing
- * last_seen_ns or user space bumping the generation retires it. The record
- * is written in place (remember_flow_fast_v4) and read under stamp checks
- * on both sides of the copy.
+ * How the core last sent one direction of a NAT flow or the reply direction
+ * of a transparent one, kept in that direction's flow entry so the
+ * dispatcher can send the next packet straight from its flow lookup
+ * (try_front_flow_fast_v4, try_reply_flow_fast_v4). stamp ties the record to
+ * the fast-path window that began at the entry's last_seen_ns and to one
+ * generation of tc_flow_cache_state_v4 (flow_fast_stamp_v4): the slow path
+ * renewing last_seen_ns or user space bumping the generation retires it. The
+ * record is written in place (remember_flow_fast_v4) and read under stamp
+ * checks on both sides of the copy.
  */
 struct flow_fast_v4 {
 	__u32 stamp;
 	__u32 out_ifindex;
 	/* The port the recorded packet entered, which a reply's key may not name. */
 	__u32 in_ifindex;
-	/* Full-cone front entries serve every destination; the record serves this one. */
+	/*
+	 * Egress NAT: full-cone front entries serve every destination, and the
+	 * record serves this one. Port forward front entries: the backend the
+	 * packet is translated to, with dst_port.
+	 */
 	__u32 dst_addr;
 	/* Largest non-GSO IPv4 length the FIB accepted for the next hop. */
 	__u16 max_len;
@@ -103,9 +108,17 @@ struct flow_fast_v4 {
 	__u8 smac[ETH_ALEN];
 	/* The destination MAC the recorded packet arrived with. */
 	__u8 in_dmac[ETH_ALEN];
-	__u8 pad[4];
+	__u16 dst_port;
+	__u8 pad[2];
 };
 
+/*
+ * A hot restart from an older daemon copies its flow entries into this
+ * layout when their value is a prefix listed in kernelTCMapLayoutRules, and
+ * zero-fills the rest. Grow this struct only by appending fields that read
+ * zero as unset, and list the previous size there; any other change makes
+ * that hot restart cold.
+ */
 struct flow_value_v4 {
 	__u32 rule_id;
 	__u32 front_addr;
@@ -132,6 +145,25 @@ struct nat_port_key_v4 {
 };
 
 struct nat_port_value_v4 {
+	__u32 rule_id;
+	/* FORWARD_NAT_PORT_*: whether the port serves one mapping or one per peer. */
+	__u32 mode;
+	__u64 session_id;
+};
+
+/*
+ * One mapping on a shared NAT port: the port's class key and the peer the
+ * mapping talks to (an egress NAT flow's destination, a port forward's
+ * backend), so a port serves one flow per peer like Linux nf_nat.
+ */
+struct nat_peer_key_v4 {
+	struct nat_port_key_v4 port;
+	__u32 peer_addr;
+	__u16 peer_port;
+	__u8 pad[2];
+};
+
+struct nat_peer_value {
 	__u32 rule_id;
 	__u32 pad;
 	__u64 session_id;
@@ -194,6 +226,31 @@ struct flow_key_v6 {
 	__u8 pad[3];
 };
 
+/*
+ * The IPv6 flow cache record; see struct flow_fast_v4. A port forward's
+ * front record names the backend in dst_addr and dst_port.
+ */
+struct flow_fast_v6 {
+	__u32 stamp;
+	__u32 out_ifindex;
+	__u32 in_ifindex;
+	/* Largest non-GSO IPv6 length the FIB accepted for the next hop. */
+	__u16 max_len;
+	__u16 dst_port;
+	__u8 dmac[ETH_ALEN];
+	__u8 smac[ETH_ALEN];
+	__u8 in_dmac[ETH_ALEN];
+	__u8 pad[2];
+	__u8 dst_addr[16];
+	__u32 pad2;
+};
+
+/*
+ * Like flow_value_v4, a hot restart from an older daemon copies these
+ * entries into this layout when their value is a prefix listed in
+ * kernelTCMapLayoutRules, so grow it only by appending fields that read zero
+ * as unset.
+ */
 struct flow_value_v6 {
 	__u32 rule_id;
 	__u8 front_addr[16];
@@ -211,6 +268,7 @@ struct flow_value_v6 {
 	__u64 front_close_seen_ns;
 	__u64 rule_revision;
 	__u64 session_id;
+	struct flow_fast_v6 fast;
 };
 
 struct nat_port_key_v6 {
@@ -223,18 +281,27 @@ struct nat_port_key_v6 {
 
 struct nat_port_value_v6 {
 	__u32 rule_id;
-	__u32 pad;
+	__u32 mode;
 	__u64 session_id;
+};
+
+struct nat_peer_key_v6 {
+	struct nat_port_key_v6 port;
+	__u8 peer_addr[16];
+	__u16 peer_port;
+	__u8 pad[2];
 };
 
 union flow_nat_key_v4 {
 	struct flow_key_v4 flow;
 	struct nat_port_key_v4 nat;
+	struct nat_peer_key_v4 peer;
 };
 
 union flow_nat_key_v6 {
 	struct flow_key_v6 flow;
 	struct nat_port_key_v6 nat;
+	struct nat_peer_key_v6 peer;
 };
 
 struct rule_stats_value_v4 {
@@ -594,6 +661,12 @@ struct tc_plugin_metric_value {
 #define FORWARD_FLOW_FLAG_COUNTED 0x20
 #define FORWARD_FLOW_FLAG_FULL_CONE 0x80
 #define FORWARD_FLOW_FLAG_REPLY_CLOSING 0x100
+/*
+ * The flow holds its NAT port shared, through an entry in nat_peers_v4/v6.
+ * Flows without it hold an exclusive nat_ports entry, as every flow did
+ * before ports were shared.
+ */
+#define FORWARD_FLOW_FLAG_NAT_PEER 0x200
 #define FORWARD_RULE_FLAG_FULL_NAT 0x1
 #define FORWARD_RULE_FLAG_BRIDGE_L2 0x2
 #define FORWARD_RULE_FLAG_EGRESS_NAT 0x8
@@ -617,6 +690,25 @@ struct tc_plugin_metric_value {
 #define FORWARD_NAT_PORT_RANGE (FORWARD_NAT_PORT_MAX - FORWARD_NAT_PORT_MIN + 1U)
 #define FORWARD_NAT_PORT_PROBE_WINDOW 64
 #define FORWARD_NAT_PORT_PROBE_ROUNDS 3
+/*
+ * Probe rounds of a shared reservation (reserve_nat_peer). Only a mapping to
+ * the same peer takes a shared port away, so the source port nearly always
+ * succeeds; one round keeps the probe code, which every NAT program inlines,
+ * within the verifier budget. The cost falls on a port forward with one
+ * backend, all of whose mappings share a peer: near a full pool, 64 probes
+ * miss a free port more often than the exclusive reservation's 192 did.
+ */
+#define FORWARD_NAT_PEER_PROBE_ROUNDS 1
+/*
+ * nat_port_value_v4.mode. An exclusive port serves one mapping (full cone,
+ * and every entry made before ports were shared); a shared one serves one
+ * mapping per peer, each in nat_peers_v4/v6. User space marks a shared port
+ * without mappings draining, and deletes it if it is still unused a pass
+ * later; new mappings skip a draining port.
+ */
+#define FORWARD_NAT_PORT_EXCLUSIVE 0
+#define FORWARD_NAT_PORT_SHARED 1
+#define FORWARD_NAT_PORT_DRAINING 2
 #define FORWARD_TC_FLOW_BANK_ACTIVE 0
 #define FORWARD_TC_FLOW_BANK_OLD 1
 #define FORWARD_NAT_CONFIG_FLAG_TC_REDIRECT_NEIGH_FAST 0x1U
@@ -639,7 +731,7 @@ static __always_inline int transparent_flow_matches_rule_v4(const struct flow_va
 		flow->in_ifindex == skb->ifindex;
 }
 #if FORWARD_NAT_PORT_PROBE_ROUNDS > 3
-#error FORWARD_NAT_PORT_PROBE_ROUNDS above 3 requires extending reserve_nat_port()
+#error FORWARD_NAT_PORT_PROBE_ROUNDS above 3 requires extending reserve_nat_port_fullcone()
 #endif
 
 /*
@@ -706,6 +798,24 @@ struct bpf_map_def SEC("maps") nat_ports_old_v4 = {
 	.max_entries = 131072,
 };
 
+/*
+ * The mappings on shared ports (struct nat_peer_key_v4), banked like
+ * nat_ports_v4: a flow's mapping lives in the bank of its flow entries.
+ */
+struct bpf_map_def SEC("maps") nat_peers_v4 = {
+	.type = BPF_MAP_TYPE_HASH,
+	.key_size = sizeof(struct nat_peer_key_v4),
+	.value_size = sizeof(struct nat_peer_value),
+	.max_entries = 131072,
+};
+
+struct bpf_map_def SEC("maps") nat_peers_old_v4 = {
+	.type = BPF_MAP_TYPE_HASH,
+	.key_size = sizeof(struct nat_peer_key_v4),
+	.value_size = sizeof(struct nat_peer_value),
+	.max_entries = 131072,
+};
+
 struct bpf_map_def SEC("maps") reply_l2_cache_v4 = {
 	.type = BPF_MAP_TYPE_LRU_HASH,
 	.key_size = sizeof(struct flow_key_v4),
@@ -723,6 +833,24 @@ struct bpf_map_def SEC("maps") reply_l2_cache_v4 = {
 struct bpf_map_def SEC("maps") tc_l2_cache_v4 = {
 	.type = BPF_MAP_TYPE_LRU_HASH,
 	.key_size = sizeof(struct tc_l2_key_v4),
+	.value_size = sizeof(struct tc_l2_value_v4),
+	.max_entries = 16384,
+};
+
+struct tc_l2_key_v6 {
+	__u32 ifindex;
+	__u8 src_addr[16];
+	__u8 dst_addr[16];
+};
+
+/*
+ * The IPv6 counterpart of tc_l2_cache_v4, filled by the full paths of IPv6
+ * port forwards for the rest of their fast-path window. Its values are
+ * struct tc_l2_value_v4, with max_len an IPv6 length.
+ */
+struct bpf_map_def SEC("maps") tc_l2_cache_v6 = {
+	.type = BPF_MAP_TYPE_LRU_HASH,
+	.key_size = sizeof(struct tc_l2_key_v6),
 	.value_size = sizeof(struct tc_l2_value_v4),
 	.max_entries = 16384,
 };
@@ -761,6 +889,8 @@ struct bpf_map_def SEC("maps") tc_flow_cache_state_v4 = {
 #define FORWARD_TC_IFINDEX_HINT_HAS_PARENT 0x100
 /* A full-cone egress NAT rule receives packets here. */
 #define FORWARD_TC_IFINDEX_HINT_FULL_CONE 0x200
+/* An egress NAT rule receives packets here, which may be hairpin traffic. */
+#define FORWARD_TC_IFINDEX_HINT_HAIRPIN 0x400
 #define FORWARD_TC_IFINDEX_HINT_KNOWN 0x80000000U
 
 struct bpf_map_def SEC("maps") tc_ifindex_hints = {
@@ -1024,6 +1154,20 @@ struct bpf_map_def SEC("maps") nat_ports_old_v6 = {
 	.max_entries = 131072,
 };
 
+struct bpf_map_def SEC("maps") nat_peers_v6 = {
+	.type = BPF_MAP_TYPE_HASH,
+	.key_size = sizeof(struct nat_peer_key_v6),
+	.value_size = sizeof(struct nat_peer_value),
+	.max_entries = 131072,
+};
+
+struct bpf_map_def SEC("maps") nat_peers_old_v6 = {
+	.type = BPF_MAP_TYPE_HASH,
+	.key_size = sizeof(struct nat_peer_key_v6),
+	.value_size = sizeof(struct nat_peer_value),
+	.max_entries = 131072,
+};
+
 struct bpf_map_def SEC("maps") scratch_flow_v6 = {
 	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
 	.key_size = sizeof(__u32),
@@ -1071,6 +1215,45 @@ struct bpf_map_def SEC("maps") local_ipv4s_v4 = {
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(__u8),
 	.max_entries = 4096,
+};
+
+/*
+ * Hairpin (NAT loopback): a guest behind egress NAT connecting to a port this
+ * host forwards on one of its own addresses. hairpin_v4 holds those forwards
+ * by address, port and protocol, as full NAT rules: the source becomes an
+ * address of the forward's outbound interface even when the forward itself
+ * is transparent, so the backend answers through this host and not straight
+ * back to a neighbour on its own network. hairpin_addrs_v4 lists the
+ * addresses, so that other egress NAT traffic costs one array lookup; a count
+ * above FORWARD_TC_HAIRPIN_ADDRS means there are more than it holds.
+ */
+#define FORWARD_TC_HAIRPIN_ADDRS 8
+
+struct hairpin_key_v4 {
+	__u32 dst_addr;
+	__u16 dst_port;
+	__u8 proto;
+	__u8 pad;
+};
+
+struct hairpin_addrs_v4 {
+	__u32 count;
+	__u32 addrs[FORWARD_TC_HAIRPIN_ADDRS];
+};
+
+struct bpf_map_def SEC("maps") hairpin_v4 = {
+	.type = BPF_MAP_TYPE_HASH,
+	.key_size = sizeof(struct hairpin_key_v4),
+	.value_size = sizeof(struct rule_value_v4),
+	.max_entries = 65536,
+	.map_flags = BPF_F_NO_PREALLOC,
+};
+
+struct bpf_map_def SEC("maps") hairpin_addrs_v4 = {
+	.type = BPF_MAP_TYPE_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(struct hairpin_addrs_v4),
+	.max_entries = 1,
 };
 
 /* addr in network byte order, as an LPM trie compares it. */
@@ -1179,7 +1362,6 @@ static __always_inline struct tc_plugin_config_v4 *lookup_tc_plugin_config_v4(vo
 static __always_inline __u32 load_kernel_nat_config_flags(void);
 static __always_inline __u32 nat_probe_stride(__u32 seed, __u32 port_range);
 static __always_inline int try_reserve_nat_port(__u32 candidate, struct nat_port_key_v4 *nat_key, const struct nat_port_value_v4 *nat_value, __u16 *nat_port);
-static __always_inline int try_reserve_nat_port_v6(__u32 candidate, struct nat_port_key_v6 *nat_key, const struct nat_port_value_v6 *nat_value, __u16 *nat_port);
 static __always_inline __u32 tc_flow_migration_flags(void);
 static __always_inline int tc_flow_old_bank_enabled_v4(void);
 static __always_inline int tc_flow_old_bank_enabled_v6(void);
@@ -1197,6 +1379,12 @@ static __always_inline int delete_flow_v4_in_bank(__u8 bank, const struct flow_k
 static __always_inline int delete_flow_v6_in_bank(__u8 bank, const struct flow_key_v6 *key);
 static __always_inline int delete_nat_port_v4_in_bank(__u8 bank, const struct nat_port_key_v4 *key);
 static __always_inline int delete_nat_port_v6_in_bank(__u8 bank, const struct nat_port_key_v6 *key);
+static __always_inline struct nat_peer_value *lookup_nat_peer_v4_in_bank(__u8 bank, const struct nat_peer_key_v4 *key);
+static __always_inline struct nat_peer_value *lookup_nat_peer_v6_in_bank(__u8 bank, const struct nat_peer_key_v6 *key);
+static __always_inline int delete_nat_peer_v4_in_bank(__u8 bank, const struct nat_peer_key_v4 *key);
+static __always_inline int delete_nat_peer_v6_in_bank(__u8 bank, const struct nat_peer_key_v6 *key);
+static __always_inline int update_nat_peer_v4_in_bank(__u8 bank, const struct nat_peer_key_v4 *key, const struct nat_peer_value *value, __u64 flags);
+static __always_inline int update_nat_peer_v6_in_bank(__u8 bank, const struct nat_peer_key_v6 *key, const struct nat_peer_value *value, __u64 flags);
 static __always_inline struct flow_value_v4 *lookup_scratch_flow_v4(void);
 static __always_inline struct flow_value_v4 *lookup_scratch_flow_aux_v4(void);
 static __always_inline struct packet_ctx *lookup_scratch_ctx_v4(void);
@@ -1222,6 +1410,8 @@ static __always_inline int handle_egress_nat_forward_existing(struct __sk_buff *
 static __always_inline int handle_reply_ingress_v4_transparent(struct __sk_buff *skb);
 static __always_inline int handle_reply_ingress_v4_fullnat(struct __sk_buff *skb);
 
+#define FORWARD_NAT_OLD_BANK_ENABLED_V4() tc_flow_old_bank_enabled_v4()
+#define FORWARD_NAT_OLD_BANK_ENABLED_V6() tc_flow_old_bank_enabled_v6()
 #include "include/forward_common.h"
 
 static __always_inline struct flow_value_v4 *lookup_scratch_flow_v4(void)
@@ -1925,6 +2115,52 @@ static __always_inline int delete_nat_port_v6_in_bank(__u8 bank, const struct na
 	return bpf_map_delete_elem(&nat_ports_v6, key);
 }
 
+/*
+ * A flow's peer entry lives in the bank of its flow entries. New mappings
+ * check the old bank's entries themselves (try_reserve_nat_peer).
+ */
+static __always_inline struct nat_peer_value *lookup_nat_peer_v4_in_bank(__u8 bank, const struct nat_peer_key_v4 *key)
+{
+	if (bank == FORWARD_TC_FLOW_BANK_OLD)
+		return bpf_map_lookup_elem(&nat_peers_old_v4, key);
+	return bpf_map_lookup_elem(&nat_peers_v4, key);
+}
+
+static __always_inline struct nat_peer_value *lookup_nat_peer_v6_in_bank(__u8 bank, const struct nat_peer_key_v6 *key)
+{
+	if (bank == FORWARD_TC_FLOW_BANK_OLD)
+		return bpf_map_lookup_elem(&nat_peers_old_v6, key);
+	return bpf_map_lookup_elem(&nat_peers_v6, key);
+}
+
+static __always_inline int update_nat_peer_v4_in_bank(__u8 bank, const struct nat_peer_key_v4 *key, const struct nat_peer_value *value, __u64 flags)
+{
+	if (bank == FORWARD_TC_FLOW_BANK_OLD)
+		return bpf_map_update_elem(&nat_peers_old_v4, key, value, flags);
+	return bpf_map_update_elem(&nat_peers_v4, key, value, flags);
+}
+
+static __always_inline int update_nat_peer_v6_in_bank(__u8 bank, const struct nat_peer_key_v6 *key, const struct nat_peer_value *value, __u64 flags)
+{
+	if (bank == FORWARD_TC_FLOW_BANK_OLD)
+		return bpf_map_update_elem(&nat_peers_old_v6, key, value, flags);
+	return bpf_map_update_elem(&nat_peers_v6, key, value, flags);
+}
+
+static __always_inline int delete_nat_peer_v4_in_bank(__u8 bank, const struct nat_peer_key_v4 *key)
+{
+	if (bank == FORWARD_TC_FLOW_BANK_OLD)
+		return bpf_map_delete_elem(&nat_peers_old_v4, key);
+	return bpf_map_delete_elem(&nat_peers_v4, key);
+}
+
+static __always_inline int delete_nat_peer_v6_in_bank(__u8 bank, const struct nat_peer_key_v6 *key)
+{
+	if (bank == FORWARD_TC_FLOW_BANK_OLD)
+		return bpf_map_delete_elem(&nat_peers_old_v6, key);
+	return bpf_map_delete_elem(&nat_peers_v6, key);
+}
+
 /* Largest header offset the parsers produce (VLAN, IPv6, L4 ports), with room to spare. */
 #define FORWARD_TC_MAX_HEADER_OFF 255
 
@@ -2479,6 +2715,67 @@ static __always_inline __u32 tc_ifindex_rule_forms(__u32 ifindex, __u32 shift)
 	return (hints >> shift) & FORWARD_TC_IFINDEX_HINT_RULE_FORMS;
 }
 
+/*
+ * Whether a hairpin forward listens on the interface the guest's packet came
+ * in by, or on that port's bridge: the packet reaches such a forward by the
+ * usual path, transparent forwards included, and must not be taken here.
+ */
+static __always_inline int hairpin_forward_is_local_v4(const struct rule_value_v4 *hairpin, __u32 ifindex, __u32 hints)
+{
+	__u32 key = ifindex;
+	__u32 *parent;
+
+	if (!hairpin->hairpin_in_ifindex)
+		return 0;
+	if (hairpin->hairpin_in_ifindex == ifindex)
+		return 1;
+	if ((hints & FORWARD_TC_IFINDEX_HINT_HAS_PARENT) == 0)
+		return 0;
+	parent = bpf_map_lookup_elem(&if_parent_v4, &key);
+	return parent && *parent == hairpin->hairpin_in_ifindex;
+}
+
+/*
+ * The forward a guest's packet reaches by hairpin, or 0. egress is the egress
+ * NAT rule the packet matched; only a packet the guest routes through this
+ * host, addressed to its gateway, qualifies. hints are the ifindex hints of
+ * the interface it came in by.
+ */
+static __always_inline struct rule_value_v4 *lookup_hairpin_rule_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *egress, __u32 hints)
+{
+	struct hairpin_key_v4 key = {};
+	struct hairpin_addrs_v4 *addrs;
+	struct rule_value_v4 *hairpin;
+	__u32 dst = bpf_ntohl(ctx->dst_addr);
+	__u32 zero = 0;
+	int found = 0;
+	int i;
+
+	addrs = bpf_map_lookup_elem(&hairpin_addrs_v4, &zero);
+	if (!addrs || addrs->count == 0)
+		return 0;
+	if (addrs->count <= FORWARD_TC_HAIRPIN_ADDRS) {
+#pragma clang loop unroll(full)
+		for (i = 0; i < FORWARD_TC_HAIRPIN_ADDRS; i++) {
+			if ((__u32)i < addrs->count && addrs->addrs[i] == dst)
+				found = 1;
+		}
+		if (!found)
+			return 0;
+	}
+	if (egress_nat_dst_mac_mismatch(skb, egress))
+		return 0;
+	key.dst_addr = dst;
+	key.dst_port = ctx->dst_port;
+	key.proto = ctx->proto;
+	hairpin = bpf_map_lookup_elem(&hairpin_v4, &key);
+	if (!hairpin)
+		return 0;
+	if (hairpin_forward_is_local_v4(hairpin, tc_skb_ifindex(skb), hints))
+		return 0;
+	return hairpin;
+}
+
 static __always_inline struct rule_value_v4 *lookup_rule_v4(struct __sk_buff *skb, struct packet_ctx *ctx)
 {
 	struct rule_key_v4 key = {
@@ -2487,44 +2784,52 @@ static __always_inline struct rule_value_v4 *lookup_rule_v4(struct __sk_buff *sk
 		.dst_port = ctx->dst_port,
 		.proto = ctx->proto,
 	};
-	struct rule_value_v4 *rule;
-	__u32 forms = tc_ifindex_rule_forms(skb->ifindex, 0);
+	struct rule_value_v4 *rule = 0;
+	struct rule_value_v4 *hairpin;
+	__u32 hints = lookup_tc_ifindex_hints(skb->ifindex);
+	__u32 forms = FORWARD_TC_IFINDEX_HINT_RULE_FORMS;
 
+	if (hints & FORWARD_TC_IFINDEX_HINT_KNOWN)
+		forms = hints & FORWARD_TC_IFINDEX_HINT_RULE_FORMS;
 	ctx->rule_wildcard_addr = 0;
-	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_EXACT) {
+	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_EXACT)
 		rule = bpf_map_lookup_elem(&rules_v4, &key);
-		if (rule)
-			return rule;
-	}
 
-	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY_ADDR) {
+	if (!rule && (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY_ADDR)) {
 		key.dst_addr = 0;
 		rule = bpf_map_lookup_elem(&rules_v4, &key);
-		if (rule) {
+		if (rule)
 			ctx->rule_wildcard_addr = 1;
-			return rule;
-		}
 	}
 
-	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY_PORT) {
+	if (!rule && (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY_PORT)) {
 		key.dst_addr = bpf_ntohl(ctx->dst_addr);
 		key.dst_port = 0;
 		rule = bpf_map_lookup_elem(&rules_v4, &key);
-		if (rule)
-			return rule;
 	}
 
-	if (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY) {
+	if (!rule && (forms & FORWARD_TC_IFINDEX_HINT_RULE_ANY)) {
 		key.dst_addr = 0;
 		key.dst_port = 0;
 		rule = bpf_map_lookup_elem(&rules_v4, &key);
-		if (rule) {
+		if (rule)
 			ctx->rule_wildcard_addr = 1;
-			return rule;
-		}
 	}
 
-	return 0;
+	/* Every packet of a hairpin connection takes the forward, not only its
+	 * first: later ones would otherwise meet the forward's flows on the
+	 * egress NAT path. */
+	if (rule && (hints & FORWARD_TC_IFINDEX_HINT_HAIRPIN) && is_egress_nat_rule(rule)) {
+		hairpin = lookup_hairpin_rule_v4(skb, ctx, rule, hints);
+		/* Chosen by a condition: hide it before its null test (see
+		 * flow_fast_live_v4). */
+		asm volatile("" : "+r"(hairpin));
+		if (hairpin) {
+			ctx->rule_wildcard_addr = 0;
+			return hairpin;
+		}
+	}
+	return rule;
 }
 
 static __always_inline struct rule_value_v6 *lookup_rule_v6(struct __sk_buff *skb, struct packet_ctx_v6 *ctx)
@@ -3008,9 +3313,67 @@ static __always_inline int egress_nat_check_mtu_v4(struct __sk_buff *skb, const 
 	return TC_ACT_SHOT;
 }
 
-static __always_inline int redirect_ifindex_v6(struct __sk_buff *skb, const struct packet_ctx_v6 *ctx, const struct redirect_target_v6 *target)
+/* The length redirect_ifindex_v6 has the FIB check: 0, none, for a GSO packet. */
+static __always_inline __u32 tc_wire_len_v6(struct __sk_buff *skb, const struct packet_ctx_v6 *ctx)
+{
+	return skb->gso_size != 0 ? 0 : ctx->tot_len;
+}
+
+static __always_inline void build_tc_l2_key_v6(const struct redirect_target_v6 *target, struct tc_l2_key_v6 *key)
+{
+	key->ifindex = target->ifindex;
+	copy_ipv6_addr(key->src_addr, target->src_addr);
+	copy_ipv6_addr(key->dst_addr, target->dst_addr);
+}
+
+/* The next hop a full path resolved for this target, if this packet fits it. */
+static __always_inline const struct tc_l2_value_v4 *lookup_tc_l2_v6(struct __sk_buff *skb, const struct packet_ctx_v6 *ctx, __u32 ifindex, const __u8 src_addr[16], const __u8 dst_addr[16])
+{
+	struct tc_l2_key_v6 key = {};
+	struct tc_l2_value_v4 *value;
+
+	key.ifindex = ifindex;
+	copy_ipv6_addr(key.src_addr, src_addr);
+	copy_ipv6_addr(key.dst_addr, dst_addr);
+	value = bpf_map_lookup_elem(&tc_l2_cache_v6, &key);
+	if (!value || !value->out_ifindex || tc_wire_len_v6(skb, ctx) > value->max_len)
+		return 0;
+	return value;
+}
+
+static __always_inline void remember_tc_l2_v6(const struct redirect_target_v6 *target, const struct bpf_fib_lookup *fib, __u32 out_ifindex, __u32 wire)
+{
+	struct tc_l2_key_v6 key = {};
+	struct tc_l2_value_v4 value = {};
+	struct tc_l2_value_v4 *current;
+
+	build_tc_l2_key_v6(target, &key);
+	current = bpf_map_lookup_elem(&tc_l2_cache_v6, &key);
+	if (current && current->out_ifindex == out_ifindex && mac_equal(current->dmac, fib->dmac) && mac_equal(current->smac, fib->smac)) {
+		if (wire > current->max_len)
+			current->max_len = wire;
+		return;
+	}
+	__builtin_memcpy(value.dmac, fib->dmac, ETH_ALEN);
+	__builtin_memcpy(value.smac, fib->smac, ETH_ALEN);
+	value.out_ifindex = out_ifindex;
+	value.max_len = wire;
+	bpf_map_update_elem(&tc_l2_cache_v6, &key, &value, BPF_ANY);
+}
+
+static __always_inline void forget_tc_l2_v6(const struct redirect_target_v6 *target)
+{
+	struct tc_l2_key_v6 key = {};
+
+	build_tc_l2_key_v6(target, &key);
+	bpf_map_delete_elem(&tc_l2_cache_v6, &key);
+}
+
+/* remember: as for redirect_ifindex_l2, with tc_l2_cache_v6. */
+static __always_inline int redirect_ifindex_v6(struct __sk_buff *skb, const struct packet_ctx_v6 *ctx, const struct redirect_target_v6 *target, int remember)
 {
 	struct bpf_fib_lookup *fib = lookup_scratch_fib_v6();
+	__u32 wire;
 	long act;
 
 	if (!fib || !target)
@@ -3025,22 +3388,29 @@ static __always_inline int redirect_ifindex_v6(struct __sk_buff *skb, const stru
 	fib->sport = bpf_htons(target->src_port);
 	fib->dport = bpf_htons(target->dst_port);
 	/* See redirect_ifindex_l2: GSO lengths are checked by the helper itself. */
-	fib->tot_len = skb->gso_size != 0 ? 0 : ctx->tot_len;
+	wire = tc_wire_len_v6(skb, ctx);
+	fib->tot_len = wire;
 	__builtin_memcpy(fib->ipv6_src, target->src_addr, sizeof(fib->ipv6_src));
 	__builtin_memcpy(fib->ipv6_dst, target->dst_addr, sizeof(fib->ipv6_dst));
 	fib->ifindex = target->ifindex;
 
 	act = bpf_fib_lookup(skb, fib, sizeof(*fib), BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_OUTPUT);
 	if (act == BPF_FIB_LKUP_RET_SUCCESS) {
+		__u32 out_ifindex = fib->ifindex ? fib->ifindex : target->ifindex;
+
+		if (remember)
+			remember_tc_l2_v6(target, fib, out_ifindex, wire);
 		if (rewrite_eth_addrs(skb, fib->dmac, fib->smac) < 0) {
 			tc_diag_redirect_drop();
 			return TC_ACT_SHOT;
 		}
-		act = bpf_redirect(fib->ifindex ? fib->ifindex : target->ifindex, 0);
+		act = bpf_redirect(out_ifindex, 0);
 		if (act == TC_ACT_REDIRECT)
 			return (int)act;
 	} else {
 		tc_diag_fib_non_success();
+		if (remember && act != BPF_FIB_LKUP_RET_FRAG_NEEDED)
+			forget_tc_l2_v6(target);
 	}
 
 	tc_diag_redirect_neigh_used();
@@ -3115,6 +3485,44 @@ static __always_inline int egress_nat_dst_is_local_v4(__be32 addr)
 		return 1;
 	routed = bpf_map_lookup_elem(&local_nets_v4, &key);
 	return routed && *routed != 0;
+}
+
+/*
+ * Whether a guest's packet answers a connection this host opened from an
+ * address that is not its own. A transparent proxy (a shared site or a
+ * transparent user space forward) dials the backend as the original client,
+ * so the backend answers the client's address; the host's transparent socket
+ * takes that answer through policy routing, and NAT would instead send it out
+ * to the client, who never asked for it. Only a socket bound to exactly this
+ * destination and connected to exactly this source counts, so a listener on a
+ * wildcard address does not capture a guest's own traffic. A guest's new TCP
+ * connection starts with a SYN, which never needs the lookup.
+ */
+static __always_inline int egress_nat_reply_to_host_socket_v4(struct __sk_buff *skb, const struct packet_ctx *ctx)
+{
+	struct bpf_sock_tuple tuple = {};
+	struct bpf_sock *sk;
+	int owned;
+
+	if (ctx->proto == IPPROTO_TCP) {
+		if (is_initial_tcp_syn(ctx))
+			return 0;
+	} else if (ctx->proto != IPPROTO_UDP) {
+		return 0;
+	}
+	tuple.ipv4.saddr = ctx->src_addr;
+	tuple.ipv4.daddr = ctx->dst_addr;
+	tuple.ipv4.sport = bpf_htons(ctx->src_port);
+	tuple.ipv4.dport = bpf_htons(ctx->dst_port);
+	if (ctx->proto == IPPROTO_TCP)
+		sk = bpf_sk_lookup_tcp(skb, &tuple, sizeof(tuple.ipv4), BPF_F_CURRENT_NETNS, 0);
+	else
+		sk = bpf_sk_lookup_udp(skb, &tuple, sizeof(tuple.ipv4), BPF_F_CURRENT_NETNS, 0);
+	if (!sk)
+		return 0;
+	owned = sk->src_ip4 == ctx->dst_addr && sk->dst_ip4 == ctx->src_addr;
+	bpf_sk_release(sk);
+	return owned;
 }
 
 static __always_inline void build_front_flow_key(struct __sk_buff *skb, const struct packet_ctx *ctx, struct flow_key_v4 *key)
@@ -3358,17 +3766,6 @@ static __always_inline int try_reserve_nat_port(__u32 candidate, struct nat_port
 	return -1;
 }
 
-static __always_inline int try_reserve_nat_port_v6(__u32 candidate, struct nat_port_key_v6 *nat_key, const struct nat_port_value_v6 *nat_value, __u16 *nat_port)
-{
-	nat_key->nat_port = (__u16)candidate;
-	if (update_nat_port_v6_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, nat_key, nat_value, BPF_NOEXIST) == 0) {
-		*nat_port = (__u16)candidate;
-		bump_kernel_nat_occupancy();
-		return 0;
-	}
-	return -1;
-}
-
 static __always_inline int reserve_nat_port_window(const struct nat_probe_window_v4 *window, struct nat_port_key_v4 *nat_key, const struct nat_port_value_v4 *nat_value, __u16 *nat_port)
 {
 	int i;
@@ -3380,60 +3777,6 @@ static __always_inline int reserve_nat_port_window(const struct nat_probe_window
 		if (try_reserve_nat_port(candidate, nat_key, nat_value, nat_port) == 0)
 			return 0;
 	}
-
-	return -1;
-}
-
-static __always_inline int reserve_nat_port(const struct rule_value_v4 *rule, const struct packet_ctx *ctx, struct nat_port_key_v4 *nat_key, __u16 *nat_port, __u64 session_id)
-{
-	struct nat_port_value_v4 nat_value = {
-		.rule_id = rule->rule_id,
-		.session_id = session_id,
-	};
-	__u32 seed;
-	__u32 round_seed;
-	__u32 port_min = 0;
-	__u32 port_range = 0;
-	struct nat_probe_window_v4 window = {};
-
-	nat_key->ifindex = rule->out_ifindex;
-	nat_key->nat_addr = rule->nat_addr;
-	nat_key->proto = ctx->proto;
-	nat_key->pad = 0;
-
-	load_nat_port_window(&port_min, &port_range);
-	if (port_range == 0)
-		return -1;
-
-	if ((__u32)ctx->src_port >= port_min && (__u32)ctx->src_port < (port_min + port_range)) {
-		if (try_reserve_nat_port((__u32)ctx->src_port, nat_key, &nat_value, nat_port) == 0)
-			return 0;
-	}
-
-	seed = mix_nat_probe_seed(fullnat_seed(rule, ctx) ^ ((__u32)ctx->src_port << 16) ^ (__u32)ctx->dst_port ^ ((__u32)rule->out_ifindex << 1));
-	round_seed = seed;
-	window.port_min = port_min;
-	window.port_range = port_range;
-	window.start = round_seed % port_range;
-	window.stride = nat_probe_stride(round_seed ^ 0x9e3779b9U, port_range);
-	if (reserve_nat_port_window(&window, nat_key, &nat_value, nat_port) == 0)
-		return 0;
-	round_seed = mix_nat_probe_seed(round_seed ^ 0x9e3779b9U);
-
-	if (FORWARD_NAT_PORT_PROBE_ROUNDS <= 1)
-		return -1;
-	window.start = (round_seed + ((__u32)ctx->src_port << 1)) % port_range;
-	window.stride = nat_probe_stride(round_seed ^ 0x85ebca6bU, port_range);
-	if (reserve_nat_port_window(&window, nat_key, &nat_value, nat_port) == 0)
-		return 0;
-	round_seed = mix_nat_probe_seed(round_seed ^ 0x23c2a438U);
-
-	if (FORWARD_NAT_PORT_PROBE_ROUNDS <= 2)
-		return -1;
-	window.start = (round_seed + ((__u32)ctx->dst_port << 1)) % port_range;
-	window.stride = nat_probe_stride(round_seed ^ 0xc2b2ae35U, port_range);
-	if (reserve_nat_port_window(&window, nat_key, &nat_value, nat_port) == 0)
-		return 0;
 
 	return -1;
 }
@@ -3492,76 +3835,156 @@ static __always_inline int reserve_nat_port_fullcone(const struct rule_value_v4 
 	return -1;
 }
 
-static __always_inline int reserve_nat_port_v6(const struct rule_value_v6 *rule, const struct packet_ctx_v6 *ctx, struct nat_port_key_v6 *nat_key, __u16 *nat_port, __u64 session_id)
+static __always_inline int reserve_nat_peer_window(const struct nat_probe_window_v4 *window, struct nat_peer_key_v4 *peer_key, const struct nat_peer_value *peer_value, const struct nat_port_value_v4 *shared, int old_bank)
 {
-	struct nat_port_value_v6 nat_value = {
+#pragma clang loop unroll(full)
+	for (int i = 0; i < FORWARD_NAT_PORT_PROBE_WINDOW; i++) {
+		__u32 candidate = window->port_min + ((window->start + ((__u32)i * window->stride)) % window->port_range);
+
+		if (try_reserve_nat_peer(candidate, peer_key, peer_value, shared, old_bank) == 0)
+			return 0;
+	}
+
+	return -1;
+}
+
+/*
+ * Reserves a NAT port for a symmetric egress NAT flow or a full NAT port
+ * forward, shared with the mappings of other peers: peer_addr and peer_port
+ * name the flow's destination or backend. The client's own source port is
+ * tried first. Fills peer_key with the mapping.
+ */
+static __always_inline int reserve_nat_peer(const struct rule_value_v4 *rule, const struct packet_ctx *ctx, __u32 peer_addr, __u16 peer_port, struct nat_peer_key_v4 *peer_key, __u16 *nat_port, __u64 session_id)
+{
+	struct nat_peer_value peer_value = {
 		.rule_id = rule->rule_id,
 		.session_id = session_id,
 	};
-	__u32 seed;
-	__u32 round_seed;
+	/* A shared class belongs to no session, so no flow's release removes it. */
+	struct nat_port_value_v4 shared = {
+		.rule_id = rule->rule_id,
+		.mode = FORWARD_NAT_PORT_SHARED,
+	};
+	struct nat_probe_window_v4 window = {};
 	__u32 port_min = 0;
 	__u32 port_range = 0;
-	struct nat_probe_window_v4 window = {};
+	__u32 round_seed;
+	int old_bank = FORWARD_NAT_OLD_BANK_ENABLED_V4();
 
-	nat_key->ifindex = rule->out_ifindex;
-	copy_ipv6_addr(nat_key->nat_addr, rule->nat_addr);
-	nat_key->proto = ctx->proto;
-	nat_key->pad = 0;
+	build_nat_port_key(rule->out_ifindex, rule->nat_addr, 0, ctx->proto, &peer_key->port);
+	peer_key->peer_addr = peer_addr;
+	peer_key->peer_port = peer_port;
+	peer_key->pad[0] = 0;
+	peer_key->pad[1] = 0;
 
 	load_nat_port_window(&port_min, &port_range);
 	if (port_range == 0)
 		return -1;
 
-	if ((__u32)ctx->src_port >= port_min && (__u32)ctx->src_port < (port_min + port_range)) {
-		if (try_reserve_nat_port_v6((__u32)ctx->src_port, nat_key, &nat_value, nat_port) == 0)
-			return 0;
-	}
+	if ((__u32)ctx->src_port >= port_min && (__u32)ctx->src_port < (port_min + port_range) &&
+	    try_reserve_nat_peer((__u32)ctx->src_port, peer_key, &peer_value, &shared, old_bank) == 0)
+		goto reserved;
 
-	seed = mix_nat_probe_seed(fullnat_seed_v6(rule, ctx) ^ ((__u32)ctx->src_port << 16) ^ (__u32)ctx->dst_port ^ ((__u32)rule->out_ifindex << 1));
-	round_seed = seed;
+	round_seed = mix_nat_probe_seed(fullnat_seed(rule, ctx) ^ ((__u32)ctx->src_port << 16) ^ (__u32)ctx->dst_port ^ ((__u32)rule->out_ifindex << 1));
 	window.port_min = port_min;
 	window.port_range = port_range;
 	window.start = round_seed % port_range;
 	window.stride = nat_probe_stride(round_seed ^ 0x9e3779b9U, port_range);
-
-#pragma clang loop unroll(full)
-	for (int i = 0; i < FORWARD_NAT_PORT_PROBE_WINDOW; i++) {
-		__u32 candidate = window.port_min + ((window.start + ((__u32)i * window.stride)) % window.port_range);
-
-		if (try_reserve_nat_port_v6(candidate, nat_key, &nat_value, nat_port) == 0)
-			return 0;
-	}
-
+	if (reserve_nat_peer_window(&window, peer_key, &peer_value, &shared, old_bank) == 0)
+		goto reserved;
+#if FORWARD_NAT_PEER_PROBE_ROUNDS > 1
 	round_seed = mix_nat_probe_seed(round_seed ^ 0x9e3779b9U);
-	if (FORWARD_NAT_PORT_PROBE_ROUNDS <= 1)
-		return -1;
 	window.start = (round_seed + ((__u32)ctx->src_port << 1)) % port_range;
 	window.stride = nat_probe_stride(round_seed ^ 0x85ebca6bU, port_range);
-
-#pragma clang loop unroll(full)
-	for (int i = 0; i < FORWARD_NAT_PORT_PROBE_WINDOW; i++) {
-		__u32 candidate = window.port_min + ((window.start + ((__u32)i * window.stride)) % window.port_range);
-
-		if (try_reserve_nat_port_v6(candidate, nat_key, &nat_value, nat_port) == 0)
-			return 0;
-	}
-
+	if (reserve_nat_peer_window(&window, peer_key, &peer_value, &shared, old_bank) == 0)
+		goto reserved;
+#endif
+#if FORWARD_NAT_PEER_PROBE_ROUNDS > 2
 	round_seed = mix_nat_probe_seed(round_seed ^ 0x23c2a438U);
-	if (FORWARD_NAT_PORT_PROBE_ROUNDS <= 2)
-		return -1;
 	window.start = (round_seed + ((__u32)ctx->dst_port << 1)) % port_range;
 	window.stride = nat_probe_stride(round_seed ^ 0xc2b2ae35U, port_range);
+	if (reserve_nat_peer_window(&window, peer_key, &peer_value, &shared, old_bank) == 0)
+		goto reserved;
+#endif
+	return -1;
 
+reserved:
+	*nat_port = peer_key->port.nat_port;
+	bump_kernel_nat_occupancy();
+	return 0;
+}
+
+static __always_inline int reserve_nat_peer_window_v6(const struct nat_probe_window_v4 *window, struct nat_peer_key_v6 *peer_key, const struct nat_peer_value *peer_value, const struct nat_port_value_v6 *shared, int old_bank)
+{
 #pragma clang loop unroll(full)
 	for (int i = 0; i < FORWARD_NAT_PORT_PROBE_WINDOW; i++) {
-		__u32 candidate = window.port_min + ((window.start + ((__u32)i * window.stride)) % window.port_range);
+		__u32 candidate = window->port_min + ((window->start + ((__u32)i * window->stride)) % window->port_range);
 
-		if (try_reserve_nat_port_v6(candidate, nat_key, &nat_value, nat_port) == 0)
+		if (try_reserve_nat_peer_v6(candidate, peer_key, peer_value, shared, old_bank) == 0)
 			return 0;
 	}
 
 	return -1;
+}
+
+/* reserve_nat_peer for an IPv6 port forward, whose peer is the rule's backend. */
+static __always_inline int reserve_nat_peer_v6(const struct rule_value_v6 *rule, const struct packet_ctx_v6 *ctx, struct nat_peer_key_v6 *peer_key, __u16 *nat_port, __u64 session_id)
+{
+	struct nat_peer_value peer_value = {
+		.rule_id = rule->rule_id,
+		.session_id = session_id,
+	};
+	struct nat_port_value_v6 shared = {
+		.rule_id = rule->rule_id,
+		.mode = FORWARD_NAT_PORT_SHARED,
+	};
+	struct nat_probe_window_v4 window = {};
+	__u32 port_min = 0;
+	__u32 port_range = 0;
+	__u32 round_seed;
+	int old_bank = FORWARD_NAT_OLD_BANK_ENABLED_V6();
+
+	build_nat_port_key_v6(rule->out_ifindex, rule->nat_addr, 0, ctx->proto, &peer_key->port);
+	copy_ipv6_addr(peer_key->peer_addr, rule->backend_addr);
+	peer_key->peer_port = rule->backend_port;
+	peer_key->pad[0] = 0;
+	peer_key->pad[1] = 0;
+
+	load_nat_port_window(&port_min, &port_range);
+	if (port_range == 0)
+		return -1;
+
+	if ((__u32)ctx->src_port >= port_min && (__u32)ctx->src_port < (port_min + port_range) &&
+	    try_reserve_nat_peer_v6((__u32)ctx->src_port, peer_key, &peer_value, &shared, old_bank) == 0)
+		goto reserved;
+
+	round_seed = mix_nat_probe_seed(fullnat_seed_v6(rule, ctx) ^ ((__u32)ctx->src_port << 16) ^ (__u32)ctx->dst_port ^ ((__u32)rule->out_ifindex << 1));
+	window.port_min = port_min;
+	window.port_range = port_range;
+	window.start = round_seed % port_range;
+	window.stride = nat_probe_stride(round_seed ^ 0x9e3779b9U, port_range);
+	if (reserve_nat_peer_window_v6(&window, peer_key, &peer_value, &shared, old_bank) == 0)
+		goto reserved;
+#if FORWARD_NAT_PEER_PROBE_ROUNDS > 1
+	round_seed = mix_nat_probe_seed(round_seed ^ 0x9e3779b9U);
+	window.start = (round_seed + ((__u32)ctx->src_port << 1)) % port_range;
+	window.stride = nat_probe_stride(round_seed ^ 0x85ebca6bU, port_range);
+	if (reserve_nat_peer_window_v6(&window, peer_key, &peer_value, &shared, old_bank) == 0)
+		goto reserved;
+#endif
+#if FORWARD_NAT_PEER_PROBE_ROUNDS > 2
+	round_seed = mix_nat_probe_seed(round_seed ^ 0x23c2a438U);
+	window.start = (round_seed + ((__u32)ctx->dst_port << 1)) % port_range;
+	window.stride = nat_probe_stride(round_seed ^ 0xc2b2ae35U, port_range);
+	if (reserve_nat_peer_window_v6(&window, peer_key, &peer_value, &shared, old_bank) == 0)
+		goto reserved;
+#endif
+	return -1;
+
+reserved:
+	*nat_port = peer_key->port.nat_port;
+	bump_kernel_nat_occupancy();
+	return 0;
 }
 
 /*
@@ -3601,6 +4024,55 @@ static __always_inline void ensure_nat_port_owner_v6(__u8 bank, const struct nat
 		bump_kernel_nat_occupancy();
 }
 
+/*
+ * Re-asserts the NAT reservation of an existing flow, which user space may
+ * have pruned or a hot restart left behind: key names the flow's mapping
+ * (build_nat_peer_key_from_reply). A flow on a shared port gets its peer
+ * entry back, and the port's shared class if user space reclaimed it in the
+ * meantime; a class that exists, exclusive or draining, stays as it is.
+ */
+static __always_inline void ensure_flow_nat_owner_v4(__u8 bank, const struct nat_peer_key_v4 *key, __u16 flow_flags, __u32 rule_id, __u64 session_id)
+{
+	if ((flow_flags & FORWARD_FLOW_FLAG_NAT_PEER) != 0)
+		ensure_nat_peer_owner_v4(bank, key, rule_id, session_id);
+	else
+		ensure_nat_port_owner_v4(bank, &key->port, rule_id, session_id);
+}
+
+static __always_inline void ensure_flow_nat_owner_v6(__u8 bank, const struct nat_peer_key_v6 *key, __u16 flow_flags, __u32 rule_id, __u64 session_id)
+{
+	if ((flow_flags & FORWARD_FLOW_FLAG_NAT_PEER) != 0)
+		ensure_nat_peer_owner_v6(bank, key, rule_id, session_id);
+	else
+		ensure_nat_port_owner_v6(bank, &key->port, rule_id, session_id);
+}
+
+/*
+ * Releases a flow's NAT reservation: the mapping of a flow on a shared port,
+ * whose class stays until user space reclaims it, or the exclusive port.
+ */
+static __always_inline void release_flow_nat_v4(__u8 bank, const struct flow_key_v4 *reply_key, const struct flow_value_v4 *reply_value, union flow_nat_key_v4 *key)
+{
+	if ((reply_value->flags & FORWARD_FLOW_FLAG_NAT_PEER) != 0) {
+		release_nat_peer_v4(bank, reply_key, reply_value->session_id, &key->peer);
+		return;
+	}
+	build_nat_port_key(reply_key->ifindex, reply_value->nat_addr, reply_value->nat_port, reply_key->proto, &key->nat);
+	if (delete_nat_port_v4_session_in_bank(bank, &key->nat, reply_value->session_id) == 0)
+		drop_kernel_nat_occupancy();
+}
+
+static __always_inline void release_flow_nat_v6(__u8 bank, const struct flow_key_v6 *reply_key, const struct flow_value_v6 *reply_value, union flow_nat_key_v6 *key)
+{
+	if ((reply_value->flags & FORWARD_FLOW_FLAG_NAT_PEER) != 0) {
+		release_nat_peer_v6(bank, reply_key, reply_value->session_id, &key->peer);
+		return;
+	}
+	build_nat_port_key_v6(reply_key->ifindex, reply_value->nat_addr, reply_value->nat_port, reply_key->proto, &key->nat);
+	if (delete_nat_port_v6_session_in_bank(bank, &key->nat, reply_value->session_id) == 0)
+		drop_kernel_nat_occupancy();
+}
+
 static __always_inline void delete_fullnat_state(__u8 flow_bank, const struct flow_key_v4 *reply_key, const struct flow_value_v4 *reply_value, __u8 proto)
 {
 	union flow_nat_key_v4 key = {};
@@ -3629,9 +4101,7 @@ static __always_inline void delete_fullnat_state(__u8 flow_bank, const struct fl
 		else
 			drop_rule_datagram_nat(reply_value->rule_id, proto);
 	}
-	build_nat_port_key(reply_key->ifindex, reply_value->nat_addr, reply_value->nat_port, proto, &key.nat);
-	if (delete_nat_port_v4_session_in_bank(flow_bank, &key.nat, reply_value->session_id) == 0)
-		drop_kernel_nat_occupancy();
+	release_flow_nat_v4(flow_bank, reply_key, reply_value, &key);
 }
 
 static __always_inline void delete_fullnat_state_v6(__u8 flow_bank, const struct flow_key_v6 *reply_key, const struct flow_value_v6 *reply_value, __u8 proto)
@@ -3657,9 +4127,7 @@ static __always_inline void delete_fullnat_state_v6(__u8 flow_bank, const struct
 		else
 			drop_rule_datagram_nat(reply_value->rule_id, proto);
 	}
-	build_nat_port_key_v6(reply_key->ifindex, reply_value->nat_addr, reply_value->nat_port, proto, &key.nat);
-	if (delete_nat_port_v6_session_in_bank(flow_bank, &key.nat, reply_value->session_id) == 0)
-		drop_kernel_nat_occupancy();
+	release_flow_nat_v6(flow_bank, reply_key, reply_value, &key);
 }
 
 static __always_inline void init_fullnat_front_value(struct flow_value_v4 *front_value, const struct rule_value_v4 *rule, const struct packet_ctx *ctx, __u32 in_ifindex, __u16 nat_port, __u64 session_id)
@@ -3908,7 +4376,17 @@ static __always_inline int handle_transparent_forward(struct __sk_buff *skb, con
 	}
 }
 
-static __always_inline int redirect_fullnat_forward(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, const struct flow_value_v4 *front_value)
+static __always_inline void remember_flow_fast_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, struct flow_value_v4 *live, __u64 session_id, const struct tc_l2_value_v4 *l2, __u32 dst_addr, __u16 dst_port);
+static __always_inline int flow_fast_current_v4(const struct flow_value_v4 *flow);
+static __always_inline int flow_within_fast_path_window(const struct flow_value_v4 *flow, __u64 now);
+static __always_inline int tcp_packet_changes_state(const struct packet_ctx *ctx);
+
+/*
+ * l2, if set, is the next hop the FIB resolved for this flow within its
+ * fast-path window (fullnat_forward_fast_hop_v4); otherwise the FIB is asked
+ * and its answer kept in tc_l2_cache_v4 for the rest of the window.
+ */
+static __always_inline int redirect_fullnat_forward(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, const struct flow_value_v4 *front_value, const struct tc_l2_value_v4 *l2)
 {
 	struct redirect_target_v4 redirect = {
 		.ifindex = rule->out_ifindex,
@@ -3924,23 +4402,59 @@ static __always_inline int redirect_fullnat_forward(struct __sk_buff *skb, const
 	if (rewrite_l4_dnat(skb, ctx, rule->backend_addr, rule->backend_port) < 0) {
 		return TC_ACT_SHOT;
 	}
+	if (l2)
+		return redirect_tc_l2_v4(skb, l2);
 	if ((rule->flags & (FORWARD_RULE_FLAG_BRIDGE_L2 | FORWARD_RULE_FLAG_PREPARED_L2)) != 0)
 		return redirect_prepared_l2_ifindex(skb, rule);
-	return redirect_ifindex(skb, ctx, &redirect, load_kernel_nat_config_flags());
+	return redirect_ifindex_l2(skb, ctx, &redirect, load_kernel_nat_config_flags(), 1);
+}
+
+/*
+ * A port forward's full-NAT packet inside its front entry's fast-path window
+ * (the window's first packet looked the next hop up): the next hop the FIB
+ * resolved, if the packet fits it, and the flow cache's record of it in the
+ * front entry, with the backend the dispatcher translates to. Packets that
+ * change TCP state, first fragments and rules with a prepared next hop take
+ * the full path. front is a checked copy of the entry under front_key.
+ */
+static __always_inline const struct tc_l2_value_v4 *fullnat_forward_fast_hop_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, const struct flow_value_v4 *front, __u8 bank, const struct flow_key_v4 *front_key)
+{
+	const struct tc_l2_value_v4 *l2;
+
+	if (tcp_packet_changes_state(ctx) || (ctx->ip_flags & FORWARD_IP_FLAG_FIRST_FRAGMENT) != 0)
+		return 0;
+	if ((rule->flags & (FORWARD_RULE_FLAG_BRIDGE_L2 | FORWARD_RULE_FLAG_PREPARED_L2)) != 0 ||
+		prefer_redirect_neigh_fast(load_kernel_nat_config_flags()))
+		return 0;
+	l2 = lookup_tc_l2_v4(skb, ctx, rule->out_ifindex, front->nat_addr, rule->backend_addr);
+	/*
+	 * lookup_tc_l2_v4 returns 0 on several paths; clang 14 then tests one
+	 * register and reads l2 from a spilled copy the old verifiers take for
+	 * 0. The asm keeps the test and the reads on the same value.
+	 */
+	asm volatile("" : "+r"(l2));
+	if (!l2)
+		return 0;
+	if (bank == FORWARD_TC_FLOW_BANK_ACTIVE && (!flow_fast_current_v4(front) || l2->max_len > front->fast.max_len))
+		remember_flow_fast_v4(skb, ctx, lookup_flow_v4_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, front_key),
+			front->session_id, l2, rule->backend_addr, rule->backend_port);
+	return l2;
 }
 
 static __always_inline int handle_fullnat_forward_existing(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, struct flow_value_v4 *existing_front, __u8 flow_bank)
 {
 	struct flow_key_v4 front_key = {};
 	struct flow_key_v4 reply_key = {};
-	struct nat_port_key_v4 nat_key = {};
+	struct nat_peer_key_v4 nat_key = {};
 	struct flow_value_v4 *front_value = lookup_scratch_flow_v4();
 	struct flow_value_v4 *reply_value = lookup_scratch_flow_aux_v4();
 	struct flow_value_v4 *reply_flow = 0;
+	const struct tc_l2_value_v4 *l2 = 0;
 	__u64 now = bpf_ktime_get_ns();
 	__u8 created_reply = 0;
 	__u8 update_front = 0;
 	__u8 update_reply = 0;
+	__u8 touch_front = 0;
 	__u8 count_udp_now = 0;
 	__u8 bank = flow_bank & FORWARD_TC_FLOW_BANK_MASK;
 	int front_live = (flow_bank & FORWARD_TC_FLOW_BANK_DISPATCH_SNAPSHOT) == 0;
@@ -3980,8 +4494,8 @@ static __always_inline int handle_fullnat_forward_existing(struct __sk_buff *skb
 		bump_kernel_flow_occupancy();
 	}
 
-	build_nat_port_key(rule->out_ifindex, front_value->nat_addr, front_value->nat_port, ctx->proto, &nat_key);
-	ensure_nat_port_owner_v4(bank, &nat_key, rule->rule_id, front_value->session_id);
+	build_nat_peer_key_from_reply(&reply_key, &nat_key);
+	ensure_flow_nat_owner_v4(bank, &nat_key, front_value->flags, rule->rule_id, front_value->session_id);
 
 	if (is_datagram_proto(ctx->proto)) {
 		if (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_UDP_FLOW_REFRESH_NS) {
@@ -4004,6 +4518,9 @@ static __always_inline int handle_fullnat_forward_existing(struct __sk_buff *skb
 			if (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
 				front_value->last_seen_ns = now;
 				update_front = 1;
+			} else if ((now - front_value->last_seen_ns) >= FORWARD_TC_FAST_PATH_WINDOW_NS) {
+				/* Reopens the fast-path window now that the pair was checked. */
+				touch_front = 1;
 			}
 			if (!created_reply && (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
 				reply_value->last_seen_ns = now;
@@ -4022,6 +4539,10 @@ static __always_inline int handle_fullnat_forward_existing(struct __sk_buff *skb
 			}
 			return TC_ACT_SHOT;
 		}
+	} else if (touch_front) {
+		touch_flow_v4(front_live ? existing_front : lookup_flow_v4_in_bank(bank, &front_key), front_value->session_id, now);
+	} else if (!close_complete && flow_within_fast_path_window(front_value, now)) {
+		l2 = fullnat_forward_fast_hop_v4(skb, ctx, rule, front_value, bank, &front_key);
 	}
 	if (update_reply) {
 		if (!created_reply) {
@@ -4036,7 +4557,7 @@ static __always_inline int handle_fullnat_forward_existing(struct __sk_buff *skb
 		add_rule_traffic_bytes(rule->rule_id, FORWARD_GET_PAYLOAD_LEN(ctx), 0);
 	update_reply_l2_cache_v4(skb, &reply_key, load_kernel_nat_config_flags());
 	{
-		int action = redirect_fullnat_forward(skb, ctx, rule, front_value);
+		int action = redirect_fullnat_forward(skb, ctx, rule, front_value, l2);
 
 		if (close_complete && action == TC_ACT_REDIRECT)
 			delete_fullnat_state(bank, &reply_key, reply_value, ctx->proto);
@@ -4048,7 +4569,7 @@ static __always_inline int handle_fullnat_forward_new(struct __sk_buff *skb, con
 {
 	struct flow_key_v4 front_key_local = {};
 	struct flow_key_v4 reply_key = {};
-	struct nat_port_key_v4 nat_key = {};
+	struct nat_peer_key_v4 nat_key = {};
 	struct flow_value_v4 *front_value = lookup_scratch_flow_v4();
 	struct flow_value_v4 *reply_value = lookup_scratch_flow_aux_v4();
 	struct flow_value_v4 *front_flow;
@@ -4067,11 +4588,12 @@ static __always_inline int handle_fullnat_forward_new(struct __sk_buff *skb, con
 	__builtin_memset(front_value, 0, sizeof(*front_value));
 	__builtin_memset(reply_value, 0, sizeof(*reply_value));
 
-	if (reserve_nat_port(rule, ctx, &nat_key, &nat_port, session_id) < 0) {
+	if (reserve_nat_peer(rule, ctx, rule->backend_addr, rule->backend_port, &nat_key, &nat_port, session_id) < 0) {
 		return TC_ACT_SHOT;
 	}
 
 	init_fullnat_front_value(front_value, rule, ctx, skb->ifindex, nat_port, session_id);
+	front_value->flags |= FORWARD_FLOW_FLAG_NAT_PEER;
 	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
 		front_value->flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
 	if (ctx->closing) {
@@ -4080,7 +4602,7 @@ static __always_inline int handle_fullnat_forward_new(struct __sk_buff *skb, con
 	}
 	front_value->last_seen_ns = now;
 	if (update_flow_v4_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &front_key_local, front_value, BPF_NOEXIST) < 0) {
-		if (delete_nat_port_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &nat_key, session_id) == 0)
+		if (delete_nat_peer_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &nat_key, session_id) == 0)
 			drop_kernel_nat_occupancy();
 
 		front_flow = lookup_flow_v4_copy_active_or_old(&front_key_local, &flow_bank, front_value);
@@ -4102,7 +4624,7 @@ static __always_inline int handle_fullnat_forward_new(struct __sk_buff *skb, con
 			if (delete_flow_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &front_key_local, session_id) == 0)
 				drop_kernel_flow_occupancy();
 		}
-		if (delete_nat_port_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &nat_key, session_id) == 0)
+		if (delete_nat_peer_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &nat_key, session_id) == 0)
 			drop_kernel_nat_occupancy();
 		return TC_ACT_SHOT;
 	}
@@ -4113,7 +4635,7 @@ static __always_inline int handle_fullnat_forward_new(struct __sk_buff *skb, con
 	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
 		add_rule_traffic_bytes(rule->rule_id, FORWARD_GET_PAYLOAD_LEN(ctx), 0);
 	update_reply_l2_cache_v4(skb, &reply_key, load_kernel_nat_config_flags());
-	return redirect_fullnat_forward(skb, ctx, rule, front_value);
+	return redirect_fullnat_forward(skb, ctx, rule, front_value, 0);
 }
 
 static __always_inline int handle_fullnat_forward(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule)
@@ -4277,9 +4799,10 @@ static __always_inline struct flow_value_v4 *flow_fast_live_v4(struct flow_value
  * finds the same current stamp before and after copying the record therefore
  * copied one writer's fields (on CPUs that keep stores in order; elsewhere a
  * reader racing a rewrite after a route change may still mix two records for
- * one packet). live must be the entry of session_id; dst_addr is in host order.
+ * one packet). live must be the entry of session_id; dst_addr is in host
+ * order. See struct flow_fast_v4 for what dst_addr and dst_port hold.
  */
-static __always_inline void remember_flow_fast_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, struct flow_value_v4 *live, __u64 session_id, const struct tc_l2_value_v4 *l2, __u32 dst_addr)
+static __always_inline void remember_flow_fast_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, struct flow_value_v4 *live, __u64 session_id, const struct tc_l2_value_v4 *l2, __u32 dst_addr, __u16 dst_port)
 {
 	const struct tc_flow_cache_state_v4 *state;
 	const struct ethhdr *eth;
@@ -4287,6 +4810,12 @@ static __always_inline void remember_flow_fast_v4(struct __sk_buff *skb, const s
 	__u32 stamp;
 
 	live = flow_fast_live_v4(live);
+	/*
+	 * Callers pass l2 only behind their own test of it, and clang 14 may
+	 * then drop this one and carry a spilled 0 along a path the old
+	 * verifiers walk into l2->max_len. The asm keeps the test on l2.
+	 */
+	asm volatile("" : "+r"(l2));
 	if (!live || !l2 || ctx->l3_off != (int)sizeof(struct ethhdr) || ctx->proto == IPPROTO_ICMP)
 		return;
 	state = tc_flow_cache_writable(skb->ifindex);
@@ -4314,6 +4843,7 @@ static __always_inline void remember_flow_fast_v4(struct __sk_buff *skb, const s
 	live->fast.out_ifindex = l2->out_ifindex;
 	live->fast.in_ifindex = skb->ifindex;
 	live->fast.dst_addr = dst_addr;
+	live->fast.dst_port = dst_port;
 	live->fast.max_len = max_len;
 	__builtin_memcpy(live->fast.dmac, l2->dmac, ETH_ALEN);
 	__builtin_memcpy(live->fast.smac, l2->smac, ETH_ALEN);
@@ -4357,6 +4887,68 @@ static __always_inline void forget_flow_fast_v4(struct flow_value_v4 *own, const
 	retire_flow_fast_v4(bpf_map_lookup_elem(&flows_v4, peer));
 }
 
+static __always_inline struct flow_value_v6 *flow_fast_live_v6(struct flow_value_v6 *live)
+{
+	asm volatile("" : "+r"(live));
+	return live;
+}
+
+/*
+ * remember_flow_fast_v4 for IPv6. dst_addr, if set, and dst_port name the
+ * backend of a port forward's front entry.
+ */
+static __always_inline void remember_flow_fast_v6(struct __sk_buff *skb, const struct packet_ctx_v6 *ctx, struct flow_value_v6 *live, __u64 session_id, const struct tc_l2_value_v4 *l2, const __u8 *dst_addr, __u16 dst_port)
+{
+	const struct tc_flow_cache_state_v4 *state;
+	const struct ethhdr *eth;
+	__u16 max_len;
+	__u32 stamp;
+
+	live = flow_fast_live_v6(live);
+	/* See remember_flow_fast_v4. */
+	asm volatile("" : "+r"(l2));
+	if (!live || !l2 || ctx->l3_off != (int)sizeof(struct ethhdr))
+		return;
+	state = tc_flow_cache_writable(skb->ifindex);
+	if (!state)
+		return;
+	eth = tc_packet_ptr(skb, 0, sizeof(*eth));
+	if (!eth || flow_v6_session(live) != session_id)
+		return;
+	max_len = l2->max_len > 0xffff ? 0xffff : (__u16)l2->max_len;
+	stamp = flow_fast_stamp_v4(live->last_seen_ns, state->generation);
+	if (live->fast.stamp == stamp) {
+		if (max_len > live->fast.max_len && live->fast.out_ifindex == l2->out_ifindex &&
+		    mac_equal(live->fast.dmac, l2->dmac))
+			live->fast.max_len = max_len;
+		return;
+	}
+	live->fast.stamp = 0;
+	FORWARD_COMPILER_BARRIER();
+	live->fast.out_ifindex = l2->out_ifindex;
+	live->fast.in_ifindex = skb->ifindex;
+	live->fast.max_len = max_len;
+	live->fast.dst_port = dst_port;
+	if (dst_addr)
+		copy_ipv6_addr(live->fast.dst_addr, dst_addr);
+	else
+		__builtin_memset(live->fast.dst_addr, 0, sizeof(live->fast.dst_addr));
+	__builtin_memcpy(live->fast.dmac, l2->dmac, ETH_ALEN);
+	__builtin_memcpy(live->fast.smac, l2->smac, ETH_ALEN);
+	__builtin_memcpy(live->fast.in_dmac, eth->h_dest, ETH_ALEN);
+	FORWARD_COMPILER_BARRIER();
+	live->fast.stamp = stamp;
+}
+
+static __always_inline int flow_fast_current_v6(const struct flow_value_v6 *flow)
+{
+	const struct tc_flow_cache_state_v4 *state;
+	__u32 state_key = 0;
+
+	state = bpf_map_lookup_elem(&tc_flow_cache_state_v4, &state_key);
+	return state && flow->fast.stamp == flow_fast_stamp_v4(flow->last_seen_ns, state->generation);
+}
+
 /* A fast path declined the packet; run the full handler. */
 #define FORWARD_TC_SLOW_PATH (-2)
 
@@ -4374,6 +4966,60 @@ static __always_inline int tcp_packet_changes_state(const struct packet_ctx *ctx
 {
 	return ctx->proto == IPPROTO_TCP &&
 		(ctx->tcp_flags & (FORWARD_TCP_FLAG_FIN | FORWARD_TCP_FLAG_SYN | FORWARD_TCP_FLAG_RST)) != 0;
+}
+
+static __always_inline int tcp_packet_changes_state_v6(const struct packet_ctx_v6 *ctx)
+{
+	return ctx->proto == IPPROTO_TCP &&
+		(ctx->tcp_flags & (FORWARD_TCP_FLAG_FIN | FORWARD_TCP_FLAG_SYN | FORWARD_TCP_FLAG_RST)) != 0;
+}
+
+static __always_inline int flow_within_fast_path_window_v6(const struct flow_value_v6 *flow, __u64 now)
+{
+	__u64 seen = flow->last_seen_ns;
+
+	if ((flow->flags & (FORWARD_FLOW_FLAG_FRONT_CLOSING | FORWARD_FLOW_FLAG_REPLY_CLOSING)) != 0)
+		return 0;
+	return seen != 0 && now >= seen && now - seen < FORWARD_TC_FAST_PATH_WINDOW_NS;
+}
+
+/*
+ * fullnat_forward_fast_hop_v4 for IPv6, whose rules are all port forwards.
+ * live, if set, is the active-bank entry front was copied from.
+ */
+static __always_inline const struct tc_l2_value_v4 *fullnat_forward_fast_hop_v6(struct __sk_buff *skb, const struct packet_ctx_v6 *ctx, const struct rule_value_v6 *rule, const struct flow_value_v6 *front, struct flow_value_v6 *live)
+{
+	const struct tc_l2_value_v4 *l2;
+
+	if (tcp_packet_changes_state_v6(ctx) || (rule->flags & (FORWARD_RULE_FLAG_BRIDGE_L2 | FORWARD_RULE_FLAG_PREPARED_L2)) != 0)
+		return 0;
+	l2 = lookup_tc_l2_v6(skb, ctx, rule->out_ifindex, front->nat_addr, rule->backend_addr);
+	/* See fullnat_forward_fast_hop_v4. */
+	asm volatile("" : "+r"(l2));
+	if (!l2)
+		return 0;
+	if (!flow_fast_current_v6(front) || l2->max_len > front->fast.max_len)
+		remember_flow_fast_v6(skb, ctx, live, front->session_id, l2, rule->backend_addr, rule->backend_port);
+	return l2;
+}
+
+/* The reply direction of fullnat_forward_fast_hop_v6; flow is a checked copy. */
+static __always_inline const struct tc_l2_value_v4 *fullnat_reply_fast_hop_v6(struct __sk_buff *skb, const struct packet_ctx_v6 *ctx, const struct flow_value_v6 *flow, __u8 bank, const struct flow_key_v6 *reply_key)
+{
+	const struct tc_l2_value_v4 *l2;
+
+	if (tcp_packet_changes_state_v6(ctx))
+		return 0;
+	if (ctx->proto == IPPROTO_TCP && (flow->flags & FORWARD_FLOW_FLAG_REPLY_SEEN) == 0)
+		return 0;
+	l2 = lookup_tc_l2_v6(skb, ctx, flow->in_ifindex, flow->front_addr, flow->client_addr);
+	asm volatile("" : "+r"(l2));
+	if (!l2)
+		return 0;
+	if (bank == FORWARD_TC_FLOW_BANK_ACTIVE && (!flow_fast_current_v6(flow) || l2->max_len > flow->fast.max_len))
+		remember_flow_fast_v6(skb, ctx, lookup_flow_v6_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, reply_key),
+			flow->session_id, l2, 0, 0);
+	return l2;
 }
 
 /*
@@ -4465,7 +5111,7 @@ static __always_inline int try_egress_nat_forward_fast(struct __sk_buff *skb, co
 	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
 		add_rule_traffic_bytes(rule->rule_id, FORWARD_GET_PAYLOAD_LEN(ctx), 0);
 	if (!prefer_reply_l2_cache(nat_cfg_flags) && nat_addr == front_flow->nat_addr)
-		remember_flow_fast_v4(skb, ctx, live, front_flow->session_id, l2, bpf_ntohl(ctx->dst_addr));
+		remember_flow_fast_v4(skb, ctx, live, front_flow->session_id, l2, bpf_ntohl(ctx->dst_addr), 0);
 	if (rewrite_l4_snat(skb, ctx, nat_addr, front_flow->nat_port) < 0)
 		return TC_ACT_SHOT;
 	if (l2)
@@ -4581,10 +5227,10 @@ static __always_inline int handle_egress_nat_forward_existing(struct __sk_buff *
 		}
 	}
 	if (created_reply || update_front || update_reply) {
-		struct nat_port_key_v4 nat_key = {};
+		struct nat_peer_key_v4 nat_key = {};
 
-		build_nat_port_key(rule->out_ifindex, front_value->nat_addr, front_value->nat_port, ctx->proto, &nat_key);
-		ensure_nat_port_owner_v4(flow_bank, &nat_key, rule->rule_id, front_value->session_id);
+		build_nat_peer_key_from_reply(&reply_key, &nat_key);
+		ensure_flow_nat_owner_v4(flow_bank, &nat_key, front_value->flags, rule->rule_id, front_value->session_id);
 	}
 	if (count_udp_now)
 		bump_rule_datagram_nat(rule->rule_id, ctx->proto);
@@ -4604,7 +5250,7 @@ static __always_inline int handle_egress_nat_forward_existing(struct __sk_buff *
 static __always_inline int handle_egress_nat_forward_new(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct rule_value_v4 *rule, const struct flow_key_v4 *front_key)
 {
 	struct flow_key_v4 reply_key = {};
-	struct nat_port_key_v4 nat_key = {};
+	struct nat_peer_key_v4 nat_key = {};
 	struct flow_value_v4 *front_value = lookup_scratch_flow_v4();
 	struct flow_value_v4 *reply_value = lookup_scratch_flow_aux_v4();
 	struct flow_value_v4 *front_flow;
@@ -4623,11 +5269,11 @@ static __always_inline int handle_egress_nat_forward_new(struct __sk_buff *skb, 
 	__builtin_memset(front_value, 0, sizeof(*front_value));
 	__builtin_memset(reply_value, 0, sizeof(*reply_value));
 
-	if (reserve_nat_port(rule, ctx, &nat_key, &nat_port, session_id) < 0)
+	if (reserve_nat_peer(rule, ctx, bpf_ntohl(ctx->dst_addr), ctx->dst_port, &nat_key, &nat_port, session_id) < 0)
 		return TC_ACT_SHOT;
 
 	init_fullnat_front_value(front_value, rule, ctx, (__u32)skb->ifindex, nat_port, session_id);
-	front_value->flags |= FORWARD_FLOW_FLAG_EGRESS_NAT;
+	front_value->flags |= FORWARD_FLOW_FLAG_EGRESS_NAT | FORWARD_FLOW_FLAG_NAT_PEER;
 	if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
 		front_value->flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
 	if (ctx->closing) {
@@ -4636,7 +5282,7 @@ static __always_inline int handle_egress_nat_forward_new(struct __sk_buff *skb, 
 	}
 	front_value->last_seen_ns = now;
 	if (update_flow_v4_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, front_key, front_value, BPF_NOEXIST) < 0) {
-		if (delete_nat_port_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &nat_key, session_id) == 0)
+		if (delete_nat_peer_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &nat_key, session_id) == 0)
 			drop_kernel_nat_occupancy();
 
 		/* Another CPU opened the flow meanwhile: carry on with it there. */
@@ -4662,7 +5308,7 @@ static __always_inline int handle_egress_nat_forward_new(struct __sk_buff *skb, 
 			if (delete_flow_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, front_key, session_id) == 0)
 				drop_kernel_flow_occupancy();
 		}
-		if (delete_nat_port_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &nat_key, session_id) == 0)
+		if (delete_nat_peer_v4_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &nat_key, session_id) == 0)
 			drop_kernel_nat_occupancy();
 		return TC_ACT_SHOT;
 	}
@@ -4838,6 +5484,8 @@ static __always_inline int handle_egress_nat_forward_full_cone(struct __sk_buff 
 		}
 	} else {
 		/* A new mapping, which the egress NAT new-flow program opens. */
+		if (egress_nat_reply_to_host_socket_v4(skb, ctx))
+			return TC_ACT_OK;
 		if (ctx->proto == IPPROTO_TCP && !is_initial_tcp_syn(ctx))
 			return TC_ACT_SHOT;
 		bpf_tail_call(skb, &tc_egress_nat_new_chain_v4, FORWARD_TC_EGRESS_NAT_NEW_V4);
@@ -4935,21 +5583,57 @@ static __always_inline int handle_egress_nat_forward(struct __sk_buff *skb, cons
 	return handle_egress_nat_forward_non_full_cone(skb, ctx, rule);
 }
 
+/*
+ * Where a reply leaves: the interface the flow came in by, or its bridge when
+ * that is a bridge port. A port has no route of its own, so the FIB finds
+ * nothing through it and a neighbour lookup there never resolves; the bridge
+ * forwards to the port. Egress NAT flows come in by ports, and so do hairpin
+ * flows of a guest behind a port-scoped egress NAT rule.
+ */
 static __always_inline __u32 resolve_reply_redirect_ifindex(const struct flow_value_v4 *reply_value)
 {
 	if (!reply_value)
 		return 0;
-	if ((reply_value->flags & FORWARD_FLOW_FLAG_EGRESS_NAT) != 0)
-		return resolve_parent_ifindex(reply_value->in_ifindex);
-	return reply_value->in_ifindex;
+	return resolve_parent_ifindex(reply_value->in_ifindex);
+}
+
+/*
+ * A transparent reply inside its entry's fast-path window (the window's first
+ * packet looked the next hop up): the next hop the FIB resolved, if the
+ * packet fits it, and the flow cache's record of it in the entry. Only this
+ * direction is recorded: the entry is keyed by the reply, so the dispatcher
+ * finds no entry for a forward packet before its rule lookup. flow is a
+ * checked copy of the entry under flow_key.
+ */
+static __always_inline const struct tc_l2_value_v4 *transparent_reply_fast_hop_v4(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct flow_value_v4 *flow, __u8 bank, const struct flow_key_v4 *flow_key, __u32 nat_cfg_flags)
+{
+	const struct tc_l2_value_v4 *l2;
+
+	if (tcp_packet_changes_state(ctx) || (ctx->ip_flags & FORWARD_IP_FLAG_FIRST_FRAGMENT) != 0)
+		return 0;
+	if (ctx->proto == IPPROTO_TCP && (flow->flags & FORWARD_FLOW_FLAG_REPLY_SEEN) == 0)
+		return 0;
+	if (prefer_reply_l2_cache(nat_cfg_flags) || prefer_redirect_neigh_fast(nat_cfg_flags))
+		return 0;
+	l2 = lookup_tc_l2_v4(skb, ctx, resolve_reply_redirect_ifindex(flow), flow->front_addr, bpf_ntohl(ctx->dst_addr));
+	/* See fullnat_forward_fast_hop_v4. */
+	asm volatile("" : "+r"(l2));
+	if (!l2)
+		return 0;
+	if (bank == FORWARD_TC_FLOW_BANK_ACTIVE && (!flow_fast_current_v4(flow) || l2->max_len > flow->fast.max_len))
+		remember_flow_fast_v4(skb, ctx, lookup_flow_v4_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, flow_key),
+			flow->session_id, l2, 0, 0);
+	return l2;
 }
 
 static __always_inline int handle_transparent_reply(struct __sk_buff *skb, const struct packet_ctx *ctx, const struct flow_key_v4 *flow_key, struct flow_value_v4 *flow, __u8 flow_bank)
 {
 	struct flow_value_v4 *flow_value = lookup_scratch_flow_v4();
 	struct redirect_target_v4 redirect = {};
+	const struct tc_l2_value_v4 *l2 = 0;
 	__u64 now = 0;
 	int update_flow = 0;
+	int touch_flow = 0;
 	int count_tcp_now = 0;
 	int close_complete = 0;
 	__u8 bank = flow_bank & FORWARD_TC_FLOW_BANK_MASK;
@@ -4993,6 +5677,9 @@ static __always_inline int handle_transparent_reply(struct __sk_buff *skb, const
 			(flow_value->last_seen_ns == 0 || now < flow_value->last_seen_ns || (now - flow_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
 			flow_value->last_seen_ns = now;
 			update_flow = 1;
+		} else if (!tcp_packet_changes_state(ctx) && (now - flow_value->last_seen_ns) >= FORWARD_TC_FAST_PATH_WINDOW_NS) {
+			/* Reopens the fast-path window now that the entry was checked. */
+			touch_flow = 1;
 		}
 		if (!close_complete && tcp_packet_has_fin(ctx->proto, ctx->tcp_flags)) {
 			mark_tcp_flow_closing_v4(flow_value, FORWARD_FLOW_FLAG_REPLY_CLOSING, now);
@@ -5007,6 +5694,10 @@ static __always_inline int handle_transparent_reply(struct __sk_buff *skb, const
 			write_flow_v4(flow, flow_value);
 		else if (store_flow_v4_in_bank(bank, flow_key, flow_value) < 0)
 			return TC_ACT_SHOT;
+	} else if (touch_flow) {
+		touch_flow_v4(flow_live ? flow : lookup_flow_v4_in_bank(bank, flow_key), flow_value->session_id, now);
+	} else if (!close_complete && flow_within_fast_path_window(flow_value, now)) {
+		l2 = transparent_reply_fast_hop_v4(skb, ctx, flow_value, bank, flow_key, nat_cfg_flags);
 	}
 	if (count_tcp_now)
 		bump_rule_tcp_active(flow_value->rule_id);
@@ -5015,6 +5706,8 @@ static __always_inline int handle_transparent_reply(struct __sk_buff *skb, const
 
 	if (rewrite_l4_snat(skb, ctx, flow_value->front_addr, flow_value->front_port) < 0)
 		return TC_ACT_SHOT;
+	if (l2)
+		return redirect_tc_l2_v4(skb, l2);
 
 	redirect.ifindex = resolve_reply_redirect_ifindex(flow_value);
 	{
@@ -5037,7 +5730,7 @@ static __always_inline int handle_transparent_reply(struct __sk_buff *skb, const
 	redirect.src_port = flow_value->front_port;
 	redirect.dst_port = ctx->dst_port;
 	{
-		int action = redirect_ifindex(skb, ctx, &redirect, nat_cfg_flags);
+		int action = redirect_ifindex_l2(skb, ctx, &redirect, nat_cfg_flags, 1);
 
 		if (close_complete && action == TC_ACT_REDIRECT &&
 			delete_flow_v4_session_in_bank(bank, flow_key, flow_value->session_id) == 0) {
@@ -5098,10 +5791,10 @@ static __always_inline int try_fullnat_reply_fast(struct __sk_buff *skb, const s
 	}
 	if (FORWARD_FLOW_TRAFFIC_ENABLED(flow))
 		add_rule_traffic_bytes(flow->rule_id, 0, FORWARD_GET_PAYLOAD_LEN(ctx));
-	if (is_egress_nat_flow(flow) && bank == FORWARD_TC_FLOW_BANK_ACTIVE && reply_key &&
+	if (bank == FORWARD_TC_FLOW_BANK_ACTIVE && reply_key &&
 		 (!flow_fast_current_v4(flow) || (l2 && l2->max_len > flow->fast.max_len)))
 		remember_flow_fast_v4(skb, ctx, lookup_flow_v4_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, reply_key),
-			flow->session_id, l2, 0);
+			flow->session_id, l2, 0, 0);
 	if (!full_cone) {
 		if (rewrite_l4_snat(skb, ctx, flow->front_addr, flow->front_port) < 0)
 			return TC_ACT_SHOT;
@@ -5315,9 +6008,11 @@ static __always_inline int handle_fullnat_forward_v6(struct __sk_buff *skb, cons
 	__u8 created_reply = 0;
 	__u8 update_front = 0;
 	__u8 update_reply = 0;
+	__u8 touch_front = 0;
 	__u8 new_session = 0;
 	__u8 count_udp_now = 0;
 	__u8 flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
+	const struct tc_l2_value_v4 *l2 = 0;
 	int close_complete = 0;
 
 	if (!close_reply_key || !front_value || !reply_value)
@@ -5355,15 +6050,17 @@ static __always_inline int handle_fullnat_forward_v6(struct __sk_buff *skb, cons
 			bump_kernel_flow_occupancy();
 		}
 
-		build_nat_port_key_v6(rule->out_ifindex, front_value->nat_addr, front_value->nat_port, ctx->proto, &reply_or_nat.nat);
-		ensure_nat_port_owner_v6(flow_bank, &reply_or_nat.nat, rule->rule_id, front_value->session_id);
+		build_reply_flow_key_from_front_v6(rule, front_value, ctx->proto, close_reply_key);
+		build_nat_peer_key_from_reply_v6(close_reply_key, &reply_or_nat.peer);
+		ensure_flow_nat_owner_v6(flow_bank, &reply_or_nat.peer, front_value->flags, rule->rule_id, front_value->session_id);
 	} else {
 		if (ctx->proto == IPPROTO_TCP && !is_initial_tcp_syn_v6(ctx))
 			return TC_ACT_SHOT;
-		if (reserve_nat_port_v6(rule, ctx, &reply_or_nat.nat, &nat_port, session_id) < 0)
+		if (reserve_nat_peer_v6(rule, ctx, &reply_or_nat.peer, &nat_port, session_id) < 0)
 			return TC_ACT_SHOT;
 
 		init_fullnat_front_value_v6(front_value, rule, ctx, (__u32)skb->ifindex, nat_port, session_id);
+		front_value->flags |= FORWARD_FLOW_FLAG_NAT_PEER;
 		if (FORWARD_RULE_TRAFFIC_ENABLED(rule))
 			front_value->flags |= FORWARD_FLOW_FLAG_TRAFFIC_STATS;
 		if (ctx->closing) {
@@ -5373,8 +6070,9 @@ static __always_inline int handle_fullnat_forward_v6(struct __sk_buff *skb, cons
 		front_value->last_seen_ns = now;
 		build_front_flow_key_v6(skb, ctx, &reply_or_nat.flow);
 		if (update_flow_v6_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_or_nat.flow, front_value, BPF_NOEXIST) < 0) {
-			build_nat_port_key_v6(rule->out_ifindex, front_value->nat_addr, front_value->nat_port, ctx->proto, &reply_or_nat.nat);
-			if (delete_nat_port_v6_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_or_nat.nat, session_id) == 0)
+			build_reply_flow_key_from_front_v6(rule, front_value, ctx->proto, close_reply_key);
+			build_nat_peer_key_from_reply_v6(close_reply_key, &reply_or_nat.peer);
+			if (delete_nat_peer_v6_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_or_nat.peer, session_id) == 0)
 				drop_kernel_nat_occupancy();
 
 			build_front_flow_key_v6(skb, ctx, &reply_or_nat.flow);
@@ -5406,8 +6104,9 @@ static __always_inline int handle_fullnat_forward_v6(struct __sk_buff *skb, cons
 					build_front_flow_key_v6(skb, ctx, &reply_or_nat.flow);
 					if (delete_flow_v6_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_or_nat.flow, session_id) == 0)
 						drop_kernel_flow_occupancy();
-					build_nat_port_key_v6(rule->out_ifindex, front_value->nat_addr, front_value->nat_port, ctx->proto, &reply_or_nat.nat);
-					if (delete_nat_port_v6_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_or_nat.nat, session_id) == 0)
+					build_reply_flow_key_from_front_v6(rule, front_value, ctx->proto, close_reply_key);
+					build_nat_peer_key_from_reply_v6(close_reply_key, &reply_or_nat.peer);
+					if (delete_nat_peer_v6_session_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &reply_or_nat.peer, session_id) == 0)
 						drop_kernel_nat_occupancy();
 				}
 				return TC_ACT_SHOT;
@@ -5438,6 +6137,9 @@ static __always_inline int handle_fullnat_forward_v6(struct __sk_buff *skb, cons
 			if (!created_front && (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
 				front_value->last_seen_ns = now;
 				update_front = 1;
+			} else if (!created_front && (now - front_value->last_seen_ns) >= FORWARD_TC_FAST_PATH_WINDOW_NS) {
+				/* Reopens the fast-path window now that the pair was checked. */
+				touch_front = 1;
 			}
 			if (!created_reply && (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS)) {
 				reply_value->last_seen_ns = now;
@@ -5454,6 +6156,11 @@ static __always_inline int handle_fullnat_forward_v6(struct __sk_buff *skb, cons
 			if (store_flow_v6_in_bank(flow_bank, &reply_or_nat.flow, front_value) < 0)
 				return TC_ACT_SHOT;
 		}
+	} else if (touch_front) {
+		touch_flow_v6(front_flow, front_value->session_id, now);
+	} else if (!created_front && !created_reply && !close_complete && flow_within_fast_path_window_v6(front_value, now)) {
+		l2 = fullnat_forward_fast_hop_v6(skb, ctx, rule, front_value,
+			flow_bank == FORWARD_TC_FLOW_BANK_ACTIVE ? front_flow : 0);
 	}
 	if (update_reply) {
 		if (!created_front && !created_reply && reply_flow) {
@@ -5465,8 +6172,9 @@ static __always_inline int handle_fullnat_forward_v6(struct __sk_buff *skb, cons
 		}
 	}
 	if (!created_front && (created_reply || update_front || update_reply)) {
-		build_nat_port_key_v6(rule->out_ifindex, front_value->nat_addr, front_value->nat_port, ctx->proto, &reply_or_nat.nat);
-		ensure_nat_port_owner_v6(flow_bank, &reply_or_nat.nat, rule->rule_id, front_value->session_id);
+		build_reply_flow_key_from_front_v6(rule, front_value, ctx->proto, close_reply_key);
+		build_nat_peer_key_from_reply_v6(close_reply_key, &reply_or_nat.peer);
+		ensure_flow_nat_owner_v6(flow_bank, &reply_or_nat.peer, front_value->flags, rule->rule_id, front_value->session_id);
 	}
 	if (new_session)
 		bump_rule_total_conns(rule->rule_id);
@@ -5479,6 +6187,8 @@ static __always_inline int handle_fullnat_forward_v6(struct __sk_buff *skb, cons
 		return TC_ACT_SHOT;
 	if (rewrite_l4_dnat_v6(skb, ctx, rule->backend_addr, rule->backend_port) < 0)
 		return TC_ACT_SHOT;
+	if (l2)
+		return redirect_tc_l2_v4(skb, l2);
 
 	build_reply_flow_key_from_front_v6(rule, front_value, ctx->proto, close_reply_key);
 	if ((rule->flags & (FORWARD_RULE_FLAG_BRIDGE_L2 | FORWARD_RULE_FLAG_PREPARED_L2)) != 0) {
@@ -5494,7 +6204,7 @@ static __always_inline int handle_fullnat_forward_v6(struct __sk_buff *skb, cons
 	reply_or_nat.flow.src_port = front_value->nat_port;
 	reply_or_nat.flow.dst_port = rule->backend_port;
 	{
-		int action = redirect_ifindex_v6(skb, ctx, (const struct redirect_target_v6 *)&reply_or_nat.flow);
+		int action = redirect_ifindex_v6(skb, ctx, (const struct redirect_target_v6 *)&reply_or_nat.flow, 1);
 
 		if (close_complete && action == TC_ACT_REDIRECT)
 			delete_fullnat_state_v6(flow_bank, close_reply_key, reply_value, ctx->proto);
@@ -5508,9 +6218,11 @@ static __always_inline int handle_fullnat_reply_v6(struct __sk_buff *skb, const 
 	struct flow_value_v6 *reply_value = lookup_scratch_flow_v6();
 	struct flow_value_v6 *front_value = lookup_scratch_flow_aux_v6();
 	struct flow_value_v6 *front_flow;
+	const struct tc_l2_value_v4 *l2 = 0;
 	__u64 now = bpf_ktime_get_ns();
 	int update_front = 0;
 	int update_reply = 0;
+	int touch_reply = 0;
 	int count_tcp_now = 0;
 	int recreated_front = 0;
 	int close_complete = 0;
@@ -5582,6 +6294,9 @@ static __always_inline int handle_fullnat_reply_v6(struct __sk_buff *skb, const 
 			if (reply_value->last_seen_ns == 0 || now < reply_value->last_seen_ns || (now - reply_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
 				reply_value->last_seen_ns = now;
 				update_reply = 1;
+			} else if ((now - reply_value->last_seen_ns) >= FORWARD_TC_FAST_PATH_WINDOW_NS) {
+				/* Reopens the fast-path window now that the pair was checked. */
+				touch_reply = 1;
 			}
 			if (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_TCP_FLOW_REFRESH_NS) {
 				front_value->last_seen_ns = now;
@@ -5607,6 +6322,10 @@ static __always_inline int handle_fullnat_reply_v6(struct __sk_buff *skb, const 
 		} else {
 			write_flow_v6(flow, reply_value);
 		}
+	} else if (touch_reply && !recreated_front) {
+		touch_flow_v6(flow_live ? flow : lookup_flow_v6_in_bank(bank, reply_key), reply_value->session_id, now);
+	} else if (!recreated_front && !close_complete && flow_within_fast_path_window_v6(reply_value, now)) {
+		l2 = fullnat_reply_fast_hop_v6(skb, ctx, reply_value, bank, reply_key);
 	}
 	if (count_tcp_now)
 		bump_rule_tcp_active(reply_value->rule_id);
@@ -5617,6 +6336,8 @@ static __always_inline int handle_fullnat_reply_v6(struct __sk_buff *skb, const 
 		return TC_ACT_SHOT;
 	if (rewrite_l4_dnat_v6(skb, ctx, reply_value->client_addr, reply_value->client_port) < 0)
 		return TC_ACT_SHOT;
+	if (l2)
+		return redirect_tc_l2_v4(skb, l2);
 
 	front_key.ifindex = reply_value->in_ifindex;
 	copy_ipv6_addr(front_key.src_addr, reply_value->front_addr);
@@ -5624,7 +6345,7 @@ static __always_inline int handle_fullnat_reply_v6(struct __sk_buff *skb, const 
 	front_key.src_port = reply_value->front_port;
 	front_key.dst_port = reply_value->client_port;
 	{
-		int action = redirect_ifindex_v6(skb, ctx, (const struct redirect_target_v6 *)&front_key);
+		int action = redirect_ifindex_v6(skb, ctx, (const struct redirect_target_v6 *)&front_key, 1);
 
 		if (close_complete && action == TC_ACT_REDIRECT)
 			delete_fullnat_state_v6(bank, reply_key, reply_value, ctx->proto);
@@ -5871,6 +6592,8 @@ static __always_inline int dispatch_forward_ingress_v4_core_prepared(struct __sk
 	if (is_passthrough_rule(rule))
 		return finish_forward_pipeline_v4(skb, TC_ACT_OK);
 	if (is_egress_nat_rule(rule)) {
+		int full_cone = is_full_cone_egress_nat_rule(rule);
+
 		if (egress_nat_dst_mac_mismatch(skb, rule))
 			return finish_forward_pipeline_v4(skb, TC_ACT_OK);
 		/* An exit that is down holds back what would leave by it, not
@@ -5887,38 +6610,31 @@ static __always_inline int dispatch_forward_ingress_v4_core_prepared(struct __sk
 		 * Each NAT type dereferences its flow only inside its own branch:
 		 * verifiers before 6.10 lose a pointer's null state when the compiler
 		 * ORs that check into the NAT-type test. The fast path reads the
-		 * checked copy in flow_value (see copy_flow_v4).
+		 * checked copy in flow_value (see copy_flow_v4). Both NAT types share
+		 * one fast-path call: each inlined copy of it grows every program
+		 * that holds this core.
 		 */
 		__builtin_memset(&dispatch->flow_key, 0, sizeof(dispatch->flow_key));
 		dispatch->flow_bank = FORWARD_TC_FLOW_BANK_ACTIVE;
-		if (is_full_cone_egress_nat_rule(rule)) {
+		if (full_cone)
 			build_full_cone_front_flow_key(skb, &dispatch->ctx, &dispatch->flow_key);
-			front_flow = lookup_flow_v4_copy_active_or_old(&dispatch->flow_key, &dispatch->flow_bank, &dispatch->flow_value);
-			if (front_flow && is_egress_nat_flow(&dispatch->flow_value) && is_full_cone_front_flow(&dispatch->flow_value)) {
-				int fast = try_egress_nat_forward_fast(skb, &dispatch->ctx, rule, &dispatch->flow_value,
-					dispatch->flow_bank == FORWARD_TC_FLOW_BANK_ACTIVE ? front_flow : 0,
-					bpf_ktime_get_ns(), load_kernel_nat_config_flags());
-
-				if (fast != FORWARD_TC_SLOW_PATH)
-					return finish_forward_pipeline_v4(skb, fast);
-			}
-		} else {
+		else
 			build_front_flow_key(skb, &dispatch->ctx, &dispatch->flow_key);
-			front_flow = lookup_flow_v4_copy_active_or_old(&dispatch->flow_key, &dispatch->flow_bank, &dispatch->flow_value);
-			if (front_flow) {
-				if (!is_egress_nat_flow(&dispatch->flow_value))
-					return finish_forward_pipeline_v4(skb, TC_ACT_OK);
-				if (is_fullnat_front_flow(&dispatch->flow_value)) {
-					int fast = try_egress_nat_forward_fast(skb, &dispatch->ctx, rule, &dispatch->flow_value,
-						dispatch->flow_bank == FORWARD_TC_FLOW_BANK_ACTIVE ? front_flow : 0,
-						bpf_ktime_get_ns(), load_kernel_nat_config_flags());
+		front_flow = lookup_flow_v4_copy_active_or_old(&dispatch->flow_key, &dispatch->flow_bank, &dispatch->flow_value);
+		if (front_flow && !full_cone && !is_egress_nat_flow(&dispatch->flow_value))
+			return finish_forward_pipeline_v4(skb, TC_ACT_OK);
+		if (front_flow && is_egress_nat_flow(&dispatch->flow_value) &&
+			(full_cone ? is_full_cone_front_flow(&dispatch->flow_value) : is_fullnat_front_flow(&dispatch->flow_value))) {
+			int fast = try_egress_nat_forward_fast(skb, &dispatch->ctx, rule, &dispatch->flow_value,
+				dispatch->flow_bank == FORWARD_TC_FLOW_BANK_ACTIVE ? front_flow : 0,
+				bpf_ktime_get_ns(), load_kernel_nat_config_flags());
 
-					if (fast != FORWARD_TC_SLOW_PATH)
-						return finish_forward_pipeline_v4(skb, fast);
-					if (egress_nat_dst_is_local_v4(dispatch->ctx.dst_addr))
-						return finish_forward_pipeline_v4(skb, TC_ACT_OK);
-					return finish_forward_pipeline_v4(skb, handle_egress_nat_forward_existing(skb, &dispatch->ctx, &dispatch->rule_value, front_flow, dispatch->flow_bank, 0));
-				}
+			if (fast != FORWARD_TC_SLOW_PATH)
+				return finish_forward_pipeline_v4(skb, fast);
+			if (!full_cone) {
+				if (egress_nat_dst_is_local_v4(dispatch->ctx.dst_addr))
+					return finish_forward_pipeline_v4(skb, TC_ACT_OK);
+				return finish_forward_pipeline_v4(skb, handle_egress_nat_forward_existing(skb, &dispatch->ctx, &dispatch->rule_value, front_flow, dispatch->flow_bank, 0));
 			}
 		}
 		if (egress_nat_dst_is_local_v4(dispatch->ctx.dst_addr))
@@ -5960,9 +6676,10 @@ static __always_inline int dispatch_forward_ingress_v4_core_prepared(struct __sk
 
 /*
  * The flow cache's read side, ahead of the dispatcher's own work: a packet
- * of an established egress NAT flow whose active-bank entry holds a current
- * fast-path record (remember_flow_fast_v4) is sent the way the record says,
- * straight from the flow lookup and before the rule lookup. Any packet the
+ * of an established NAT flow, or a transparent flow's reply, whose
+ * active-bank entry holds a current fast-path record (remember_flow_fast_v4)
+ * is sent the way the record says, straight from the flow lookup and before
+ * the rule lookup. Any packet the
  * record does not describe exactly goes on to the dispatcher, which looks
  * the flow up again, now warm, and may record it. Packets that change TCP
  * state, ICMP, fragments and tagged frames never qualify.
@@ -6062,8 +6779,11 @@ static __always_inline int try_front_flow_fast_v4(struct __sk_buff *skb)
 	const struct flow_value_v4 *flow;
 	__u32 nat_addr;
 	__u16 nat_port;
+	__u32 backend_addr;
+	__u16 backend_port;
 	__u32 rule_id;
 	int counted;
+	int port_forward;
 	__u32 hints;
 	int full_cone = 0;
 
@@ -6086,7 +6806,7 @@ static __always_inline int try_front_flow_fast_v4(struct __sk_buff *skb)
 	}
 	if (!flow || !flow_fast_read_begin_v4(flow, &key, state, &read))
 		return FORWARD_TC_SLOW_PATH;
-	if (!is_egress_nat_flow(flow) || !is_fullnat_front_flow(flow) || is_full_cone_flow(flow) != full_cone)
+	if (!is_fullnat_front_flow(flow) || is_full_cone_flow(flow) != full_cone)
 		return FORWARD_TC_SLOW_PATH;
 	if (!flow_within_fast_path_window(flow, bpf_ktime_get_ns()))
 		return FORWARD_TC_SLOW_PATH;
@@ -6097,6 +6817,10 @@ static __always_inline int try_front_flow_fast_v4(struct __sk_buff *skb)
 		return FORWARD_TC_SLOW_PATH;
 	nat_addr = flow->nat_addr;
 	nat_port = flow->nat_port;
+	/* A port forward's packet also goes to the backend its record names. */
+	port_forward = !is_egress_nat_flow(flow);
+	backend_addr = flow->fast.dst_addr;
+	backend_port = flow->fast.dst_port;
 	/* A packet sent from the record counts into its rule as the core's would. */
 	counted = FORWARD_FLOW_TRAFFIC_ENABLED(flow);
 	rule_id = flow->rule_id;
@@ -6106,6 +6830,8 @@ static __always_inline int try_front_flow_fast_v4(struct __sk_buff *skb)
 	if (counted)
 		add_rule_traffic_bytes(rule_id, FORWARD_GET_PAYLOAD_LEN(&ctx), 0);
 	if (rewrite_l4_snat(skb, &ctx, nat_addr, nat_port) < 0)
+		return TC_ACT_SHOT;
+	if (port_forward && rewrite_l4_dnat(skb, &ctx, backend_addr, backend_port) < 0)
 		return TC_ACT_SHOT;
 	return send_flow_fast_v4(skb, &hop);
 }
@@ -6124,6 +6850,7 @@ static __always_inline int try_reply_flow_fast_v4(struct __sk_buff *skb)
 	__u32 rule_id;
 	int counted;
 	int full_cone;
+	int transparent;
 
 	if (!state || !flow_fast_packet_v4(skb, &ctx))
 		return FORWARD_TC_SLOW_PATH;
@@ -6136,7 +6863,9 @@ static __always_inline int try_reply_flow_fast_v4(struct __sk_buff *skb)
 	flow = lookup_reply_flow_v4_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, &key);
 	if (!flow || !flow_fast_read_begin_v4(flow, &key, state, &read))
 		return FORWARD_TC_SLOW_PATH;
-	if (!is_egress_nat_flow(flow) || !is_fullnat_reply_flow(flow))
+	/* A transparent flow's reply only gets its front address back. */
+	transparent = (flow->flags & FORWARD_FLOW_FLAG_FULL_NAT) == 0;
+	if (!transparent && !is_fullnat_reply_flow(flow))
 		return FORWARD_TC_SLOW_PATH;
 	if (!flow_within_fast_path_window(flow, bpf_ktime_get_ns()))
 		return FORWARD_TC_SLOW_PATH;
@@ -6159,7 +6888,156 @@ static __always_inline int try_reply_flow_fast_v4(struct __sk_buff *skb)
 		add_rule_traffic_bytes(rule_id, 0, FORWARD_GET_PAYLOAD_LEN(&ctx));
 	if (!full_cone && rewrite_l4_snat(skb, &ctx, front_addr, front_port) < 0)
 		return TC_ACT_SHOT;
-	if (rewrite_l4_dnat(skb, &ctx, client_addr, client_port) < 0)
+	if (!transparent && rewrite_l4_dnat(skb, &ctx, client_addr, client_port) < 0)
+		return TC_ACT_SHOT;
+	return send_flow_fast_v4(skb, &hop);
+}
+
+/* The IPv6 read side; see flow_fast_packet_v4. */
+static __always_inline int flow_fast_packet_v6(struct __sk_buff *skb, struct packet_ctx_v6 *ctx)
+{
+	/* parse_ipv6_l4 takes only TCP and UDP without extension headers. */
+	if (parse_ipv6_l4(skb, ctx) < 0)
+		return 0;
+	return ctx->l3_off == (int)sizeof(struct ethhdr) && !tcp_packet_changes_state_v6(ctx);
+}
+
+static __always_inline int flow_fast_read_begin_v6(const struct flow_value_v6 *live, const struct flow_key_v6 *key, const struct tc_flow_cache_state_v4 *state, struct flow_fast_read_v4 *read)
+{
+	read->session_id = flow_v6_session(live);
+	read->stamp = *(const volatile __u32 *)&live->fast.stamp;
+	FORWARD_COMPILER_BARRIER();
+	return read->stamp == flow_fast_stamp_v4(live->last_seen_ns, state->generation) &&
+		flow_v6_names_key(live, key);
+}
+
+static __always_inline int flow_fast_read_end_v6(const struct flow_value_v6 *live, const struct flow_fast_read_v4 *read)
+{
+	FORWARD_COMPILER_BARRIER();
+	return flow_v6_session(live) == read->session_id &&
+		*(const volatile __u32 *)&live->fast.stamp == read->stamp;
+}
+
+static __always_inline int flow_fast_matches_v6(struct __sk_buff *skb, const struct packet_ctx_v6 *ctx, const struct flow_fast_v6 *fast)
+{
+	const struct ethhdr *eth;
+
+	if (fast->in_ifindex != skb->ifindex)
+		return 0;
+	eth = tc_packet_ptr(skb, 0, sizeof(*eth));
+	if (!eth || !mac_equal(eth->h_dest, fast->in_dmac))
+		return 0;
+	return tc_wire_len_v6(skb, ctx) <= fast->max_len;
+}
+
+static __always_inline void read_flow_fast_hop_v6(const struct flow_fast_v6 *fast, struct flow_fast_hop_v4 *hop)
+{
+	hop->out_ifindex = fast->out_ifindex;
+	__builtin_memcpy(hop->dmac, fast->dmac, ETH_ALEN);
+	__builtin_memcpy(hop->smac, fast->smac, ETH_ALEN);
+}
+
+/*
+ * An IPv6 port forward's packet, translated to the backend its record names.
+ * The IPv6 programs run near the 512-byte stack limit, so the packet, the
+ * key and then the addresses the packet is translated to live in the
+ * per-CPU scratch maps the full path parses into after this returns.
+ */
+static __always_inline int try_front_flow_fast_v6(struct __sk_buff *skb)
+{
+	const struct tc_flow_cache_state_v4 *state = flow_fast_enabled_v4();
+	struct packet_ctx_v6 *ctx = lookup_scratch_ctx_v6();
+	struct flow_key_v6 *key = lookup_scratch_flow_key_v6();
+	struct flow_fast_read_v4 read;
+	struct flow_fast_hop_v4 hop;
+	const struct flow_value_v6 *flow;
+	__u32 rule_id;
+	int counted;
+
+	if (!state || !ctx || !key)
+		return FORWARD_TC_SLOW_PATH;
+	__builtin_memset(ctx, 0, sizeof(*ctx));
+	__builtin_memset(key, 0, sizeof(*key));
+	if (!flow_fast_packet_v6(skb, ctx))
+		return FORWARD_TC_SLOW_PATH;
+	build_front_flow_key_v6(skb, ctx, key);
+	flow = bpf_map_lookup_elem(&flows_v6, key);
+	if (!flow || !flow_fast_read_begin_v6(flow, key, state, &read))
+		return FORWARD_TC_SLOW_PATH;
+	if (!is_fullnat_front_flow_v6(flow) || (flow->flags & (FORWARD_FLOW_FLAG_EGRESS_NAT | FORWARD_FLOW_FLAG_FULL_CONE)) != 0)
+		return FORWARD_TC_SLOW_PATH;
+	if (!flow_within_fast_path_window_v6(flow, bpf_ktime_get_ns()))
+		return FORWARD_TC_SLOW_PATH;
+	if (!flow_fast_matches_v6(skb, ctx, &flow->fast))
+		return FORWARD_TC_SLOW_PATH;
+	/* The key has done its work: it now holds the new source and destination. */
+	copy_ipv6_addr(key->src_addr, flow->nat_addr);
+	key->src_port = flow->nat_port;
+	copy_ipv6_addr(key->dst_addr, flow->fast.dst_addr);
+	key->dst_port = flow->fast.dst_port;
+	counted = FORWARD_FLOW_TRAFFIC_ENABLED(flow);
+	rule_id = flow->rule_id;
+	read_flow_fast_hop_v6(&flow->fast, &hop);
+	if (!flow_fast_read_end_v6(flow, &read))
+		return FORWARD_TC_SLOW_PATH;
+	if (counted)
+		add_rule_traffic_bytes(rule_id, FORWARD_GET_PAYLOAD_LEN(ctx), 0);
+	if (rewrite_l4_snat_v6(skb, ctx, key->src_addr, key->src_port) < 0)
+		return TC_ACT_SHOT;
+	if (rewrite_l4_dnat_v6(skb, ctx, key->dst_addr, key->dst_port) < 0)
+		return TC_ACT_SHOT;
+	return send_flow_fast_v4(skb, &hop);
+}
+
+/* The reply direction of try_front_flow_fast_v6. */
+static __always_inline int try_reply_flow_fast_v6(struct __sk_buff *skb)
+{
+	const struct tc_flow_cache_state_v4 *state = flow_fast_enabled_v4();
+	struct packet_ctx_v6 *ctx = lookup_scratch_ctx_v6();
+	struct flow_key_v6 *key = lookup_scratch_flow_key_v6();
+	struct flow_fast_read_v4 read;
+	struct flow_fast_hop_v4 hop;
+	const struct flow_value_v6 *flow;
+	__u32 rule_id;
+	int counted;
+
+	if (!state || !ctx || !key)
+		return FORWARD_TC_SLOW_PATH;
+	__builtin_memset(ctx, 0, sizeof(*ctx));
+	__builtin_memset(key, 0, sizeof(*key));
+	if (!flow_fast_packet_v6(skb, ctx))
+		return FORWARD_TC_SLOW_PATH;
+	key->ifindex = skb->ifindex;
+	copy_ipv6_addr(key->src_addr, ctx->src_addr);
+	copy_ipv6_addr(key->dst_addr, ctx->dst_addr);
+	key->src_port = ctx->src_port;
+	key->dst_port = ctx->dst_port;
+	key->proto = ctx->proto;
+	flow = lookup_reply_flow_v6_in_bank(FORWARD_TC_FLOW_BANK_ACTIVE, key);
+	if (!flow || !flow_fast_read_begin_v6(flow, key, state, &read))
+		return FORWARD_TC_SLOW_PATH;
+	if (!is_fullnat_reply_flow_v6(flow) || (flow->flags & FORWARD_FLOW_FLAG_FULL_CONE) != 0)
+		return FORWARD_TC_SLOW_PATH;
+	if (!flow_within_fast_path_window_v6(flow, bpf_ktime_get_ns()))
+		return FORWARD_TC_SLOW_PATH;
+	if (ctx->proto == IPPROTO_TCP && (flow->flags & FORWARD_FLOW_FLAG_REPLY_SEEN) == 0)
+		return FORWARD_TC_SLOW_PATH;
+	if (!flow_fast_matches_v6(skb, ctx, &flow->fast))
+		return FORWARD_TC_SLOW_PATH;
+	copy_ipv6_addr(key->src_addr, flow->front_addr);
+	key->src_port = flow->front_port;
+	copy_ipv6_addr(key->dst_addr, flow->client_addr);
+	key->dst_port = flow->client_port;
+	counted = FORWARD_FLOW_TRAFFIC_ENABLED(flow);
+	rule_id = flow->rule_id;
+	read_flow_fast_hop_v6(&flow->fast, &hop);
+	if (!flow_fast_read_end_v6(flow, &read))
+		return FORWARD_TC_SLOW_PATH;
+	if (counted)
+		add_rule_traffic_bytes(rule_id, 0, FORWARD_GET_PAYLOAD_LEN(ctx));
+	if (rewrite_l4_snat_v6(skb, ctx, key->src_addr, key->src_port) < 0)
+		return TC_ACT_SHOT;
+	if (rewrite_l4_dnat_v6(skb, ctx, key->dst_addr, key->dst_port) < 0)
 		return TC_ACT_SHOT;
 	return send_flow_fast_v4(skb, &hop);
 }
@@ -6668,6 +7546,9 @@ static __always_inline int dispatch_forward_pipeline_v6(struct __sk_buff *skb, _
 	} else {
 		if (dispatch && dispatch->plugin_core_enable == 0)
 			return TC_ACT_UNSPEC;
+		action = try_front_flow_fast_v6(skb);
+		if (action != FORWARD_TC_SLOW_PATH)
+			return action;
 		action = prepare_forward_ingress_v6(skb);
 	}
 	if (action != FORWARD_TC_RUN_CORE_V6)
@@ -6813,6 +7694,12 @@ static __always_inline int dispatch_reply_pipeline_v6(struct __sk_buff *skb, __u
 	}
 	if (dispatch && dispatch->plugin_core_enable == 0)
 		return TC_ACT_UNSPEC;
+	{
+		int fast = try_reply_flow_fast_v6(skb);
+
+		if (fast != FORWARD_TC_SLOW_PATH)
+			return fast;
+	}
 	return dispatch_reply_ingress_v6(skb);
 }
 
@@ -6947,6 +7834,8 @@ static __always_inline int handle_forward_ingress_v4_egress_nat_new(struct __sk_
 	if (egress_nat_dst_is_local_v4(dispatch->ctx.dst_addr))
 		return TC_ACT_OK;
 	if (egress_nat_dst_mac_mismatch(skb, &dispatch->rule_value))
+		return TC_ACT_OK;
+	if (egress_nat_reply_to_host_socket_v4(skb, &dispatch->ctx))
 		return TC_ACT_OK;
 	if (is_full_cone_egress_nat_rule(&dispatch->rule_value)) {
 		build_full_cone_front_flow_key(skb, &dispatch->ctx, &front_key);
@@ -7187,7 +8076,10 @@ int forward_ingress_v6(struct __sk_buff *skb)
 {
 	struct packet_ctx_v6 *ctx_v6;
 	struct rule_value_v6 *rule_v6;
+	int fast = try_front_flow_fast_v6(skb);
 
+	if (fast != FORWARD_TC_SLOW_PATH)
+		return fast;
 	ctx_v6 = lookup_scratch_ctx_v6();
 	if (!ctx_v6)
 		return TC_ACT_UNSPEC;
@@ -7204,9 +8096,17 @@ int forward_ingress_v6(struct __sk_buff *skb)
 	return handle_fullnat_forward_v6(skb, ctx_v6, rule_v6);
 }
 
+/*
+ * Attached when every IPv4 rule is transparent, so its replies are the only
+ * flows here the flow cache records.
+ */
 SEC("classifier/reply_ingress")
 int reply_ingress(struct __sk_buff *skb)
 {
+	int fast = try_reply_flow_fast_v4(skb);
+
+	if (fast != FORWARD_TC_SLOW_PATH)
+		return fast;
 	return handle_reply_ingress_v4(skb);
 }
 
@@ -7235,7 +8135,10 @@ int reply_ingress_v6(struct __sk_buff *skb)
 	struct flow_key_v6 *flow_key_v6;
 	struct flow_value_v6 *flow_v6;
 	__u8 flow_bank_v6 = FORWARD_TC_FLOW_BANK_ACTIVE;
+	int fast = try_reply_flow_fast_v6(skb);
 
+	if (fast != FORWARD_TC_SLOW_PATH)
+		return fast;
 	ctx_v6 = lookup_scratch_ctx_v6();
 	flow_key_v6 = lookup_scratch_flow_key_v6();
 	if (!ctx_v6 || !flow_key_v6)

@@ -291,6 +291,23 @@ func (rt *gojaPluginControlRuntime) reconcilePluginRingSubscriptions(plugins map
 	}
 }
 
+// ReconcilePluginRingSubscriptionsAfterDataplane points ring readers at the
+// objects a dataplane reconcile just attached. A plugin_reconcile resource
+// written from a control handler (hook bindings, say) reconciles only the
+// dataplane: without this, a ring subscription of an object that attached
+// there never started, and one whose object was reloaded kept reading the
+// old ring. Handlers do not hold rt.mu while they run, so this is safe to
+// call from inside one.
+func (rt *gojaPluginControlRuntime) ReconcilePluginRingSubscriptionsAfterDataplane(snapshot pluginRuntimeSnapshot) {
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	plugins := cloneLoadedPluginMap(rt.plugins)
+	rt.mu.Unlock()
+	rt.reconcilePluginRingSubscriptions(plugins, snapshot)
+}
+
 func (rt *gojaPluginControlRuntime) runPluginRingReader(controller pluginEBPFRingReadController, sub *pluginRingSubscriptionRuntime) {
 	defer close(sub.readerDone)
 	retry := pluginRingReadRetryMin

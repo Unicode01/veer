@@ -268,7 +268,7 @@ run_privileged() {
 	go test -c -o "$privileged_binary" ./internal/app
 
 	privileged_log="$TMP_DIR/privileged.log"
-	privileged_pattern='^(TestPluginHostSeccompFilterRejectsForeignABIAndBlockedSyscalls|TestPluginHostLinuxSandboxIdentityAndCgroup|TestPluginHostLinuxSandboxSupportsConcurrentHosts|TestPluginHostLinuxSandboxEnforcementProbe|TestPluginHostLinuxChrootFallbackEnforcementProbe|TestPluginHostIsolationContainsMemoryExhaustion|TestPluginHostIsolationLoadsRelativeControlModulesInMainAndWorker|TestPluginHostIsolationBrokersTypedServiceDiscoveryAndCall|TestCleanupOrphanPluginHostCgroups|TestCleanupOrphanPluginHostFilesystemRoots|TestLinuxPluginScopedNamespaceNetworkAPIs|TestEgressNATTCActiveTCPRefreshesBothFlowEntries|TestEgressNATTCNextHopCacheFollowsNeighbourChange|TestEgressNATTCFullConeSYNRetryKeepsNATPort|TestPlugin(NetPolicyProviderLinuxIntegration|NetPolicyTransactionsLinuxIntegration|MultipathRouteLinuxIntegration|NamespaceTunTapLinuxIntegration|NamespaceTunTapCrashRecoveryLinuxIntegration|NetTransactionCrashRecoveryLinuxIntegration|WANCoreLinuxIntegration|VToLocalLinuxIntegration|LANCoreLinuxIntegration|ActionApplyPersistsAndRepairsLinuxIntegration|LANCoreResolvesWANCoreStatusLinuxIntegration|ControlNetEnsureVethRejectsMismatchedExistingPeersLinuxIntegration|ControlNetOwnedLinkMACLinuxIntegration|ControlNetEnsureMacvlanLinuxIntegration|ControlNetSetGSOLinuxIntegration|ControlNetAddrReplaceIdempotentLinuxIntegration|DataplaneRuntimeAttachesTCObservePlugin|IPv6AssignmentPlanLinuxIntegration|LANCoreGeneratedEgressNATTCIntegration|LANCoreResolvesWANCoreEgressNATTCIntegration)|TestKernelPluginPipelineRuntime.*|TestKernelXDPPluginPipelineChainHotUpdateAndConflict|TestKernelXDPPluginPipelineRecoversOrphanAfterSIGKILL|TestKernelXDPPluginPipelineHotRestartHandsOffInPlace|TestPinKernelHotRestartTailCallsKeepsChainAfterLastFD|TestSyncKernelPluginConfigsWriteBankBeforeHeader|TestKernelNetfilterPlugin(PipelineIntegration|PriorityIntegration|NamespaceRecreateIntegration|InitialMissingNamespaceRecoversIntegration)|TestOrderedKernelRuntimeChainsXDPIntoTCPlugin)$'
+	privileged_pattern='^(TestPluginHostSeccompFilterRejectsForeignABIAndBlockedSyscalls|TestPluginHostLinuxSandboxIdentityAndCgroup|TestPluginHostLinuxSandboxSupportsConcurrentHosts|TestPluginHostLinuxSandboxEnforcementProbe|TestPluginHostLinuxChrootFallbackEnforcementProbe|TestPluginHostIsolationContainsMemoryExhaustion|TestPluginHostIsolationLoadsRelativeControlModulesInMainAndWorker|TestPluginHostIsolationBrokersTypedServiceDiscoveryAndCall|TestCleanupOrphanPluginHostCgroups|TestCleanupOrphanPluginHostFilesystemRoots|TestLinuxPluginScopedNamespaceNetworkAPIs|TestEgressNATTCActiveTCPRefreshesBothFlowEntries|TestEgressNATTCNextHopCacheFollowsNeighbourChange|TestEgressNATTCFullConeSYNRetryKeepsNATPort|TestPlugin(NetPolicyProviderLinuxIntegration|NetPolicyTransactionsLinuxIntegration|MultipathRouteLinuxIntegration|NamespaceTunTapLinuxIntegration|NamespaceTunTapCrashRecoveryLinuxIntegration|NetTransactionCrashRecoveryLinuxIntegration|WANCoreLinuxIntegration|VToLocalLinuxIntegration|LANCoreLinuxIntegration|ActionApplyPersistsAndRepairsLinuxIntegration|LANCoreResolvesWANCoreStatusLinuxIntegration|ControlNetEnsureVethRejectsMismatchedExistingPeersLinuxIntegration|ControlNetOwnedLinkMACLinuxIntegration|ControlNetEnsureMacvlanLinuxIntegration|ControlNetSetGSOLinuxIntegration|ControlNetAddrReplaceIdempotentLinuxIntegration|DataplaneRuntimeAttachesTCObservePlugin|IPv6AssignmentPlanLinuxIntegration|LANCoreGeneratedEgressNATTCIntegration|LANCoreResolvesWANCoreEgressNATTCIntegration)|TestKernelPluginPipelineRuntime.*|TestKernelXDPPluginPipelineChainHotUpdateAndConflict|TestKernelXDPPluginPipelineRecoversOrphanAfterSIGKILL|TestKernelXDPPluginPipelineHotRestartHandsOffInPlace|TestKernelXDPPluginTCFallbackRunsAheadOfCore|TestKernelXDPPluginTCFallbackHotRestartHandsOffInPlace|TestPinKernelHotRestartTailCallsKeepsChainAfterLastFD|TestPluginMapHandoffKeepsPreservedMaps|TestPluginMapHandoffSkipsMapsThatDoNotMatchTheirRecord|TestPluginMapHandoffNeedsHotRestart|TestSyncKernelPluginConfigsWriteBankBeforeHeader|TestKernelNetfilterPlugin(PipelineIntegration|PriorityIntegration|NamespaceRecreateIntegration|InitialMissingNamespaceRecoversIntegration)|TestOrderedKernelRuntimeChainsXDPIntoTCPlugin)$'
 	env_command=$(command -v env)
 	set -- \
 		"$env_command" \
@@ -323,6 +323,9 @@ run_privileged() {
 		TestPluginLANCoreResolvesWANCoreEgressNATTCIntegration \
 		TestKernelPluginPipelineRuntimeChainsPreForwardPlugin \
 		TestKernelPluginPipelineRuntimePreservesDeclaredMapAcrossObjectUpgrade \
+		TestPluginMapHandoffKeepsPreservedMaps \
+		TestPluginMapHandoffSkipsMapsThatDoNotMatchTheirRecord \
+		TestPluginMapHandoffNeedsHotRestart \
 		TestKernelPluginPipelineRuntimeMigratesStateMapAndRollsBackToPreservedSource \
 		TestKernelPluginPipelineRuntimeIPv6PostApplyForwardsTraffic \
 		TestKernelPluginPipelineRuntimeNoRulePreCorePluginCanDropTraffic \
@@ -332,6 +335,8 @@ run_privileged() {
 		TestKernelXDPPluginPipelineChainHotUpdateAndConflict \
 		TestKernelXDPPluginPipelineRecoversOrphanAfterSIGKILL \
 		TestKernelXDPPluginPipelineHotRestartHandsOffInPlace \
+		TestKernelXDPPluginTCFallbackRunsAheadOfCore \
+		TestKernelXDPPluginTCFallbackHotRestartHandsOffInPlace \
 		TestPinKernelHotRestartTailCallsKeepsChainAfterLastFD \
 		TestSyncKernelPluginConfigsWriteBankBeforeHeader \
 		TestKernelNetfilterPluginPipelineIntegration \
@@ -368,6 +373,21 @@ run_privileged() {
 	VEER_PPPOE_BLACKBOX_TEST_TIMER_FENCE=1 \
 		sh "$ROOT_DIR/plugins/pppoe_client/test-blackbox-linux.sh"
 
+	# The firewall next to Veer forwards, the XDP engine, plugin disable and a
+	# broken object, and alongside pppoe_client and vpn_core.
+	for command_name in wg ethtool unshare pppoe-server pppd; do
+		require_command "$command_name"
+	done
+	firewall_log="$TMP_DIR/firewall-system.log"
+	firewall_tests='TestFirewallSystemPortForwardAllowlist TestFirewallSystemFlowCacheUnaffected TestFirewallSystemXDPEnginePinning TestFirewallSystemDisableDetaches TestFirewallSystemBrokenObjectFailsOpen TestFirewallCoexistVPNCore TestFirewallCoexistPPPoE'
+	firewall_pattern=$(printf '%s' "$firewall_tests" | tr ' ' '|')
+	run_no_skips "firewall plugin system and coexistence" "$firewall_log" \
+		env FORWARD_RUN_PLUGIN_INTEGRATION_TEST=1 FORWARD_PERF_BINARY="$pppoe_blackbox_binary" \
+		"$privileged_binary" -test.v -test.run "^($firewall_pattern)$" -test.count=1 -test.timeout=10m
+	for required_test in $firewall_tests; do
+		require_test_pass "$firewall_log" "$required_test"
+	done
+
 	log "PPPoE Linux blackbox: automatic redial"
 	VEER_BINARY="$pppoe_blackbox_binary" \
 	VEER_PPPOE_BLACKBOX_RUN_IPERF=0 \
@@ -393,7 +413,7 @@ run_flow_churn() {
 	fi
 
 	flow_churn_log="$TMP_DIR/flow-churn.log"
-	flow_churn_pattern='^(TestCollectPreparedKernelRuleFlowPurgeTargets.*|TestKernelFlowPurgeRetryState.*|TestKernelFlowPrunePreservesRefreshAfterScanStart|TestKernelFlowMatchesPurgeTargetsScopesInterfaceAndRevision|TestKernelFlowMatchesInterfaceScopedPurgeTargetRejectsCoveredAndInvalidTargets|TestKernelFlowPurgeSessionIdentityRequiresFullNATAndNonzeroSession|TestPurgeKernelFlowsForTargetsScopesTransparentBridgeMemberWithoutDeletingParent|TestPurgeKernelFlowsForTargetsScopesInterfaceAcrossTCBanksAndFamilies|TestPurgeKernelFlowsForTargetsHandlesMixedScopedAndFullRevisionTargets|TestPurgeKernelFlowsForTargetsDoesNotPairZeroSessionFullNATEntries|TestTCRuleMutationMapIDFromFDInfo|TestTCKernelRuleMutationEstablishedTCPConnection|TestTCKernelRuleMutationBridgeMemberChurnKeepsEstablishedTCPConnection)$'
+	flow_churn_pattern='^(TestCollectPreparedKernelRuleFlowPurgeTargets.*|TestKernelFlowPurgeRetryState.*|TestKernelFlowPrunePreservesRefreshAfterScanStart|TestKernelFlowMatchesPurgeTargetsScopesInterfaceAndRevision|TestKernelFlowMatchesInterfaceScopedPurgeTargetRejectsCoveredAndInvalidTargets|TestKernelFlowPurgeSessionIdentityRequiresFullNATAndNonzeroSession|TestPurgeKernelFlowsForTargetsScopesTransparentBridgeMemberWithoutDeletingParent|TestPurgeKernelFlowsForTargetsScopesInterfaceAcrossTCBanksAndFamilies|TestPurgeKernelFlowsForTargetsHandlesMixedScopedAndFullRevisionTargets|TestPurgeKernelFlowsForTargetsDoesNotPairZeroSessionFullNATEntries|TestTCRuleMutationMapIDFromFDInfo|TestTCKernelRuleMutationEstablishedTCPConnection|TestTCKernelRuleMutationBridgeMemberChurnKeepsEstablishedTCPConnection|TestPortForwardTCFlowCacheServesEstablishedTCP)$'
 	run_no_skips "kernel flow purge and bridge churn integration" "$flow_churn_log" \
 		env \
 		FORWARD_RUN_TC_RULE_MUTATION_TEST=1 \
@@ -408,7 +428,9 @@ run_flow_churn() {
 		TestPurgeKernelFlowsForTargetsDoesNotPairZeroSessionFullNATEntries \
 		TestTCKernelRuleMutationEstablishedTCPConnection/backend_port_update_breaks_connection \
 		TestTCKernelRuleMutationEstablishedTCPConnection/delete_rule_breaks_connection \
-		TestTCKernelRuleMutationBridgeMemberChurnKeepsEstablishedTCPConnection
+		TestTCKernelRuleMutationBridgeMemberChurnKeepsEstablishedTCPConnection \
+		TestPortForwardTCFlowCacheServesEstablishedTCP/fullnat \
+		TestPortForwardTCFlowCacheServesEstablishedTCP/transparent
 	do
 		require_test_pass "$flow_churn_log" "$required_test"
 	done
@@ -428,7 +450,7 @@ run_core_dataplane() {
 		go test -c -o "$core_binary" ./internal/app
 	fi
 	plugin_log="$TMP_DIR/bundled-dataplane.log"
-	plugin_tests='TestPluginDirectTCIncrementalReconcile TestPluginDirectTCCleanupRetainsFailures TestPluginXDPDetachOwnershipLinuxIntegration TestPluginMapTransactionLinuxRejectsLRUBeforeMutation TestBundledPPPoEMSSClampLinux TestPluginControlNetEnsureVethRejectsMismatchedExistingPeersLinuxIntegration TestPluginControlNetOwnedLinkMACLinuxIntegration TestPluginWANCoreLinuxIntegration TestPluginNetPolicyTransactionsLinuxIntegration TestPluginNetRecoveryInterfaceFaultsLinuxIntegration TestPluginNetTransactionCrashRecoveryLinuxIntegration TestPluginControlNetAddrReplaceIdempotentLinuxIntegration'
+	plugin_tests='TestPluginDirectTCIncrementalReconcile TestPluginDirectTCCleanupRetainsFailures TestPluginXDPDetachOwnershipLinuxIntegration TestPluginMapTransactionLinuxRejectsLRUBeforeMutation TestBundledPPPoEMSSClampLinux TestPluginControlNetEnsureVethRejectsMismatchedExistingPeersLinuxIntegration TestPluginControlNetOwnedLinkMACLinuxIntegration TestPluginWANCoreLinuxIntegration TestPluginNetPolicyTransactionsLinuxIntegration TestPluginNetRecoveryInterfaceFaultsLinuxIntegration TestPluginNetTransactionCrashRecoveryLinuxIntegration TestPluginControlNetAddrReplaceIdempotentLinuxIntegration TestFirewallMapKeysMatchCompiler TestFirewallProgramVerdicts TestFirewallProgramWithoutConfigPasses TestFirewallProgramSynLimit TestFirewallPluginLinuxIntegration'
 	plugin_pattern=$(printf '%s' "$plugin_tests" | tr ' ' '|')
 	run_no_skips "bundled plugin recovery, direct TC updates and PPPoE MSS handling" "$plugin_log" \
 		env FORWARD_RUN_PLUGIN_DATAPLANE_TEST=1 FORWARD_RUN_PLUGIN_INTEGRATION_TEST=1 \
@@ -436,7 +458,7 @@ run_core_dataplane() {
 	for required_test in $plugin_tests; do
 		require_test_pass "$plugin_log" "$required_test"
 	done
-	core_tests='TestLoadEmbeddedKernelCollectionsSmoke TestKernelPreparersRejectPortTruncation TestTCKernelIPv6Integration TestTCKernelIPv6RangeIntegration TestXDPKernelIPv4FullNATIntegration TestXDPKernelIPv4FullNATTransparentCoexists TestXDPKernelIPv4FullNATToggleDisableReenableRestoresConnectivity TestXDPKernelIPv4FullNATDeleteRecreateRestoresConnectivity TestXDPKernelIPv6Integration TestTCKernelTransparentRejectsACKOnlyNewSession TestXDPKernelTransparentRejectsACKOnlyNewSession TestEgressNATTCIntegration TestEgressNATTCSubsetOverridesIntegration TestEgressNATXDPIntegration TestEgressNATUDPMappingRespectsNATType TestEgressNATKernelWildcardForwardCoexists TestTCFlowCacheServesOnlyMatchingPackets TestEgressNATTCFlowCacheServesEstablishedTCP TestEgressNATTCFlowCacheSkipsPluginHookedInterface TestEgressNATTCFlowCacheYieldsToHookAddedMidStream TestTCReplyDispatchIgnoresFlowEntryOfAnotherFlow TestTCLaterFragmentsFollowTheirFirstFragment TestEgressNATTCPathMTUAndFragments'
+	core_tests='TestLoadEmbeddedKernelCollectionsSmoke TestKernelPreparersRejectPortTruncation TestTCKernelIPv6Integration TestTCKernelIPv6RangeIntegration TestXDPKernelIPv4FullNATIntegration TestXDPKernelIPv4FullNATTransparentCoexists TestXDPKernelIPv4FullNATToggleDisableReenableRestoresConnectivity TestXDPKernelIPv4FullNATDeleteRecreateRestoresConnectivity TestXDPKernelIPv6Integration TestTCKernelTransparentRejectsACKOnlyNewSession TestXDPKernelTransparentRejectsACKOnlyNewSession TestEgressNATTCIntegration TestEgressNATTCSubsetOverridesIntegration TestEgressNATXDPIntegration TestEgressNATUDPMappingRespectsNATType TestEgressNATKernelWildcardForwardCoexists TestTCFlowCacheServesOnlyMatchingPackets TestEgressNATTCFlowCacheServesEstablishedTCP TestEgressNATTCFlowCacheSkipsPluginHookedInterface TestEgressNATTCFlowCacheYieldsToHookAddedMidStream TestTCReplyDispatchIgnoresFlowEntryOfAnotherFlow TestTCLaterFragmentsFollowTheirFirstFragment TestEgressNATTCPathMTUAndFragments TestKernelMapLayoutCopyCopiesThenCatchesUp TestPlanLayoutCopiesMovesListedPrefixesOutOfReplacements TestHotRestartEngineCheckLiveListedValueGrowthIsCopied TestTCFlowCacheV6ServesOnlyMatchingPackets TestXDPGenericOffloadTargetsFindPeerInItsNamespace TestKernelTCHairpinReachesForwardFromGuest TestEgressNATTCLeavesTransparentProxyRepliesToTheHost TestLoopbackAccessMatrix TestBridgeNeighborKeepaliveKeepsGuestsLearned'
 	core_pattern=$(printf '%s' "$core_tests" | tr ' ' '|')
 	core_log="$TMP_DIR/core-dataplane.log"
 	run_no_skips "core TC/XDP, IPv4/IPv6, NAT and session guard matrix" "$core_log" \
@@ -623,6 +645,32 @@ run_xdp_performance() {
 		awk -v value="$per_hook" -v maximum="$xdp_hook_max_ns" 'BEGIN { if (value > maximum) exit 1 }' || \
 			fail "XDP ${count}-hook incremental cost ${per_hook}ns exceeds ${xdp_hook_max_ns}ns/hook"
 	done
+
+	# -v makes a skipped benchmark print '--- SKIP:' for run_no_skips; a
+	# case that never ran also fails below for want of values.
+	firewall_log="$TMP_DIR/xdp-firewall-benchmark.log"
+	run_no_skips "XDP firewall plugin per-packet benchmark" "$firewall_log" \
+		env VEER_RUN_XDP_PLUGIN_BENCH=1 \
+		go test -v ./internal/app -run '^$' -bench '^BenchmarkFirewallProgram$' -benchtime=1s -count=3 -timeout=10m
+
+	awk '
+		/^BenchmarkFirewallProgram\// {
+			name = $1
+			sub(/^.*\//, "", name)
+			sub(/-[0-9]+$/, "", name)
+			for (i = 1; i < NF; i++) if ($(i + 1) == "ns/op") print $i >> (out "/xdp-firewall-" name ".values")
+		}
+	' out="$TMP_DIR" "$firewall_log"
+
+	printf '\nXDP firewall per-packet medians (limit %s ns):\n' "$xdp_firewall_max_ns"
+	for case_name in not_loaded unprotected_port_v4 allowed_source_v4 dropped_source_v4 trusted_source_v4 \
+		allowed_source_v6 dropped_source_v6 vlan_allowed_source_v4 limited_established_v4 limited_syn_v4
+	do
+		value=$(median_file "$TMP_DIR/xdp-firewall-${case_name}.values") || fail "missing XDP firewall ${case_name} benchmark"
+		printf '  %-22s median=%s ns/packet\n' "$case_name" "$value"
+		awk -v value="$value" -v maximum="$xdp_firewall_max_ns" 'BEGIN { if (value > maximum) exit 1 }' || \
+			fail "XDP firewall ${case_name} median ${value}ns exceeds ${xdp_firewall_max_ns}ns"
+	done
 }
 
 run_netfilter_performance() {
@@ -636,6 +684,40 @@ run_netfilter_performance() {
 	require_test_pass "$netfilter_log" TestKernelNetfilterPluginPerformance
 }
 
+# Forwarding through a Veer port forward with the firewall attached, paired
+# with adjacent baselines. On veth any native XDP program costs most of bulk
+# TCP (the veth copies every skb), so TCP is judged against a bare XDP_PASS
+# program (*_vs_noop). On a veth without native XDP the firewall runs its tc
+# fallback, which must keep bulk TCP close to the baseline; generic mode is a
+# regression guard, not a target.
+run_firewall_dataplane_performance() {
+	require_command nft
+	require_command ethtool
+	fw_native=${VEER_PLUGIN_RELEASE_FIREWALL_NATIVE_RATIO:-0.95}
+	fw_protected=${VEER_PLUGIN_RELEASE_FIREWALL_PROTECTED_RATIO:-0.93}
+	fw_veth=${VEER_PLUGIN_RELEASE_FIREWALL_VETH_RATIO:-0.88}
+	fw_tc=${VEER_PLUGIN_RELEASE_FIREWALL_TC_RATIO:-0.85}
+	fw_generic=${VEER_PLUGIN_RELEASE_FIREWALL_GENERIC_RATIO:-0.45}
+	validate_ratio VEER_PLUGIN_RELEASE_FIREWALL_NATIVE_RATIO "$fw_native"
+	validate_ratio VEER_PLUGIN_RELEASE_FIREWALL_PROTECTED_RATIO "$fw_protected"
+	validate_ratio VEER_PLUGIN_RELEASE_FIREWALL_VETH_RATIO "$fw_veth"
+	validate_ratio VEER_PLUGIN_RELEASE_FIREWALL_TC_RATIO "$fw_tc"
+	validate_ratio VEER_PLUGIN_RELEASE_FIREWALL_GENERIC_RATIO "$fw_generic"
+	firewall_perf_log="$TMP_DIR/firewall-throughput.log"
+	run_no_skips "Firewall plugin forwarding throughput" "$firewall_perf_log" \
+		env VEER_RUN_FIREWALL_PERF=1 FORWARD_PERF_BINARY="$perf_binary" VEER_FIREWALL_PERF_PLUGIN_DIR="$ROOT_DIR/plugins/firewall" \
+		VEER_FIREWALL_PERF_ROUNDS="$perf_samples" VEER_FIREWALL_PERF_SECONDS="$perf_steady_seconds" \
+		VEER_FIREWALL_PERF_MIN_RATIOS="udp_native_unprotected=$fw_native,udp_native_protected=$fw_protected,tcp_native_unprotected_vs_noop=$fw_veth,tcp_native_protected_vs_noop=$fw_veth,tcp_tc_unprotected=$fw_tc,udp_tc_unprotected=$fw_protected,tcp_generic_unprotected=$fw_generic" \
+		go test -v ./internal/app -run '^TestFirewallPluginThroughput$' -count=1 -timeout=60m
+	require_test_pass "$firewall_perf_log" TestFirewallPluginThroughput
+	firewall_flood_log="$TMP_DIR/firewall-syn-flood.log"
+	run_no_skips "Firewall plugin SYN flood" "$firewall_flood_log" \
+		env VEER_RUN_FIREWALL_PERF=1 FORWARD_PERF_BINARY="$perf_binary" VEER_FIREWALL_PERF_PLUGIN_DIR="$ROOT_DIR/plugins/firewall" \
+		VEER_FIREWALL_PERF_ROUNDS="$perf_samples" \
+		go test -v ./internal/app -run '^TestFirewallPluginSYNFlood$' -count=1 -timeout=30m
+	require_test_pass "$firewall_flood_log" TestFirewallPluginSYNFlood
+}
+
 run_performance() {
 	require_linux_root
 	require_command iperf3
@@ -647,6 +729,7 @@ run_performance() {
 	perf_curve_ratio=${VEER_PLUGIN_RELEASE_PERF_CURVE_RATIO:-0.80}
 	xdp_zero_max_ns=${VEER_PLUGIN_RELEASE_XDP_ZERO_MAX_NS:-30}
 	xdp_hook_max_ns=${VEER_PLUGIN_RELEASE_XDP_HOOK_MAX_NS:-75}
+	xdp_firewall_max_ns=${VEER_PLUGIN_RELEASE_XDP_FIREWALL_MAX_NS:-1000}
 	netfilter_hook_ratio=${VEER_PLUGIN_RELEASE_NETFILTER_RATIO:-0.80}
 	validate_positive_integer VEER_PLUGIN_RELEASE_PERF_SAMPLES "$perf_samples"
 	validate_positive_integer VEER_PLUGIN_RELEASE_PERF_SECONDS "$perf_steady_seconds"
@@ -663,6 +746,7 @@ run_performance() {
 	run_tc_performance
 	run_xdp_performance
 	run_netfilter_performance
+	run_firewall_dataplane_performance
 }
 
 case "$PROFILE" in
