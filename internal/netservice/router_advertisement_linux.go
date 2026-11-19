@@ -44,6 +44,7 @@ type ipv6RouterAdvertiser struct {
 	rsWakeCh         chan struct{}
 	doneCh           chan struct{}
 	rsDoneCh         chan struct{}
+	rsWake           *serviceWaker
 	currentRSFD      int
 	rsListeningSince time.Time
 	lastIssueText    string
@@ -68,6 +69,7 @@ func newIPv6RouterAdvertiser(config ipv6AssignmentRAConfig) *ipv6RouterAdvertise
 		rsWakeCh:    make(chan struct{}, 1),
 		doneCh:      make(chan struct{}),
 		rsDoneCh:    make(chan struct{}),
+		rsWake:      newServiceWaker(),
 		currentRSFD: -1,
 	}
 }
@@ -157,16 +159,14 @@ func (adv *ipv6RouterAdvertiser) stop() {
 	if adv == nil {
 		return
 	}
+	// The solicitation socket belongs to listenForRouterSolicitations, which
+	// closes it on its way out; see serviceWaker for why stop() must not
+	// close it itself.
 	close(adv.stopCh)
-	adv.mu.Lock()
-	currentRSFD := adv.currentRSFD
-	adv.currentRSFD = -1
-	adv.mu.Unlock()
-	if currentRSFD >= 0 {
-		_ = unix.Close(currentRSFD)
-	}
+	adv.rsWake.wake()
 	<-adv.doneCh
 	<-adv.rsDoneCh
+	adv.rsWake.close()
 }
 
 func (adv *ipv6RouterAdvertiser) snapshot() ipv6AssignmentRAConfig {
@@ -282,7 +282,19 @@ func (adv *ipv6RouterAdvertiser) listenForRouterSolicitations() {
 				default:
 				}
 
-				n, _, err := unix.Recvfrom(fd, buf, 0)
+				// Wait here, not in a blocking recvfrom, so that stop() can
+				// end the wait without closing the socket.
+				readable, woken, err := adv.rsWake.waitReadable(fd, 2*time.Second)
+				if woken {
+					return
+				}
+				if err == nil && !readable {
+					err = unix.EAGAIN
+				}
+				n := 0
+				if err == nil {
+					n, _, err = unix.Recvfrom(fd, buf, unix.MSG_DONTWAIT)
+				}
 				if err != nil {
 					if errors.Is(err, unix.EINTR) {
 						select {

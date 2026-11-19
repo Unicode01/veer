@@ -53,6 +53,7 @@ type ipv6DHCPv6Server struct {
 	config         ipv6AssignmentDHCPv6Config
 	stopCh         chan struct{}
 	doneCh         chan struct{}
+	wake           *serviceWaker
 	currentFD      int
 	listeningSince time.Time
 	lastIssueText  string
@@ -70,6 +71,7 @@ func newIPv6DHCPv6Server(config ipv6AssignmentDHCPv6Config) *ipv6DHCPv6Server {
 		config:    cloneIPv6AssignmentDHCPv6Config(config),
 		stopCh:    make(chan struct{}),
 		doneCh:    make(chan struct{}),
+		wake:      newServiceWaker(),
 		currentFD: -1,
 	}
 }
@@ -108,15 +110,12 @@ func (srv *ipv6DHCPv6Server) stop() {
 	if srv == nil {
 		return
 	}
+	// The socket belongs to run(), which closes it on its way out; see
+	// serviceWaker for why stop() must not close it itself.
 	close(srv.stopCh)
-	srv.mu.Lock()
-	currentFD := srv.currentFD
-	srv.currentFD = -1
-	srv.mu.Unlock()
-	if currentFD >= 0 {
-		_ = unix.Close(currentFD)
-	}
+	srv.wake.wake()
 	<-srv.doneCh
+	srv.wake.close()
 }
 
 func (srv *ipv6DHCPv6Server) snapshot() ipv6AssignmentDHCPv6Config {
@@ -171,7 +170,17 @@ func (srv *ipv6DHCPv6Server) run() {
 				default:
 				}
 
-				frame, err := readIPv6DHCPv6Frame(fd)
+				readable, woken, err := srv.wake.waitReadable(fd, 2*time.Second)
+				if woken {
+					return
+				}
+				if err == nil && !readable {
+					err = unix.EAGAIN
+				}
+				var frame ipv6DHCPv6Frame
+				if err == nil {
+					frame, err = readIPv6DHCPv6Frame(fd)
+				}
 				if err != nil {
 					if errors.Is(err, unix.EINTR) {
 						select {
@@ -438,10 +447,13 @@ func dhcpv6SocketNeedsReopen(state ipv6DHCPv6State) bool {
 	return iface.Index != state.IfIndex
 }
 
+// readIPv6DHCPv6Frame reads the next DHCPv6 frame without blocking (EAGAIN
+// once none is queued): run() waits in serviceWaker.waitReadable, so that
+// stop() can end the wait.
 func readIPv6DHCPv6Frame(fd int) (ipv6DHCPv6Frame, error) {
 	buf := make([]byte, dhcpv6MaxRequestSize)
 	for {
-		n, _, err := unix.Recvfrom(fd, buf, 0)
+		n, _, err := unix.Recvfrom(fd, buf, unix.MSG_DONTWAIT)
 		if err != nil {
 			return ipv6DHCPv6Frame{}, err
 		}

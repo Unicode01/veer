@@ -347,6 +347,18 @@ run_privileged() {
 	do
 		require_test_pass "$privileged_log" "$required_test"
 	done
+
+	# Stopping DHCPv4, DHCPv6 and RA must leave other descriptors alone. The
+	# test makes its own links, so it runs in a scratch network namespace.
+	require_command unshare
+	netservice_binary="$TMP_DIR/veer-netservice-privileged.test"
+	(cd "$ROOT_DIR" && go test -c -o "$netservice_binary" ./internal/netservice)
+	netservice_log="$TMP_DIR/netservice-privileged.log"
+	run_no_skips "privileged network service stop" "$netservice_log" \
+		env VEER_RUN_NETSERVICE_PRIVILEGED_TESTS=1 unshare --net "$netservice_binary" \
+		-test.v -test.run '^TestNetworkServicesStopWithoutClosingForeignDescriptors$' -test.count=1 -test.timeout=5m
+	require_test_pass "$netservice_log" TestNetworkServicesStopWithoutClosingForeignDescriptors
+
 	pppoe_blackbox_binary="$TMP_DIR/veer-pppoe-blackbox"
 	(cd "$ROOT_DIR" && go build -trimpath -o "$pppoe_blackbox_binary" .)
 
