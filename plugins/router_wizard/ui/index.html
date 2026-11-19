@@ -5,300 +5,86 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Router</title>
   <style>
-    .router-page { padding: 20px; }
-
+    /* Router Wizard */
     .router-title { min-width: 0; }
     .router-badges { justify-content: flex-end; }
-    .router-topology {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 8px;
-    }
-    .router-node {
-      min-width: 0;
-      padding: 9px 10px;
-      border: 1px solid var(--veer-border);
-      border-radius: var(--veer-radius-lg);
-      background: color-mix(in srgb, var(--veer-surface-soft) 76%, transparent);
-    }
-    .router-node-label {
-      color: var(--veer-muted);
-      font-size: var(--veer-fs-xs);
-      font-weight: 600;
-      line-height: 1.25;
-    }
-    .router-node-value {
-      margin-top: 3px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      color: var(--veer-text);
-      font-size: var(--veer-fs-md);
-      font-weight: 600;
-      line-height: 1.25;
-    }
-    .router-config-grid,
-    .router-output-grid {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      gap: 12px;
-      align-items: start;
-    }
-    .router-section {
-      min-width: 0;
-      padding: 10px;
-      border: 1px solid var(--veer-border);
-      border-radius: var(--veer-radius-lg);
-      background: color-mix(in srgb, var(--veer-surface-soft) 72%, transparent);
-    }
-    .router-section > * + * { margin-top: 10px; }
-    .router-section-title {
-      margin: 0;
-      color: var(--veer-text);
-      font-size: var(--veer-fs-md);
-      line-height: 1.25;
-      font-weight: 600;
-    }
-    .router-form-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-      align-items: end;
-    }
-    .router-field-label {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      min-width: 0;
-      color: var(--veer-muted);
-      font-size: var(--veer-fs-xs);
-      font-weight: 600;
-    }
-    .router-field-label > span:first-child {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .router-hint {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      flex: 0 0 auto;
-      width: 16px;
-      height: 16px;
-      border: 1px solid var(--veer-border);
-      border-radius: var(--veer-radius-pill);
-      color: var(--veer-soft);
-      background: var(--veer-surface);
-      font-size: var(--veer-fs-xs);
-      font-weight: 600;
-      cursor: help;
-    }
-    .router-check-field {
-      min-height: 31px;
-      padding: 5px 8px;
-      border: 1px solid var(--veer-border);
-      border-radius: var(--veer-radius);
-      background: var(--veer-surface);
-    }
-    .router-check-field label {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      min-width: 0;
-    }
-    .router-check-field span {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .router-check-field .veer-input[type="checkbox"] { flex: 0 0 auto; }
-    .router-multi-select {
-      position: relative;
-      width: 100%;
-      min-width: 0;
-    }
-    .router-multi-button {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      width: 100%;
-      min-height: 31px;
-      padding: 5px 9px;
-      border: 1px solid var(--veer-border);
-      border-radius: var(--veer-radius);
-      background: var(--veer-surface);
-      color: var(--veer-text);
-      font: inherit;
-      font-size: var(--veer-fs-md);
-      font-weight: 600;
-      text-align: left;
-      cursor: pointer;
-      transition: border-color .12s ease, box-shadow .12s ease;
-    }
-    .router-multi-button:hover,
-    .router-multi-select.is-open .router-multi-button {
-      border-color: color-mix(in srgb, var(--veer-primary) 45%, var(--veer-border));
-      box-shadow: none;
-    }
-    .router-multi-button::after {
-      content: "v";
-      flex: 0 0 auto;
-      color: var(--veer-muted);
-      font-size: var(--veer-fs-xs);
-      font-weight: 600;
-    }
-    .router-multi-value {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .router-multi-options {
-      position: absolute;
-      top: calc(100% + 4px);
-      left: 0;
-      z-index: 50;
-      display: grid;
-      gap: 4px;
-      width: 100%;
-      min-width: 150px;
-      padding: 6px;
-      border: 1px solid var(--veer-border);
-      border-radius: var(--veer-radius-lg);
-      background: var(--veer-surface);
-      box-shadow: none;
-    }
-    .router-multi-options[hidden] {
-      display: none !important;
-    }
-    .router-multi-option {
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      min-width: 0;
-      padding: 5px 6px;
-      border-radius: var(--veer-radius);
-      color: var(--veer-text);
-      font-size: var(--veer-fs-sm);
-      font-weight: 600;
-      cursor: pointer;
-      transition: background .12s ease, color .12s ease;
-    }
-    .router-multi-option:hover {
-      background: color-mix(in srgb, var(--veer-primary) 10%, transparent);
-    }
-    .router-multi-option input {
-      flex: 0 0 auto;
-      margin: 0;
-    }
-    .router-mode-group[hidden] { display: none !important; }
-    .router-actions { justify-content: flex-end; gap: 8px; }
-    .router-step-list,
-    .router-status-list { display: grid; gap: 7px; }
-    .router-step-group { display: grid; gap: 6px; min-width: 0; }
-    .router-step-group + .router-step-group {
-      margin-top: 3px;
-      padding-top: 10px;
-      border-top: 1px solid var(--veer-border);
-    }
-    .router-step-group-title {
-      margin: 0;
-      color: var(--veer-muted);
-      font-size: var(--veer-fs-xs);
-      font-weight: 600;
-      text-transform: uppercase;
-    }
-    .router-step-group-list { display: grid; gap: 7px; }
-    .router-step,
-    .router-plugin-row {
-      display: grid;
-      grid-template-columns: minmax(120px, 0.9fr) minmax(0, 1.5fr) auto;
-      gap: 8px;
-      align-items: center;
-      min-width: 0;
-      padding: 7px 8px;
-      border: 1px solid var(--veer-border);
-      border-radius: var(--veer-radius);
-      background: var(--veer-surface);
-    }
-    .router-step-main,
-    .router-plugin-main {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-size: var(--veer-fs-sm);
-      font-weight: 600;
-    }
-    .router-step-detail,
-    .router-plugin-detail {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      color: var(--veer-muted);
-      font-size: var(--veer-fs-sm);
-    }
-    @media (max-width: 900px) {
-      .router-config-grid,
-      .router-output-grid,
-      .router-topology { grid-template-columns: 1fr; }
-    }
-    @media (max-width: 640px) {
-      .router-form-grid,
-      .router-step,
-      .router-plugin-row { grid-template-columns: 1fr; }
-      .router-actions .veer-button { flex: 1 1 auto; }
-    }
-    /* Patchbay grammar overrides */
-    .router-page { padding: 0 0 4px; }
-    .router-topology { display: flex; align-items: stretch; gap: 44px; }
-    .router-node { position: relative; flex: 1 1 0; padding: 12px 14px; border-color: var(--veer-border-strong); border-radius: var(--veer-radius); background: var(--veer-surface-soft); }
-    .router-node:nth-child(2) { border-color: var(--veer-text); background: var(--veer-surface); }
-    .router-node + .router-node::before { content: ""; position: absolute; top: 50%; left: -40px; width: 32px; height: 2px; background: var(--veer-f-blue); }
-    .router-node + .router-node::after { content: ""; position: absolute; top: calc(50% - 3px); left: -9px; border-left: 6px solid var(--veer-f-blue); border-top: 4px solid transparent; border-bottom: 4px solid transparent; }
-    .router-node:nth-child(3)::before { background: var(--veer-f-brown); }
-    .router-node:nth-child(3)::after { border-left-color: var(--veer-f-brown); }
-    .router-node-label { font-size: var(--veer-fs-xs); letter-spacing: .08em; text-transform: uppercase; }
-    .router-node-value { margin-top: 4px; font-family: var(--veer-mono); font-size: var(--veer-fs-base); font-weight: 500; }
-    /* WAN and LAN stack as full-width sections so neither column is left half empty. */
-    .router-config-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
-    .router-section { padding: 0; border: 0; border-radius: 0; background: transparent; }
-    .router-section + .router-section { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--veer-border); }
-    /* Each section is one four-column flow: its separate field grids (base fields, mode-specific
-       fields) merge, so a lone first field never sits by itself on a row. */
-    .router-section { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px 12px; }
+
+    /* Topology: WAN -> Veer Core -> LAN as one route of port labels. */
+    .router-port-label { margin-right: 8px; padding-right: 8px; border-right: 1px solid var(--veer-border-strong); color: var(--veer-soft); text-transform: uppercase; }
+    .router-port-value { color: var(--veer-text); font-weight: 600; }
+    .router-topology > .router-port:nth-child(3) { --veer-cable: var(--veer-f-brown); }
+
+    /* Configuration: WAN and LAN sections, each one four-column field flow */
+    .router-config-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
+    .router-section { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; align-items: end; min-width: 0; }
     .router-section > * { grid-column: 1 / -1; }
-    .router-section > * + * { margin-top: 0; }
     .router-section > .router-form-grid { display: contents; }
-    .router-output-grid { align-items: stretch; }
-    .router-multi-button::after { content: ""; width: 6px; height: 6px; margin-right: 4px; border-right: 1.5px solid var(--veer-muted); border-bottom: 1.5px solid var(--veer-muted); transform: translateY(-2px) rotate(45deg); }
-    .router-section-title { color: var(--veer-muted); font-size: var(--veer-fs-xs); letter-spacing: .08em; text-transform: uppercase; }
-    .router-form-grid { gap: 14px 12px; }
-    .router-field-label { font-size: var(--veer-fs-sm); font-weight: 500; }
-    .router-hint { width: 15px; height: 15px; border-color: var(--veer-border); background: transparent; font-weight: 500; }
-    .router-check-field { display: flex; align-items: center; min-height: 32px; padding: 0; border: 0; background: transparent; }
-    .router-multi-button { min-height: 32px; border-color: var(--veer-border-strong); font-weight: 500; }
-    .router-actions { padding-top: 16px; border-top: 1px solid var(--veer-border); }
-    .router-step-list, .router-status-list, .router-step-group-list { gap: 0; }
-    .router-step, .router-plugin-row { padding: 10px 0; border: 0; border-bottom: 1px solid var(--veer-border); border-radius: 0; background: transparent; }
+    .router-section + .router-section { margin-top: 24px; padding-top: 24px; border-top: 1px solid var(--veer-border); }
+    .router-section-title { margin: 0; color: var(--veer-muted); font-size: var(--veer-fs-xs); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+    .router-mode-group[hidden] { display: none !important; }
+    .router-field-label {
+      display: flex; align-items: center; justify-content: flex-start; gap: 4px; min-width: 0;
+      color: var(--veer-muted); font-size: var(--veer-fs-sm); font-weight: 500;
+    }
+    .router-field-label > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .router-hint {
+      display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 16px; height: 16px;
+      border: 1px solid var(--veer-border-strong); border-radius: var(--veer-radius-pill);
+      color: var(--veer-muted); font-size: var(--veer-fs-xs); font-weight: 600; line-height: 1; cursor: help;
+    }
+    /* Settings applied on save: checkbox and label, on the row of the inputs. */
+    .router-check-field { display: flex; align-items: center; min-height: 32px; }
+    .router-check-field label { display: inline-flex; align-items: center; gap: 8px; min-width: 0; color: var(--veer-text); font-size: var(--veer-fs-md); cursor: pointer; }
+    .router-check-field span { overflow-wrap: anywhere; }
+
+    /* Multi-select (NAT protocols) */
+    .router-multi-select { position: relative; width: 100%; min-width: 0; }
+    .router-multi-button {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-height: 32px;
+      padding: 4px 12px; border: 1px solid var(--veer-border-strong); border-radius: var(--veer-radius);
+      background: var(--veer-surface); color: var(--veer-text); font: inherit; font-size: var(--veer-fs-md); font-weight: 500;
+      text-align: left; cursor: pointer;
+    }
+    .router-multi-button:hover, .router-multi-select.is-open .router-multi-button { border-color: var(--veer-muted); }
+    .router-multi-button::after {
+      flex: 0 0 auto; width: 6px; height: 6px; margin-right: 4px; border-right: 1.5px solid var(--veer-muted);
+      border-bottom: 1.5px solid var(--veer-muted); transform: translateY(-2px) rotate(45deg); content: "";
+    }
+    .router-multi-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .router-multi-options {
+      position: absolute; top: calc(100% + 4px); left: 0; z-index: 50; display: grid; gap: 4px; width: 100%; min-width: 152px;
+      padding: 8px; border: 1px solid var(--veer-border-strong); border-radius: var(--veer-radius-lg); background: var(--veer-surface);
+    }
+    .router-multi-options[hidden] { display: none !important; }
+    .router-multi-option {
+      display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 8px; border-radius: var(--veer-radius);
+      color: var(--veer-text); font-size: var(--veer-fs-sm); font-weight: 500; cursor: pointer;
+    }
+    .router-multi-option:hover { background: var(--veer-surface-soft); }
+    .router-multi-option input { flex: 0 0 auto; margin: 0; accent-color: var(--veer-primary); }
+
+    /* Status, steps and downstream plugins */
+    .router-output-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; align-items: stretch; }
+    .router-step-list, .router-status-list, .router-step-group-list { display: grid; gap: 0; }
+    .router-step-group { display: grid; gap: 8px; min-width: 0; }
+    .router-step-group + .router-step-group { margin-top: 8px; padding-top: 12px; border-top: 1px solid var(--veer-border); }
+    .router-step-group-title { margin: 0; color: var(--veer-muted); font-size: var(--veer-fs-xs); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+    .router-step, .router-plugin-row {
+      display: grid; grid-template-columns: minmax(120px, .9fr) minmax(0, 1.5fr) auto; gap: 12px; align-items: center;
+      min-width: 0; padding: 12px 0; border-bottom: 1px solid var(--veer-border);
+    }
     .router-step:last-child, .router-plugin-row:last-child { border-bottom: 0; }
-    .router-step-main, .router-plugin-main { font-family: var(--veer-mono); font-weight: 500; }
-    .router-step-group-title { letter-spacing: .08em; }
-    @media (max-width: 900px) {
-      .router-topology { flex-direction: column; gap: 22px; }
-      .router-node + .router-node::before { top: -20px; left: 24px; width: 2px; height: 16px; }
-      .router-node + .router-node::after { top: -6px; left: 21px; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 6px solid var(--veer-f-blue); border-bottom: 0; }
-      .router-node:nth-child(3)::after { border-left-color: transparent; border-top-color: var(--veer-f-brown); }
+    .router-step-main, .router-plugin-main { min-width: 0; font-family: var(--veer-mono); font-size: var(--veer-fs-sm); font-weight: 500; overflow-wrap: anywhere; }
+    .router-step-detail, .router-plugin-detail { min-width: 0; color: var(--veer-muted); font-size: var(--veer-fs-sm); overflow-wrap: anywhere; }
+    @media (max-width: 960px) {
       .router-section { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .router-output-grid { grid-template-columns: minmax(0, 1fr); }
     }
     @media (max-width: 640px) {
       .router-section { grid-template-columns: minmax(0, 1fr); }
+      .router-step, .router-plugin-row { grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; }
+      .router-step-detail, .router-plugin-detail { grid-column: 1 / -1; grid-row: 2; }
     }
-    /* End Patchbay grammar overrides */
   </style>
 </head>
 <body>
@@ -404,6 +190,15 @@
           'value.dnsManual': '手动指定',
           'value.dnsDisabled': '不下发',
           'value.ok': '成功',
+          'phase.ok': '成功',
+          'phase.error': '失败',
+          'phase.not_configured': '未配置',
+          'phase.applied': '已应用',
+          'phase.applying': '应用中',
+          'phase.pending': '等待中',
+          'phase.disabled': '已停用',
+          'phase.established': '已连接',
+          'phase.idle': '空闲',
           'plugin.wan': 'wan_core',
           'plugin.lan': 'lan_core',
           'plugin.egress': 'egress_nat',
@@ -500,6 +295,15 @@
           'value.dnsManual': 'Manual',
           'value.dnsDisabled': 'Do not distribute',
           'value.ok': 'OK',
+          'phase.ok': 'OK',
+          'phase.error': 'Failed',
+          'phase.not_configured': 'Not configured',
+          'phase.applied': 'Applied',
+          'phase.applying': 'Applying',
+          'phase.pending': 'Pending',
+          'phase.disabled': 'Disabled',
+          'phase.established': 'Connected',
+          'phase.idle': 'Idle',
           'plugin.wan': 'wan_core',
           'plugin.lan': 'lan_core',
           'plugin.egress': 'egress_nat',
@@ -536,17 +340,17 @@
       function setStatus(key) { statusKey = key; status.textContent = T(key); }
 
       const status = F.status(T('status.idle'));
-      const topologyBody = F.h('div', { className: 'router-topology' });
+      const topologyBody = F.h('div', { className: 'veer-route router-topology' });
       const statusBody = F.h('div', { className: F.classes.stack });
       const stepsBody = F.h('div', { className: 'router-step-list' });
       const downstreamBody = F.h('div', { className: 'router-status-list' });
 
       const wanMode = select([['existing', 'value.existing'], ['pppoe', 'value.pppoe']]);
-      const wanEgress = input('', 'eth0 / pppoe-wan');
-      const wanSource = input('', 'optional source IP');
-      const pppoeInterface = input('', 'eth0');
+      const wanEgress = mono(input('', 'eth0 / pppoe-wan'));
+      const wanSource = mono(input('', 'optional source IP'));
+      const pppoeInterface = mono(input('', 'eth0'));
       const pppoeRandomMac = checkbox(true);
-      const pppoeMacAddress = input('', '02:xx:xx:xx:xx:xx');
+      const pppoeMacAddress = mono(input('', '02:xx:xx:xx:xx:xx'));
       const pppoeUsername = input('', 'username');
       const pppoePassword = input('', 'password', 'password');
       const pppoeService = input('', 'optional');
@@ -555,14 +359,14 @@
       const pppoePD = checkbox(false);
       const pppoeTunnel = checkbox(true);
       const pppoeRedial = checkbox(true);
-      const lanBridge = input('br-lan', 'br-lan');
-      const lanPorts = input('', 'eth1, eth2, eth3');
-      const lanAddresses = input('192.168.100.1/24', '192.168.100.1/24, fd00:100::1/64');
+      const lanBridge = mono(input('br-lan', 'br-lan'));
+      const lanPorts = mono(input('', 'eth1, eth2, eth3'));
+      const lanAddresses = mono(input('192.168.100.1/24', '192.168.100.1/24, fd00:100::1/64'));
       const lanMtu = input('1500', '1500', 'number');
       const autoNAT = checkbox(true);
       const lanDHCPv4 = checkbox(true);
       const lanDNSMode = select([['auto', 'value.dnsAuto'], ['manual', 'value.dnsManual'], ['disabled', 'value.dnsDisabled']]);
-      const lanDNSServers = input('', '223.5.5.5, 2400:3200::1');
+      const lanDNSServers = mono(input('', '223.5.5.5, 2400:3200::1'));
       let lanDNSServersField = null;
       const protocolOptions = [['tcp', 'TCP'], ['udp', 'UDP'], ['icmp', 'ICMP']];
       const protocolChecks = {};
@@ -574,6 +378,32 @@
       const redirectMode = input('', 'blank / prepared_l2');
       F.onLocaleChange(refreshI18n);
 
+      function mono(node) {
+        node.classList.add('veer-mono');
+        return node;
+      }
+      // Relative time, with the absolute time on hover (DESIGN.md §7).
+      function timeStat(label, value) {
+        const at = Date.parse(value || '');
+        if (!Number.isFinite(at)) return F.stat(label, value || '—');
+        const locale = document.documentElement.lang === 'en-US' ? 'en-US' : 'zh-CN';
+        const seconds = Math.round((at - Date.now()) / 1000);
+        const abs = Math.abs(seconds);
+        const unit = abs < 60 ? [seconds, 'second'] : abs < 3600 ? [Math.round(seconds / 60), 'minute'] : abs < 86400 ? [Math.round(seconds / 3600), 'hour'] : [Math.round(seconds / 86400), 'day'];
+        let text;
+        try { text = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' }).format(unit[0], unit[1]); } catch (e) { text = new Date(at).toLocaleString(locale); }
+        return F.stat(label, text, new Date(at).toLocaleString(locale));
+      }
+      // A status pill: translated word, tone by meaning.
+      function phasePill(phase) {
+        const key = 'phase.' + phase;
+        const text = T(key);
+        const node = F.status(text === key ? String(phase || '').replace(/_/g, ' ') : text);
+        if (phase === 'error' || phase === 'failed') node.dataset.tone = 'error';
+        else if (phase === 'not_configured' || phase === 'disabled' || phase === 'idle') node.dataset.tone = 'off';
+        else if (phase === 'pending' || phase === 'applying') node.dataset.tone = 'warn';
+        return node;
+      }
       function input(value, placeholder, type) {
         return F.h('input', { className: F.classes.input, attrs: { type: type || 'text', value, placeholder } });
       }
@@ -937,9 +767,9 @@
         topologyBody.appendChild(topologyNode(T('topology.lan'), lanBridge.value.trim() || 'br-lan'));
       }
       function topologyNode(label, value) {
-        return F.h('div', { className: 'router-node' }, [
-          F.h('div', { className: 'router-node-label', text: label }),
-          F.h('div', { className: 'router-node-value', text: value || '-' })
+        return F.h('span', { className: 'veer-port router-port' }, [
+          F.h('span', { className: 'router-port-label', text: label }),
+          F.h('span', { className: 'router-port-value', text: value || '—' })
         ]);
       }
       function renderStatus() {
@@ -953,11 +783,11 @@
           return;
         }
         statusBody.appendChild(F.h('div', { className: F.classes.grid }, [
-          F.stat(T('stat.phase'), lastStatus.phase || '-'),
-          F.stat(T('stat.mode'), lastStatus.wan_mode || '-'),
-          F.stat(T('stat.lan'), [lastStatus.lan_id, lastStatus.lan_bridge].filter(Boolean).join(' / ') || '-'),
-          F.stat(T('stat.egress'), lastStatus.wan_egress_interface || '-'),
-          F.stat(T('stat.updated'), lastStatus.updated_at || '-')
+          F.stat(T('stat.phase'), lastStatus.phase || '—'),
+          F.stat(T('stat.mode'), lastStatus.wan_mode || '—'),
+          F.stat(T('stat.lan'), [lastStatus.lan_id, lastStatus.lan_bridge].filter(Boolean).join(' / ') || '—'),
+          F.stat(T('stat.egress'), lastStatus.wan_egress_interface || '—'),
+          timeStat(T('stat.updated'), lastStatus.updated_at)
         ]));
         const stepGroups = [
           ['steps.apply', lastStatus.steps],
@@ -990,20 +820,20 @@
           item.last_error || item.note || ''
         ].filter(Boolean).join(' | ');
         return F.h('div', { className: 'router-plugin-row' }, [
-          F.h('div', { className: 'router-plugin-main', text: label || '-' }),
-          F.h('div', { className: 'router-plugin-detail', text: detail || '-', attrs: { title: detail || '' } }),
-          F.status(phase)
+          F.h('div', { className: 'router-plugin-main', text: label || '—' }),
+          F.h('div', { className: 'router-plugin-detail', text: detail || '—', attrs: { title: detail || '' } }),
+          phasePill(phase)
         ]);
       }
       function appendStepGroup(labelKey, values) {
         const steps = Array.isArray(values) ? values : [];
         if (!steps.length) return false;
         const rows = steps.map(function (step) {
-          const detail = step.ok === false ? (step.error || '-') : (step.detail || T('value.ok'));
+          const detail = step.ok === false ? (step.error || '—') : (step.detail || T('value.ok'));
           return F.h('div', { className: 'router-step' }, [
-            F.h('div', { className: 'router-step-main', text: step.name || '-' }),
+            F.h('div', { className: 'router-step-main', text: step.name || '—' }),
             F.h('div', { className: 'router-step-detail', text: detail, attrs: { title: step.error || step.detail || '' } }),
-            F.status(step.ok === false ? 'error' : 'ok')
+            phasePill(step.ok === false ? 'error' : 'ok')
           ]);
         });
         stepsBody.appendChild(F.h('section', { className: 'router-step-group' }, [

@@ -5,138 +5,38 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PPPoE Client</title>
   <style>
-    .pppoe-page {
-      padding: 10px;
-    }
-
-    .pppoe-form {
-      display: grid;
-      gap: 10px;
-    }
-    .pppoe-section {
-      display: grid;
-      gap: 8px;
-      padding: 10px;
-      border: 1px solid var(--veer-border);
-      border-radius: var(--veer-radius-lg);
-      background: color-mix(in srgb, var(--veer-surface-soft) 72%, transparent);
-    }
-    .pppoe-section-head {
-      display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      gap: 10px;
-    }
-    .pppoe-section-title {
-      margin: 0;
-      color: var(--veer-text);
-      font-size: var(--veer-fs-sm);
-      font-weight: 600;
-      letter-spacing: 0.02em;
-      text-transform: uppercase;
-    }
-    .pppoe-section-desc {
-      color: var(--veer-soft);
-      font-size: var(--veer-fs-xs);
-      line-height: 1.4;
-    }
-    .pppoe-field-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-      gap: 9px;
-      align-items: end;
-    }
-    .pppoe-profile-picker {
-      display: grid;
-      gap: 6px;
-      min-width: 0;
-    }
-    .pppoe-profile-key[hidden] {
-      display: none;
-    }
-    .pppoe-toggle-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-      gap: 8px;
-    }
-    .pppoe-toggle-field {
-      grid-template-columns: minmax(0, 1fr) auto;
-      align-items: center;
-      gap: 8px;
-      min-height: 38px;
-      padding: 8px 10px;
-      border: 1px solid var(--veer-border);
-      border-radius: var(--veer-radius);
-      background: var(--veer-surface);
-    }
-    .pppoe-toggle-field > span:first-child {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .pppoe-toggle-field .veer-input[type="checkbox"] {
-      justify-self: end;
-    }
-    .pppoe-actions {
-      justify-content: flex-start;
-      padding-top: 2px;
-    }
-    .pppoe-actions .veer-button {
-      min-width: 88px;
-    }
-    .pppoe-runtime-status[data-state="degraded"],
-    .pppoe-runtime-status[data-state="redialing"] {
-      border-color: var(--veer-warn);
-      background: var(--veer-warn-bg);
-      color: var(--veer-warn);
-    }
-    .pppoe-runtime-status[data-state="offline"],
-    .pppoe-runtime-status[data-state="unknown"] {
-      border-color: var(--veer-border-strong);
-      background: var(--veer-surface-soft);
-      color: var(--veer-muted);
-    }
-    .pppoe-runtime-status[data-state="error"] {
-      border-color: var(--veer-danger);
-      background: var(--veer-danger-soft);
-      color: var(--veer-danger);
-    }
-    @media (max-width: 720px) {
-      .pppoe-page {
-        padding: 20px;
-      }
-      .pppoe-section-head {
-        display: grid;
-      }
-      .pppoe-actions .veer-button {
-        flex: 1 1 auto;
-      }
-    }
-    /* Patchbay grammar overrides */
-    .pppoe-page { padding: 0 0 4px; }
-    .pppoe-section { gap: 14px; padding: 0; border: 0; border-radius: 0; background: transparent; }
-    .pppoe-section + .pppoe-section { padding-top: 20px; border-top: 1px solid var(--veer-border); }
-    .pppoe-section-title { color: var(--veer-muted); font-size: var(--veer-fs-xs); letter-spacing: .08em; }
-    .pppoe-section-desc { color: var(--veer-muted); }
-    /* Fixed grids so every row is full: four field columns (the picker spans two, dropdown and name
-       side by side) and three switch columns with room for their labels. */
-    .pppoe-field-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px 12px; }
+    /* PPPoE Client */
+    .pppoe-form { display: grid; gap: 0; }
+    .pppoe-section { display: grid; gap: 16px; min-width: 0; }
+    .pppoe-section + .pppoe-section { margin-top: 24px; padding-top: 24px; border-top: 1px solid var(--veer-border); }
+    .pppoe-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap; }
+    .pppoe-section-title { margin: 0; color: var(--veer-muted); font-size: var(--veer-fs-xs); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+    .pppoe-section-desc { color: var(--veer-muted); font-size: var(--veer-fs-sm); line-height: 1.5; }
+    .pppoe-field-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; align-items: end; }
     .pppoe-field-grid > :has(.veer-record-picker, .pppoe-profile-picker) { grid-column: span 2; }
-    .pppoe-profile-picker { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; align-items: end; }
-    .pppoe-profile-picker > [hidden] { display: none; }
     .pppoe-field-grid:has(> :nth-child(2):last-child) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .pppoe-toggle-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px 24px; }
-    .pppoe-toggle-field { min-height: 36px; padding: 0; border: 0; border-bottom: 1px solid var(--veer-border); border-radius: 0; background: transparent; }
-    .pppoe-actions { justify-content: flex-end; padding-top: 16px; border-top: 1px solid var(--veer-border); }
-    @media (max-width: 880px) {
+    .pppoe-profile-picker { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; align-items: end; min-width: 0; }
+    .pppoe-profile-key[hidden] { display: none; }
+    /* Settings applied on save: checkbox, then its label. */
+    .pppoe-toggle-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 16px; }
+    .veer-field.pppoe-toggle-field {
+      display: flex; flex-direction: row-reverse; align-items: center; justify-content: flex-end; gap: 8px;
+      min-height: 32px; cursor: pointer;
+    }
+    .veer-field.pppoe-toggle-field > span:first-child { min-width: 0; color: var(--veer-text); font-size: var(--veer-fs-md); overflow-wrap: anywhere; }
+    .pppoe-runtime-status[data-state="degraded"],
+    .pppoe-runtime-status[data-state="redialing"] { background: var(--veer-warn-bg); color: var(--veer-warn); }
+    .pppoe-runtime-status[data-state="offline"],
+    .pppoe-runtime-status[data-state="unknown"] { background: var(--veer-off-bg); color: var(--veer-muted); }
+    .pppoe-runtime-status[data-state="error"] { background: var(--veer-danger-soft); color: var(--veer-danger); }
+    @media (max-width: 960px) {
       .pppoe-field-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .pppoe-toggle-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
     @media (max-width: 620px) {
-      .pppoe-field-grid, .pppoe-toggle-grid { grid-template-columns: minmax(0, 1fr); }
+      .pppoe-field-grid, .pppoe-field-grid:has(> :nth-child(2):last-child), .pppoe-toggle-grid { grid-template-columns: minmax(0, 1fr); }
       .pppoe-field-grid > :has(.veer-record-picker, .pppoe-profile-picker) { grid-column: auto; }
     }
-    /* End Patchbay grammar overrides */
   </style>
 </head>
 <body>
@@ -479,13 +379,13 @@
       profileKey.classList.add('pppoe-profile-key');
       profileKey.hidden = true;
       const profilePicker = F.h('div', { className: 'pppoe-profile-picker' }, [profileSelect, profileKey]);
-      const iface = input('', 'eth0 / vmbr0 / wan');
+      const iface = mono(input('', 'eth0 / vmbr0 / wan'));
       const macMode = select([
         ['interface', 'Interface MAC'],
         ['random', 'Random persistent MAC'],
         ['manual', 'Manual MAC']
       ]);
-      const macAddress = input('', '02:xx:xx:xx:xx:xx');
+      const macAddress = mono(input('', '02:xx:xx:xx:xx:xx'));
       const username = input('', 'username');
       const password = input('', 'password', 'password');
       const service = input('', 'optional service name');
@@ -511,7 +411,7 @@
       let knownProfileKeys = [];
       const autoRedial = checkbox(true);
       const installTunnel = checkbox(true);
-      const localInterface = input('veerlocal0', 'single local L3 boundary');
+      const localInterface = mono(input('veerlocal0', 'single local L3 boundary'));
       const tunnelMTU = input('1492', '576-1492', 'number');
       const prepareInterfaces = checkbox(true);
       const prepareLocalMTU = checkbox(true);
@@ -539,6 +439,24 @@
           el.appendChild(F.h('option', { text: label, attrs: { value } }));
         });
         return el;
+      }
+
+      function mono(node) {
+        node.classList.add('veer-mono');
+        return node;
+      }
+
+      // Relative time, with the absolute time on hover (DESIGN.md §7).
+      function relativeTime(value) {
+        const at = Date.parse(value || '');
+        if (!Number.isFinite(at)) return { text: value || '—', title: '' };
+        const locale = document.documentElement.lang === 'en-US' ? 'en-US' : 'zh-CN';
+        const seconds = Math.round((at - Date.now()) / 1000);
+        const abs = Math.abs(seconds);
+        const unit = abs < 60 ? [seconds, 'second'] : abs < 3600 ? [Math.round(seconds / 60), 'minute'] : abs < 86400 ? [Math.round(seconds / 3600), 'hour'] : [Math.round(seconds / 86400), 'day'];
+        let text;
+        try { text = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' }).format(unit[0], unit[1]); } catch (e) { text = new Date(at).toLocaleString(locale); }
+        return { text, title: new Date(at).toLocaleString(locale) };
       }
 
       function checkbox(checked) {
@@ -740,28 +658,28 @@
         const active = hasActiveSession(data);
         const failures = keepaliveData ? Number(keepaliveData.keepalive_failures || 0) : 0;
         const threshold = keepaliveData ? Number(keepaliveData.keepalive_failure_threshold || 0) : 0;
-        const phase = keepaliveData && keepaliveData.phase ? keepaliveData.phase : (data.phase || '-');
+        const phase = keepaliveData && keepaliveData.phase ? keepaliveData.phase : (data.phase || '—');
         const updatedAt = keepaliveData && keepaliveData.updated_at ? keepaliveData.updated_at : data.updated_at;
         setRuntimeStatus(runtimeState, runtimeDetail(data, keepaliveData));
         const stats = [
           F.stat(T('stat.connection'), T('runtime.' + runtimeState), runtimeDetail(data, keepaliveData)),
-          F.stat(T('stat.ipv4'), data.ipcp && data.ipcp.address ? data.ipcp.address : '-'),
+          F.stat(T('stat.ipv4'), data.ipcp && data.ipcp.address ? data.ipcp.address : '—'),
           F.stat(T('stat.session'), sessionText(data)),
           F.stat(T('stat.keepalive'), keepaliveText(active, keepaliveData), phase),
-          F.stat(T('stat.failures'), active && keepaliveData ? failures + '/' + (threshold || '-') : '-'),
-          F.stat(T('stat.interface'), data.interface || '-'),
-          F.stat(T('stat.auth'), data.auth_sent ? data.auth_method : (data.auth || '-')),
+          F.stat(T('stat.failures'), active && keepaliveData ? failures + '/' + (threshold || '—') : '—'),
+          F.stat(T('stat.interface'), data.interface || '—'),
+          F.stat(T('stat.auth'), data.auth_sent ? data.auth_method : (data.auth || '—')),
           F.stat(T('stat.ipv6'), ipv6LinkText(data), ipv6LinkDetail(data)),
           F.stat(T('stat.pd'), delegatedPrefix(data)),
-          F.stat(T('stat.tunnel'), data.tunnel && data.tunnel.mode ? data.tunnel.mode : '-',
+          F.stat(T('stat.tunnel'), data.tunnel && data.tunnel.mode ? data.tunnel.mode : '—',
             data.tunnel && data.tunnel.prepared_l2_note ? data.tunnel.prepared_l2_note : ''),
-          F.stat(T('stat.updated'), formatTimestamp(updatedAt), phase)
+          F.stat(T('stat.updated'), relativeTime(updatedAt).text, relativeTime(updatedAt).title)
         ];
         stats.push(...trafficStats(data));
         const redial = redialRecord && redialRecord.data ? redialRecord.data : null;
         if (redial) {
-          stats.push(F.stat(T('stat.lastRedial'), redial.phase || '-', redial.updated_at || ''));
-          stats.push(F.stat(T('stat.redialTrigger'), redial.trigger || '-', redial.error || ''));
+          stats.push(F.stat(T('stat.lastRedial'), redial.phase || '—', redial.updated_at || ''));
+          stats.push(F.stat(T('stat.redialTrigger'), redial.trigger || '—', redial.error || ''));
         }
         stateBody.appendChild(F.h('div', { className: F.classes.grid }, stats));
         if (Array.isArray(data.frames) && data.frames.length) {
@@ -769,9 +687,9 @@
             F.h('h2', { className: F.classes.title, text: T('frames.title') }),
             F.table([T('frames.index'), T('frames.protocol'), T('frames.event'), T('frames.code')], data.frames.map((frame, index) => [
               index + 1,
-              frame.protocol || '-',
-              frame.event || '-',
-              frame.code == null ? '-' : frame.code
+              frame.protocol || '—',
+              frame.event || '—',
+              frame.code == null ? '—' : frame.code
             ]))
           ]));
         }
@@ -781,7 +699,7 @@
             F.table([T('tags.type'), T('tags.bytes'), T('tags.text')], data.tags.map((tag) => [
               tag.type,
               tag.bytes,
-              tag.text || '-'
+              tag.text || '—'
             ]))
           ]));
         }
@@ -825,8 +743,8 @@
         if (trafficView.session_id && session.session_id && trafficView.session_id !== Number(session.session_id)) return [];
         if (trafficView.profile_key && session.profile_key && trafficView.profile_key !== String(session.profile_key)) return [];
         return [
-          F.stat(T('stat.rxRate'), trafficView.rx_rate == null ? '-' : formatRate(trafficView.rx_rate)),
-          F.stat(T('stat.txRate'), trafficView.tx_rate == null ? '-' : formatRate(trafficView.tx_rate)),
+          F.stat(T('stat.rxRate'), trafficView.rx_rate == null ? '—' : formatRate(trafficView.rx_rate)),
+          F.stat(T('stat.txRate'), trafficView.tx_rate == null ? '—' : formatRate(trafficView.tx_rate)),
           F.stat(T('stat.rxTotal'), formatBytes(trafficView.rx_bytes), T('traffic.packets', { count: formatCount(trafficView.rx_packets) })),
           F.stat(T('stat.txTotal'), formatBytes(trafficView.tx_bytes), T('traffic.packets', { count: formatCount(trafficView.tx_packets) }))
         ];
@@ -904,20 +822,20 @@
       }
 
       function keepaliveText(active, keepalive) {
-        if (!active) return '-';
+        if (!active) return '—';
         if (!keepalive) return T('value.waiting');
         const phase = String(keepalive.phase || '').toLowerCase();
         if (phase === 'keepalive_ok' || phase === 'redial_ok') return T('value.ok');
         if (['redial_wait', 'redialing', 'redial_retry'].includes(phase)) return T('value.redialing');
         const failures = Number(keepalive.keepalive_failures || 0);
         const threshold = Number(keepalive.keepalive_failure_threshold || 0);
-        return failures ? failures + '/' + (threshold || '-') : (keepalive.phase || '-');
+        return failures ? failures + '/' + (threshold || '—') : (keepalive.phase || '—');
       }
 
       function sessionText(data) {
         if (data.session_id_hex) return '0x' + data.session_id_hex;
         const id = Number(data.session_id || 0);
-        return id ? '0x' + id.toString(16) : '-';
+        return id ? '0x' + id.toString(16) : '—';
       }
 
       function ipv6LinkText(data) {
@@ -925,7 +843,7 @@
         const ra = data && data.ipv6_ra ? data.ipv6_ra : {};
         const dhcpv6 = data && data.dhcpv6_pd ? data.dhcpv6_pd : {};
         const addresses = Array.isArray(dhcpv6.addresses) ? dhcpv6.addresses : [];
-        return dhcpv6.address || addresses[0] && addresses[0].address || ra.address || ipv6cp.link_local || ipv6cp.phase || '-';
+        return dhcpv6.address || addresses[0] && addresses[0].address || ra.address || ipv6cp.link_local || ipv6cp.phase || '—';
       }
 
       function ipv6LinkDetail(data) {
@@ -952,13 +870,13 @@
         const pd = data && data.dhcpv6_pd ? data.dhcpv6_pd : {};
         if (pd.prefix) return pd.prefix;
         if (Array.isArray(pd.prefixes) && pd.prefixes.length) {
-          return pd.prefixes[0] && pd.prefixes[0].prefix || '-';
+          return pd.prefixes[0] && pd.prefixes[0].prefix || '—';
         }
-        return '-';
+        return '—';
       }
 
       function formatTimestamp(value) {
-        if (!value) return '-';
+        if (!value) return '—';
         const date = new Date(value);
         if (Number.isNaN(date.getTime())) return String(value);
         return date.toLocaleString(F.locale === 'en-US' ? 'en-US' : 'zh-CN', {
@@ -1338,7 +1256,7 @@
       }
 
       function preparationSummary(prep) {
-        if (!prep || !prep.enabled) return '-';
+        if (!prep || !prep.enabled) return '—';
         const mtu = Array.isArray(prep.mtu) ? prep.mtu.length : 0;
         const gso = Array.isArray(prep.gso) ? prep.gso.length : 0;
         const offloads = Array.isArray(prep.offloads) ? prep.offloads.length : 0;

@@ -5,59 +5,23 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>WAN Core</title>
   <style>
-    .wan-page { padding: 20px; }
-    .wan-config-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 10px;
-      align-items: end;
-    }
-    .wan-actions { justify-content: flex-end; gap: 8px; }
-    .wan-advanced {
-      padding-top: 2px;
-      border-top: 1px solid var(--veer-border);
-    }
-    .wan-advanced > summary {
-      cursor: pointer;
-      color: var(--veer-muted);
-      font-size: var(--veer-fs-sm);
-      font-weight: 600;
-    }
-    .wan-advanced-body { display: grid; gap: 12px; padding-top: 10px; }
-    .wan-toggle-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-      gap: 8px;
-    }
-    .wan-toggle {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      min-height: 32px;
-      padding: 5px 8px;
-      border: 1px solid var(--veer-border);
-      border-radius: var(--veer-radius);
-      color: var(--veer-muted);
-      font-size: var(--veer-fs-xs);
-      font-weight: 600;
-    }
-    .wan-toggle .veer-input { flex: 0 0 auto; }
-    .wan-effective { display: grid; gap: 9px; }
-    .wan-effective-title {
-      margin: 0;
-      color: var(--veer-muted);
-      font-size: var(--veer-fs-xs);
-      font-weight: 600;
-    }
-    .wan-addresses { display: flex; flex-wrap: wrap; gap: 6px; }
+    /* WAN Core */
+    .wan-config-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; align-items: end; }
+    .wan-config-grid > :has(.veer-record-picker) { grid-column: span 2; }
+    .wan-advanced-body { display: grid; gap: 16px; padding-top: 4px; }
+    /* Settings applied on save: checkbox, then its label. */
+    .wan-toggle-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px 16px; }
+    .wan-toggle { display: flex; align-items: center; gap: 8px; min-height: 32px; color: var(--veer-text); font-size: var(--veer-fs-md); cursor: pointer; }
+    .wan-effective { display: grid; gap: 8px; }
+    .wan-effective-title { margin: 0; color: var(--veer-muted); font-size: var(--veer-fs-xs); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+    .wan-addresses { display: flex; flex-wrap: wrap; gap: 8px; }
     .wan-route-wrap { overflow-x: auto; }
-    @media (max-width: 760px) {
-      .wan-config-grid { grid-template-columns: 1fr; }
-      .wan-actions .veer-button { flex: 1 1 auto; }
+    /* Route rows hold addresses and interface names. */
+    .veer-collection-row .veer-input { font-family: var(--veer-mono); }
+    @media (max-width: 720px) {
+      .wan-config-grid { grid-template-columns: minmax(0, 1fr); }
+      .wan-config-grid > :has(.veer-record-picker) { grid-column: auto; }
     }
-    /* Patchbay grammar overrides */
-    .wan-page { padding: 0 0 4px; }
-    /* End Patchbay grammar overrides */
   </style>
 </head>
 <body>
@@ -270,6 +234,22 @@
       }
       function textNode(tag, opts, key, params) { return bindText(F.h(tag, opts || {}), key, params); }
       function i18nButton(key, handler, secondary) { return bindText(F.button(T(key), handler, secondary), key); }
+      function mono(node) {
+        node.classList.add('veer-mono');
+        return node;
+      }
+      // Relative time, with the absolute time on hover (DESIGN.md §7).
+      function timeStat(label, value) {
+        const at = Date.parse(value || '');
+        if (!Number.isFinite(at)) return F.stat(label, value || '—');
+        const locale = document.documentElement.lang === 'en-US' ? 'en-US' : 'zh-CN';
+        const seconds = Math.round((at - Date.now()) / 1000);
+        const abs = Math.abs(seconds);
+        const unit = abs < 60 ? [seconds, 'second'] : abs < 3600 ? [Math.round(seconds / 60), 'minute'] : abs < 86400 ? [Math.round(seconds / 3600), 'hour'] : [Math.round(seconds / 86400), 'day'];
+        let text;
+        try { text = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' }).format(unit[0], unit[1]); } catch (e) { text = new Date(at).toLocaleString(locale); }
+        return F.stat(label, text, new Date(at).toLocaleString(locale));
+      }
       function input(value, placeholder, type) {
         return F.h('input', { className: F.classes.input, attrs: { type: type || 'text', value, placeholder } });
       }
@@ -365,10 +345,10 @@
         newPlaceholder: function () { return T('profile.newPlaceholder'); },
         defaultKey: 'default'
       });
-      const localInterface = input('veerlocal0', 'veerlocal0');
+      const localInterface = mono(input('veerlocal0', 'veerlocal0'));
       const mtu = input('1492', '1492', 'number');
       const addresses = F.h('textarea', {
-        className: F.classes.input,
+        className: F.classes.input + ' veer-mono',
         attrs: { rows: '3', placeholder: '198.51.100.2/32\n2001:db8::2/128' }
       });
       const installDefaultV4 = checkbox(false);
@@ -616,17 +596,17 @@
         }
         const veerCore = data.veer_core || {};
         stateBody.appendChild(F.h('div', { className: F.classes.grid }, [
-          F.stat(T('stat.phase'), data.phase || data.state || '-'),
-          F.stat(T('stat.driver'), data.driver || '-'),
+          F.stat(T('stat.phase'), data.phase || data.state || '—'),
+          F.stat(T('stat.driver'), data.driver || '—'),
           F.stat(T('stat.usable'), data.usable === true ? T('value.yes') : T('value.no')),
-          F.stat(T('stat.physical'), data.real_interface || data.physical_interface || '-'),
-          F.stat(T('stat.local'), (data.local_interface || '-') + (data.local_ifindex ? ' #' + data.local_ifindex : '')),
-          F.stat(T('stat.parent'), veerCore.parent_interface || data.veer_parent_interface || '-'),
-          F.stat(T('stat.ipv4'), data.ipv4 || '-'),
-          F.stat(T('stat.ipv6'), data.ipv6 || data.ipv6_link_local || '-', [data.ipv6_link_local, data.ipv6_gateway].filter(Boolean).join(' / ')),
-          F.stat(T('stat.pd'), data.pd_prefix || '-'),
-          F.stat(T('stat.routes'), Array.isArray(data.routes) ? data.routes.length : (data.route_count == null ? '-' : data.route_count)),
-          F.stat(T('stat.updated'), data.updated_at || '-')
+          F.stat(T('stat.physical'), data.real_interface || data.physical_interface || '—'),
+          F.stat(T('stat.local'), (data.local_interface || '—') + (data.local_ifindex ? ' #' + data.local_ifindex : '')),
+          F.stat(T('stat.parent'), veerCore.parent_interface || data.veer_parent_interface || '—'),
+          F.stat(T('stat.ipv4'), data.ipv4 || '—'),
+          F.stat(T('stat.ipv6'), data.ipv6 || data.ipv6_link_local || '—', [data.ipv6_link_local, data.ipv6_gateway].filter(Boolean).join(' / ')),
+          F.stat(T('stat.pd'), data.pd_prefix || '—'),
+          F.stat(T('stat.routes'), Array.isArray(data.routes) ? data.routes.length : (data.route_count == null ? '—' : data.route_count)),
+          timeStat(T('stat.updated'), data.updated_at)
         ]));
         const addressBlock = renderEffectiveList('effective.addresses', data.addresses || [data.ipv4, data.ipv6, data.ipv6_link_local]);
         const routeBlock = renderRoutes(data.routes);

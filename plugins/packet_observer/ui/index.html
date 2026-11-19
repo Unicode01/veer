@@ -4,6 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Packet Observer</title>
+  <style>
+    /* Packet Observer */
+    .veer-card > .veer-grid:has(> .veer-field) { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; align-items: end; }
+    .veer-card .veer-stack > .veer-card {
+      padding: 12px 16px; border: 1px solid var(--veer-border); border-radius: var(--veer-radius);
+      background: var(--veer-surface-soft);
+    }
+    .veer-card .veer-stack > .veer-card + .veer-card { padding-top: 12px; border-top: 1px solid var(--veer-border); }
+  </style>
 </head>
 <body>
   <script>
@@ -212,11 +221,11 @@
         attrs: { type: 'text', value: 'sample' }
       }), 'placeholder', 'placeholder.name');
       const keyInput = bindAttr(F.h('input', {
-        className: F.classes.input,
+        className: F.classes.input + ' veer-mono',
         attrs: { type: 'text', value: '01020304' }
       }), 'placeholder', 'placeholder.key');
       const valueInput = bindAttr(F.h('input', {
-        className: F.classes.input,
+        className: F.classes.input + ' veer-mono',
         attrs: { type: 'text', value: '1112131415161718' }
       }), 'placeholder', 'placeholder.value');
       F.onLocaleChange(refreshI18n);
@@ -231,7 +240,7 @@
           textNode('span', { className: F.classes.statLabel }, labelKey),
           valueIsKey
             ? textNode('span', { className: F.classes.statValue }, value)
-            : F.h('span', { className: F.classes.statValue, text: value == null || value === '' ? '-' : String(value) })
+            : F.h('span', { className: F.classes.statValue, text: value == null || value === '' ? '—' : String(value) })
         ]);
         if (detailKey) bindAttr(node, 'title', detailKey);
         return node;
@@ -280,8 +289,8 @@
               F.h('div', null, [
                 F.h('strong', { text: data.name || record.key }),
                 F.h('p', {
-                  className: F.classes.description,
-                  text: T('records.kv', { key: data.key_hex || '-', value: data.value_hex || '-' })
+                  className: F.classes.description + ' veer-mono',
+                  text: T('records.kv', { key: data.key_hex || '—', value: data.value_hex || '—' })
                 })
               ]),
               F.h('div', { className: F.classes.toolbar }, [

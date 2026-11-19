@@ -593,6 +593,8 @@ async function saveProfile() {
 
 插件 UI 使用 TypeScript 或 `// @ts-check` 时可引用 `sdk/plugin/webui.d.ts`，其中包含 `window.VeerPluginHost`、RPC 错误、record picker 和 collection editor 类型。
 
+宿主注入的基础样式（`plugins.js` 的 `pluginHostComponentCSS()`，规范见 [docs/ui/DESIGN.md](ui/DESIGN.md) 第 6 节）同时给出页面骨架：顶部说明、KPI 条（发丝线分隔，不画卡片）、卡片标题与页脚操作栏、复选框、空状态、`.veer-route` / `.veer-port` 跳线，以及 680px 以下把 `.veer-table` 每行堆叠成卡片（`host.table()` 给单元格加 `data-label`；自建表格可给状态、操作单元格加 `veer-cell-status`、`veer-cell-actions`）。地址、端口、接口名和 MAC 的输入框与文字加 `veer-mono`。插件页面只写自己特有的样式；在较旧的宿主上这些骨架样式缺失，页面仍可用，只是排版回到旧样式。
+
 可用 helper：
 
 - `VeerPluginHost.locale`

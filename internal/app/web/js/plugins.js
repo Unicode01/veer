@@ -1806,6 +1806,107 @@ select.veer-input {
   .veer-toolbar { align-items: flex-start; }
   .veer-collection-field.wide { grid-column: span 1; }
 }
+/* Page layout shared by every plugin page (docs/ui/DESIGN.md §5, §6). */
+.veer-page [hidden] { display: none !important; }
+.veer-page > .veer-stack { gap: 20px; }
+.veer-context > .veer-toolbar { align-items: center; justify-content: space-between; gap: 8px 16px; }
+.veer-context .veer-desc { max-width: 84ch; line-height: 1.6; }
+/* KPI strip (§5.6): not a card; hairlines above and below, dividers between items. */
+.veer-page > .veer-stack > .veer-grid:has(> .veer-stat) {
+  grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr);
+  gap: 0; padding: 12px 0; border-top: 1px solid var(--veer-border); border-bottom: 1px solid var(--veer-border);
+}
+.veer-page > .veer-stack > .veer-grid > .veer-stat { padding: 0 16px; border-left: 1px solid var(--veer-border); }
+.veer-page > .veer-stack > .veer-grid > .veer-stat:first-child { padding-left: 0; border-left: 0; }
+.veer-page > .veer-stack > .veer-grid .veer-stat-value { font-size: var(--veer-fs-lg); }
+/* Values are addresses, interfaces and numbers: monospace, and never cut off. */
+.veer-stat-value {
+  font-family: var(--veer-mono); font-weight: 500; font-variant-numeric: tabular-nums;
+  white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere;
+}
+.veer-mono, .veer-input.veer-mono { font-family: var(--veer-mono); font-variant-numeric: tabular-nums; }
+/* Cards: a heading (title and one line of description), content, then a footer of actions. */
+.veer-card > * + * { margin-top: 16px; }
+.veer-card > .veer-title:first-child, .veer-card > .veer-toolbar:first-child { padding-bottom: 0; border-bottom: 0; }
+.veer-card > .veer-toolbar:first-child > div:first-child { flex: 1 1 260px; min-width: 0; }
+.veer-card > .veer-title:first-child + .veer-desc, .veer-card > .veer-toolbar:first-child .veer-desc { margin-top: 4px; }
+.veer-card > .veer-toolbar:first-child + *, .veer-card > .veer-title:first-child + .veer-desc + * { margin-top: 20px; }
+.veer-card > .veer-toolbar:last-child:not(:first-child) {
+  justify-content: flex-end; gap: 8px; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--veer-border);
+}
+.veer-section-title { margin: 0; }
+.veer-record-picker { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.veer-record-picker:has(> [hidden]) { grid-template-columns: minmax(0, 1fr); }
+textarea.veer-input { min-height: 88px; line-height: 1.6; }
+/* An empty result reads as a dashed box, not a stray line. */
+.veer-card .veer-stack > .veer-desc:only-child {
+  padding: 16px; border: 1px dashed var(--veer-border-strong); border-radius: var(--veer-radius); text-align: center;
+}
+/* Checkboxes (§6.3): settings that take effect on save use a plain checkbox. */
+.veer-input[type="checkbox"] {
+  width: 16px; min-width: 16px; height: 16px; min-height: 16px; margin: 0; padding: 0; flex: 0 0 auto;
+  border: 1px solid var(--veer-border-strong); border-radius: var(--veer-radius-sm); background: var(--veer-surface);
+}
+.veer-input[type="checkbox"]::before {
+  top: 1px; left: 4px; width: 5px; height: 9px; border: solid var(--veer-on-primary); border-width: 0 2px 2px 0;
+  border-radius: 0; background: transparent; transform: rotate(45deg) scale(0); transition: transform .12s ease;
+}
+.veer-input[type="checkbox"]:checked { border-color: var(--veer-primary); background: var(--veer-primary); }
+.veer-input[type="checkbox"]:checked::before { background: transparent; transform: rotate(45deg) scale(1); }
+.veer-input[type="checkbox"]:focus { background: var(--veer-surface); box-shadow: none; }
+.veer-input[type="checkbox"]:checked:focus { background: var(--veer-primary); }
+.veer-input[type="checkbox"]:focus-visible { outline: 2px solid var(--veer-muted); outline-offset: 2px; }
+.veer-input[type="checkbox"]:disabled { opacity: .45; cursor: not-allowed; }
+/* Routes (§5.1): port labels joined by a cable; set --veer-cable for its color. */
+.veer-route { gap: 8px 0; }
+.veer-port {
+  display: inline-flex; align-items: baseline; min-width: 0; padding: 4px 8px;
+  border: 1px solid var(--veer-border-strong); border-radius: var(--veer-radius-sm); background: var(--veer-surface-soft);
+  color: var(--veer-muted); font: 400 var(--veer-fs-sm)/1.5 var(--veer-mono);
+}
+.veer-route > .veer-port + .veer-port { position: relative; margin-left: 36px; }
+.veer-route > .veer-port + .veer-port::before {
+  position: absolute; top: 50%; left: -32px; width: 28px; height: 2px; margin-top: -1px;
+  background: var(--veer-cable, var(--veer-f-blue)); content: "";
+}
+.veer-route > .veer-port + .veer-port::after {
+  position: absolute; top: 50%; left: -9px; margin-top: -3px; border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent; border-left: 5px solid var(--veer-cable, var(--veer-f-blue)); content: "";
+}
+/* Tables keep cells on one line; their container scrolls. */
+.veer-table { min-width: 100%; }
+.veer-table th, .veer-table td { white-space: nowrap; }
+.veer-table td { overflow-wrap: normal; word-break: normal; }
+div:has(> .veer-table) { max-width: 100%; overflow-x: auto; }
+@media (max-width: 859px) {
+  .veer-page > .veer-stack > .veer-grid:has(> .veer-stat) { grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 12px; }
+  .veer-page > .veer-stack > .veer-grid > .veer-stat:nth-child(odd) { padding-left: 0; border-left: 0; }
+}
+@media (max-width: 720px) {
+  .veer-card > .veer-toolbar:last-child:not(:first-child) .veer-button { flex: 1 1 calc(50% - 4px); }
+  .veer-record-picker { grid-template-columns: minmax(0, 1fr); }
+}
+/* Below 680px a table becomes stacked cards (§3.1): the first cell and the status
+   cell head the card, the labelled cells follow, the actions close it. */
+@media (max-width: 679px) {
+  div:has(> .veer-table) { overflow-x: visible; }
+  .veer-table, .veer-table tbody { display: block; min-width: 0; }
+  .veer-table thead { display: none; }
+  .veer-table tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; padding: 12px 0; border-bottom: 1px solid var(--veer-border); }
+  .veer-table tbody tr:last-child { border-bottom: 0; }
+  .veer-table tbody tr:hover td { background: transparent; }
+  .veer-table td {
+    display: grid; grid-template-columns: minmax(88px, 36%) minmax(0, 1fr); gap: 8px; grid-column: 1 / -1;
+    padding: 0; border: 0; white-space: normal; overflow-wrap: anywhere;
+  }
+  .veer-table td::before { color: var(--veer-muted); content: attr(data-label); font-size: var(--veer-fs-xs); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+  .veer-table td:not([data-label]), .veer-table td[data-label=""] { display: block; }
+  .veer-table td:not([data-label])::before, .veer-table td[data-label=""]::before,
+  .veer-table td:first-child::before, .veer-table td.veer-cell-status::before, .veer-table td.veer-cell-actions::before { content: none; }
+  .veer-table td:first-child { display: block; grid-row: 1; grid-column: 1; font-weight: 600; }
+  .veer-table td.veer-cell-status { display: block; grid-row: 1; grid-column: 2; justify-self: end; }
+  .veer-table td.veer-cell-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+}
 `;  }
 
   function pluginHostComponentJS(plugin) {
@@ -1871,7 +1972,10 @@ select.veer-input {
         badge: 'veer-badge',
         table: 'veer-table',
         field: 'veer-field',
-        input: 'veer-input'
+        input: 'veer-input',
+        mono: 'veer-mono',
+        cellStatus: 'veer-cell-status',
+        cellActions: 'veer-cell-actions'
       }
     };
     return `
@@ -1898,7 +2002,7 @@ select.veer-input {
     });
   }
   function tableCell(tag, text) {
-    return host.h(tag, { text: text == null || text === '' ? '-' : String(text) });
+    return host.h(tag, { text: text == null || text === '' ? '—' : String(text) });
   }
   function normalizeLocale(locale) {
     return locale === 'en-US' ? 'en-US' : 'zh-CN';
@@ -2258,14 +2362,20 @@ select.veer-input {
   host.stat = function (label, value, detail) {
     return host.h('div', { className: host.classes.stat, title: detail || '' }, [
       host.h('span', { className: host.classes.statLabel, text: label }),
-      host.h('span', { className: host.classes.statValue, text: value == null || value === '' ? '-' : String(value) })
+      host.h('span', { className: host.classes.statValue, text: value == null || value === '' ? '—' : String(value) })
     ]);
   };
   host.table = function (headers, rows) {
+    var labels = (headers || []).map(function (header) { return header == null ? '' : String(header); });
     return host.h('table', { className: host.classes.table }, [
-      host.h('thead', null, host.h('tr', null, (headers || []).map(function (header) { return tableCell('th', header); }))),
+      host.h('thead', null, host.h('tr', null, labels.map(function (header) { return tableCell('th', header); }))),
       host.h('tbody', null, (rows || []).map(function (row) {
-        return host.h('tr', null, (row || []).map(function (cell) { return tableCell('td', cell); }));
+        return host.h('tr', null, (row || []).map(function (cell, index) {
+          var node = tableCell('td', cell);
+          // A narrow page stacks each row into a card and labels its cells.
+          if (labels[index]) node.setAttribute('data-label', labels[index]);
+          return node;
+        }));
       }))
     ]);
   };
