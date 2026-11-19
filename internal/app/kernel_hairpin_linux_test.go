@@ -79,11 +79,13 @@ func TestBuildKernelHairpinEntriesListsHostForwardsForEgressNATGuests(t *testing
 	if len(notes) != 0 {
 		t.Fatalf("notes = %v, want none", notes)
 	}
+	wantValue := forward.value
+	wantValue.HairpinInIfIndex = 10
 	want := map[tcHairpinKeyV4]tcRuleValueV4{
-		{DstAddr: public, DstPort: 65001, Proto: unix.IPPROTO_TCP}: forward.value,
+		{DstAddr: public, DstPort: 65001, Proto: unix.IPPROTO_TCP}: wantValue,
 	}
 	if !reflect.DeepEqual(entries, want) {
-		t.Fatalf("entries = %+v, want only the full NAT forward %+v", entries, want)
+		t.Fatalf("entries = %+v, want only the full NAT forward %+v, naming its inbound interface", entries, want)
 	}
 }
 

@@ -169,7 +169,7 @@ func TestLoopbackAccessMatrix(t *testing.T) {
 		rule("uplink->host addr transparent kernel", up, upIP, kernel, true, br, brIP, "", "", ""),
 		rule("uplink->host addr fullnat userspace", up, upIP, user, false, br, brIP, "", user, everyone),
 		rule("NAT bridge->guest fullnat kernel", br, brIP, kernel, false, br, guest, guestServerNS, kernel, "guest=198.18.0.1 external- host-"),
-		rule("NAT bridge->guest transparent kernel", br, brIP, kernel, true, br, guest, guestServerNS, kernel, "guest=198.18.0.1 external- host-"),
+		rule("NAT bridge->guest transparent kernel", br, brIP, kernel, true, br, guest, guestServerNS, kernel, "guest=198.18.0.2 external- host-"),
 		rule("NAT bridge->guest transparent userspace", br, brIP, user, true, br, guest, guestServerNS, user, "guest=198.18.0.1 external=198.19.0.2 host+"),
 		rule("plain bridge->guest fullnat kernel", plainBridge, plainIP, kernel, false, plainBridge, plainServer, plainServerNS, kernel, "plain=198.21.0.1 external- host-"),
 		rule("plain bridge->guest transparent kernel", plainBridge, plainIP, kernel, true, plainBridge, plainServer, plainServerNS, kernel, "plain=198.21.0.2 external- host-"),

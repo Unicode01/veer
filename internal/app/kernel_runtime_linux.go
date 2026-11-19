@@ -215,8 +215,10 @@ type tcRuleValueV4 struct {
 	DstMAC       [6]byte
 	EgressSrcMAC [6]byte
 	EgressDstMAC [6]byte
-	Pad          uint32
-	Revision     uint64
+	// HairpinInIfIndex is set in hairpin_v4 entries only: the forward's
+	// inbound interface, whose own guests reach it without hairpin.
+	HairpinInIfIndex uint32
+	Revision         uint64
 }
 
 type kernelLocalMACValue struct {

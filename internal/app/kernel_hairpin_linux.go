@@ -39,8 +39,10 @@ type tcHairpinAddrsV4 struct {
 // non-transparent one would use on its outbound interface, so the backend
 // answers through this host and not straight back to a neighbour on its own
 // network. A forward on any address of its inbound interface is listed under
-// each IPv4 address the interface has. Without egress NAT there is nothing to
-// hairpin from, and the list is empty.
+// each IPv4 address the interface has. Each entry names the forward's inbound
+// interface: guests on it, or on a port of it, reach the forward by the usual
+// path and are left to it. Without egress NAT there is nothing to hairpin
+// from, and the list is empty.
 //
 // sourceOf returns the source address a non-transparent forward would use for
 // item, and addrsOf an interface's IPv4 addresses, both in host order. The
@@ -84,6 +86,7 @@ func buildKernelHairpinEntries(prepared []preparedKernelRule, sourceOf func(item
 			value.NATAddr = natAddr
 			value.Flags |= kernelRuleFlagFullNAT
 		}
+		value.HairpinInIfIndex = uint32(item.inIfIndex)
 		addrs := []uint32{item.key.DstAddr}
 		if item.key.DstAddr == 0 {
 			addrs = addrsOf(item.inIfIndex)
