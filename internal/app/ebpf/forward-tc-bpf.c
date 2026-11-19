@@ -5552,13 +5552,18 @@ static __always_inline int handle_egress_nat_forward(struct __sk_buff *skb, cons
 	return handle_egress_nat_forward_non_full_cone(skb, ctx, rule);
 }
 
+/*
+ * Where a reply leaves: the interface the flow came in by, or its bridge when
+ * that is a bridge port. A port has no route of its own, so the FIB finds
+ * nothing through it and a neighbour lookup there never resolves; the bridge
+ * forwards to the port. Egress NAT flows come in by ports, and so do hairpin
+ * flows of a guest behind a port-scoped egress NAT rule.
+ */
 static __always_inline __u32 resolve_reply_redirect_ifindex(const struct flow_value_v4 *reply_value)
 {
 	if (!reply_value)
 		return 0;
-	if ((reply_value->flags & FORWARD_FLOW_FLAG_EGRESS_NAT) != 0)
-		return resolve_parent_ifindex(reply_value->in_ifindex);
-	return reply_value->in_ifindex;
+	return resolve_parent_ifindex(reply_value->in_ifindex);
 }
 
 /*

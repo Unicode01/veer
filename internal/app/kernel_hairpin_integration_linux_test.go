@@ -110,6 +110,10 @@ func TestKernelTCHairpinReachesForwardFromGuest(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			topology := setupEgressNATIntegrationTopology(t)
 			seedEgressNATIntegrationNeighbor(t, topology)
+			// The egress NAT rule covers the guest's bridge port only, as a
+			// per-guest rule does. A host has no neighbour entries on bridge
+			// ports: replies to the guest must go out by the bridge.
+			mustRunDataplanePerfCmd(t, "ip", "neigh", "del", egressNATClientAddr, "dev", topology.ChildHostIF)
 			serverNS := setupHairpinIntegrationServer(t, topology)
 
 			rt := newTCKernelRuleRuntime(&Config{})
