@@ -1325,8 +1325,10 @@ func (h *pluginControlHost) netLinkSetGSO(call goja.FunctionCall) goja.Value {
 			h.throwf("net.link.setGSO: unsupported limit %q", key)
 		}
 	}
-	maxSize := int(obj.Get("max_size").ToInteger())
-	maxSegs := int(obj.Get("max_segs").ToInteger())
+	// A limit left out reads as zero and fails the range check below; a bare
+	// obj.Get would hand back nil and panic in Go.
+	maxSize := int(h.objectField(obj, "max_size").ToInteger())
+	maxSegs := int(h.objectField(obj, "max_segs").ToInteger())
 	if maxSize < 576 || maxSize > 65536 {
 		h.throwf("net.link.setGSO: max_size must be between 576 and 65536")
 	}
