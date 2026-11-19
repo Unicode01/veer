@@ -658,6 +658,7 @@ type linuxKernelRuleRuntime struct {
 	memlockErr                   error
 	coll                         *ebpf.Collection
 	attachments                  []kernelAttachment
+	bridgeNeighbors              bridgeNeighborKeepalive
 	preparedRules                []preparedKernelRule
 	attachmentRuleSets           kernelAttachmentRuleSets
 	attachmentMode               kernelTCAttachmentProgramMode
@@ -1786,8 +1787,22 @@ func (rt *linuxKernelRuleRuntime) SnapshotStats() (kernelRuleStatsSnapshot, erro
 	return snapshotKernelStatsFromMap(statsMap, corrections)
 }
 
+// attachedLinkIndexes lists the interfaces the programs are attached to.
+func (rt *linuxKernelRuleRuntime) attachedLinkIndexes() []int {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	out := make([]int, 0, len(rt.attachments))
+	for _, att := range rt.attachments {
+		if key, ok := att.key(); ok {
+			out = append(out, key.linkIndex)
+		}
+	}
+	return out
+}
+
 func (rt *linuxKernelRuleRuntime) Maintain() error {
 	startedAt := time.Now()
+	rt.bridgeNeighbors.maybeRun(startedAt, rt.attachedLinkIndexes)
 	rt.mu.Lock()
 	rt.expireDeferredFlowRulesLocked(startedAt)
 	rt.checkBridgePathHoldsLocked()

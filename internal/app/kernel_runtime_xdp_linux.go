@@ -196,6 +196,7 @@ type xdpKernelRuleRuntime struct {
 	memlockErr         error
 	coll               *ebpf.Collection
 	attachments        []xdpAttachment
+	bridgeNeighbors    bridgeNeighborKeepalive
 	preparedRules      []preparedXDPKernelRule
 	programID          uint32
 	prepareOptions     xdpPrepareOptions
@@ -1044,8 +1045,20 @@ func (rt *xdpKernelRuleRuntime) SnapshotStats() (kernelRuleStatsSnapshot, error)
 	return snapshotKernelStatsFromMap(statsMap, corrections)
 }
 
+// attachedLinkIndexes lists the interfaces the program is attached to.
+func (rt *xdpKernelRuleRuntime) attachedLinkIndexes() []int {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	out := make([]int, 0, len(rt.attachments))
+	for _, att := range rt.attachments {
+		out = append(out, att.ifindex)
+	}
+	return out
+}
+
 func (rt *xdpKernelRuleRuntime) Maintain() error {
 	startedAt := time.Now()
+	rt.bridgeNeighbors.maybeRun(startedAt, rt.attachedLinkIndexes)
 	rt.mu.Lock()
 	rt.expireDeferredFlowRulesLocked(startedAt)
 	pendingFlowPurgeDeleted, pendingFlowPurgeErr := rt.retryPendingFlowPurgesLocked()
