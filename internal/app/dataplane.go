@@ -289,6 +289,7 @@ type ruleDataplanePlanner struct {
 	defaultEngine           string
 	kernelAvailable         bool
 	kernelUnavailableReason string
+	hostAddrs               hostInterfaceAddrs
 }
 
 func newRuleDataplanePlanner(kernelRuntime kernelRuleRuntime, defaultEngine string) *ruleDataplanePlanner {
@@ -325,6 +326,7 @@ func newRuleDataplanePlanner(kernelRuntime kernelRuleRuntime, defaultEngine stri
 		kernel:                  kernel,
 		kernelAvailable:         available,
 		kernelUnavailableReason: reason,
+		hostAddrs:               hostAddrs,
 	}
 }
 
@@ -340,6 +342,9 @@ func (p *ruleDataplanePlanner) planWithPreferredAndKernelReason(rule Rule, prefe
 	}
 
 	kernelEligible := false
+	if kernelReason == "" {
+		kernelReason = kernelLocalBackendReason(rule, p.hostAddrs)
+	}
 	if kernelReason == "" {
 		kernelEligible, kernelReason = p.kernel.SupportsRule(rule)
 	}
@@ -369,6 +374,36 @@ func (p *ruleDataplanePlanner) planWithPreferredAndKernelReason(rule Rule, prefe
 	plan.TransientFallback = kernelTransientFallbackMetadataForRule(rule, plan.FallbackReason)
 
 	return plan
+}
+
+const kernelLocalBackendFallbackReason = "kernel dataplane does not forward to an address of this host; user space connects to the local service"
+
+// kernelLocalBackendReason keeps forwards whose backend is this host itself (a
+// loopback address or an address of one of its interfaces) out of the kernel
+// paths: they hand a packet to a next hop, so one addressed to the host would
+// leave by an interface and never reach the local service. User space connects
+// to it directly.
+func kernelLocalBackendReason(rule Rule, hostAddrs hostInterfaceAddrs) string {
+	if isKernelEgressNATRule(rule) || isKernelEgressNATPassthroughRule(rule) {
+		return ""
+	}
+	if forwardBackendIsLocal(rule.OutIP, hostAddrs) {
+		return kernelLocalBackendFallbackReason
+	}
+	return ""
+}
+
+// forwardBackendIsLocal reports whether backend is a loopback address or an
+// address of an interface of this host.
+func forwardBackendIsLocal(backend string, hostAddrs hostInterfaceAddrs) bool {
+	ip := parseIPLiteral(strings.TrimSpace(backend))
+	if ip == nil || ip.IsUnspecified() {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	return hostHasIP(hostAddrs, "", canonicalIPLiteral(ip))
 }
 
 func kernelRuleFamilyFallbackReason(rule Rule) string {

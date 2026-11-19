@@ -1051,6 +1051,8 @@ curl -fsS -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8080/debug/pprof/g
 - 省略 `engine_preference` 时默认 `auto`
 - 创建后默认 `enabled = true`
 - `transparent = true` 时必须省略 `out_source_ip`
+- `transparent = true` 时 `out_ip` 不能是宿主自己的地址（`127.0.0.0/8` 或宿主网卡上的地址）
+- `out_ip` 是宿主自己的地址时规则由用户态转发，不走内核，`fallback_reason` 说明原因
 - IPv6 规则可创建，但当前透明路径和内核接入条件仍主要按 IPv4 约束理解
 
 ### 2.3 更新规则
@@ -1163,6 +1165,7 @@ curl -fsS -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8080/debug/pprof/g
 - QUIC 路由支持 v1/v2 Initial SNI；Veer 原样转发数据报，不终止 TLS。ECH、连接迁移，以及同一客户端端点复用多条连接时的未知 CID 轮换当前不保证可用
 - `listen_ip` 为空时默认 `0.0.0.0`
 - `transparent = true` 时必须省略 `backend_source_ip`
+- `transparent = true` 时 `backend_ip` 不能是宿主自己的地址（`127.0.0.0/8` 或宿主网卡上的地址）
 - 创建后默认 `enabled = true`
 - IPv6 站点监听和回源可走普通共享代理路径；透明模式仍限 IPv4
 
@@ -1222,6 +1225,7 @@ curl -fsS -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8080/debug/pprof/g
 - `out_start_port = 0` 时自动等于 `start_port`
 - 目标末端 `out_start_port + end_port - start_port` 不得超过 `65535`，历史配置和 worker 收到的范围同样检查
 - `transparent = true` 时必须省略 `out_source_ip`
+- `transparent = true` 时 `out_ip` 不能是宿主自己的地址（`127.0.0.0/8` 或宿主网卡上的地址）
 - 创建后默认 `enabled = true`
 
 用户态 rule/range worker 共用进程级监听预算：Linux 下为 `min(1024, RLIMIT_NOFILE / 8)`（极低限制下至少 1），其他平台为 1024。TCP+UDP 每端口占两个监听名额。超过预算的范围不会启动部分监听，也不会继续分配大批 goroutine；状态会返回明确的预算错误，应缩小范围或使用可用的内核转发。已部分成功的范围只重试失效监听，不重绑健康端口。

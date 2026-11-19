@@ -1543,6 +1543,11 @@ func validateLocalSourceIP(sourceIP, outInterface string, hostAddrs hostInterfac
 	return "must be assigned to a local interface"
 }
 
+// transparentLocalBackendMessage rejects a transparent forward to this host
+// itself: the local service would answer the client's address by the
+// ordinary route, out of the host, and never back to the forward.
+const transparentLocalBackendMessage = "cannot be an address of this host in transparent mode"
+
 func normalizeAndValidateRule(rule Rule, scope string, index int, requireID bool, knownIfaces map[string]struct{}, hostAddrs hostInterfaceAddrs) (Rule, []ruleValidationIssue) {
 	rule.InInterface = strings.TrimSpace(rule.InInterface)
 	rule.InIP = strings.TrimSpace(rule.InIP)
@@ -1619,6 +1624,9 @@ func normalizeAndValidateRule(rule Rule, scope string, index int, requireID bool
 			issues = appendRuleIssue(issues, scope, index, rule.ID, "transparent", "transparent mode currently supports only IPv4 rules")
 		}
 	}
+	if rule.Transparent && outFamily != "" && forwardBackendIsLocal(rule.OutIP, hostAddrs) {
+		issues = appendRuleIssue(issues, scope, index, rule.ID, "out_ip", transparentLocalBackendMessage)
+	}
 	if rule.Transparent && rule.OutSourceIP != "" {
 		issues = appendRuleIssue(issues, scope, index, rule.ID, "out_source_ip", "must be omitted when transparent mode is enabled")
 	} else if rule.OutSourceIP != "" {
@@ -1685,6 +1693,9 @@ func normalizeAndValidateSite(site Site, requireID bool, knownIfaces map[string]
 	backendFamily := ipLiteralFamily(site.BackendIP)
 	if site.Transparent && !pureIPv4 {
 		return site, "transparent mode currently supports only IPv4 rules"
+	}
+	if site.Transparent && forwardBackendIsLocal(site.BackendIP, hostAddrs) {
+		return site, "backend_ip " + transparentLocalBackendMessage
 	}
 	if site.Transparent && site.BackendSourceIP != "" {
 		return site, "backend_source_ip must be omitted when transparent mode is enabled"
@@ -1762,6 +1773,9 @@ func normalizeAndValidateRange(pr PortRange, requireID bool, knownIfaces map[str
 	outFamily := ipLiteralFamily(pr.OutIP)
 	if pr.Transparent && !pureIPv4 {
 		return pr, "transparent mode currently supports only IPv4 rules"
+	}
+	if pr.Transparent && forwardBackendIsLocal(pr.OutIP, hostAddrs) {
+		return pr, "out_ip " + transparentLocalBackendMessage
 	}
 	if pr.Transparent && pr.OutSourceIP != "" {
 		return pr, "out_source_ip must be omitted when transparent mode is enabled"

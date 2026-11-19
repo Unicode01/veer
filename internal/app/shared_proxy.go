@@ -808,16 +808,13 @@ func (sp *sharedProxyEngine) handleHTTPSConn(ctx context.Context, src net.Conn) 
 	var err2 error
 	if transparent {
 		clientAddr := src.RemoteAddr().(*net.TCPAddr)
-		ip4 := clientAddr.IP.To4()
-		if ip4 == nil {
-			ip4 = clientAddr.IP
+		dialer := net.Dialer{Timeout: 10 * time.Second}
+		network, err := configureTransparentTCPDialer(&dialer, clientAddr.IP, backend, "")
+		if err != nil {
+			log.Printf("shared proxy https dial %s -> %s: %v", sni, backend, err)
+			return
 		}
-		dialer := net.Dialer{
-			Timeout:   10 * time.Second,
-			LocalAddr: &net.TCPAddr{IP: ip4, Port: 0},
-			Control:   controlTransparent(ip4, ""),
-		}
-		dst, err2 = dialer.DialContext(ctx, "tcp4", backend)
+		dst, err2 = dialer.DialContext(ctx, network, backend)
 	} else {
 		dialer := net.Dialer{Timeout: 10 * time.Second}
 		if err2 = configureOutboundTCPDialer(&dialer, "", sourceIP); err2 != nil {

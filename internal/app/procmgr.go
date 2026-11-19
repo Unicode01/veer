@@ -1313,7 +1313,7 @@ func (pm *ProcessManager) redistributeWorkersGeneration(generation uint64) error
 	)
 	applyKernelOwnerConstraints(candidates, rulePlans, rangePlans)
 	applyKernelPressurePolicy(kernelPressure, candidates, previousKernelRules, previousKernelRanges, rulePlans, rangePlans)
-	candidates = pm.prewarmKernelToUserspaceHandoffs(rules, ranges, candidates, rulePlans, rangePlans)
+	candidates = pm.prewarmKernelToUserspaceHandoffs(rules, ranges, sites, candidates, rulePlans, rangePlans)
 
 	activeRuleRangeKernelCandidateCount := countActiveKernelCandidates(candidates, rulePlans, rangePlans, nil)
 	maxCandidateRuleID := int64(0)
@@ -1470,6 +1470,7 @@ func (pm *ProcessManager) redistributeWorkersGeneration(generation uint64) error
 	pm.mu.Unlock()
 
 	enabledRules, enabledRanges, ruleAssignments, rangeAssignments := buildUserspaceAssignments(rules, ranges, rulePlans, rangePlans, pm.cfg.MaxWorkers)
+	releaseUserspaceListenInterfaces(ruleAssignments, rangeAssignments, rules, ranges, sites)
 	// Auto-configure transparent proxy routing BEFORE dispatching config to workers,
 	// so iptables rules are in place before any worker starts using IP_TRANSPARENT sockets.
 	pm.updateTransparentRouting(enabledRules, enabledRanges)
@@ -2782,7 +2783,7 @@ func (pm *ProcessManager) waitForUserspaceWorkers(ruleIndexes []int, rangeIndexe
 	}
 }
 
-func (pm *ProcessManager) prewarmKernelToUserspaceHandoffs(rules []Rule, ranges []PortRange, candidates []kernelCandidateRule, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) []kernelCandidateRule {
+func (pm *ProcessManager) prewarmKernelToUserspaceHandoffs(rules []Rule, ranges []PortRange, sites []Site, candidates []kernelCandidateRule, rulePlans map[int64]ruleDataplanePlan, rangePlans map[int64]rangeDataplanePlan) []kernelCandidateRule {
 	if pm.kernelRuntime == nil || pm.cfg == nil {
 		return candidates
 	}
@@ -2805,6 +2806,7 @@ func (pm *ProcessManager) prewarmKernelToUserspaceHandoffs(rules []Rule, ranges 
 	}
 
 	enabledRules, enabledRanges, ruleAssignments, rangeAssignments := buildUserspaceAssignments(rules, ranges, rulePlans, rangePlans, pm.cfg.MaxWorkers)
+	releaseUserspaceListenInterfaces(ruleAssignments, rangeAssignments, rules, ranges, sites)
 	ruleWorkerIndexes := collectRuleWorkerIndexesForIDs(ruleAssignments, transitionRuleIDs)
 	rangeWorkerIndexes := collectRangeWorkerIndexesForIDs(rangeAssignments, transitionRangeIDs)
 	if len(ruleWorkerIndexes) == 0 && len(rangeWorkerIndexes) == 0 {

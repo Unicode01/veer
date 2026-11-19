@@ -696,13 +696,15 @@ func handleTCPConn(ctx context.Context, src net.Conn, target, outIface, outSourc
 	dialNetwork := "tcp"
 	if transparent {
 		clientAddr := src.RemoteAddr().(*net.TCPAddr)
-		ip4 := clientAddr.IP.To4()
-		if ip4 == nil {
-			ip4 = clientAddr.IP
+		network, err := configureTransparentTCPDialer(&dialer, clientAddr.IP, target, outIface)
+		if err != nil {
+			if st != nil {
+				atomic.AddInt64(&st.rejectedConns, 1)
+			}
+			log.Printf("tcp dial %s: %v", target, err)
+			return
 		}
-		dialer.LocalAddr = &net.TCPAddr{IP: ip4, Port: 0}
-		dialer.Control = controlTransparent(ip4, outIface)
-		dialNetwork = "tcp4"
+		dialNetwork = network
 	} else {
 		if err := configureOutboundTCPDialer(&dialer, outIface, outSourceIP); err != nil {
 			if st != nil {
@@ -763,14 +765,20 @@ func listenUDP(ctx context.Context, rule *Rule) (*net.UDPConn, error) {
 	return udpConn, nil
 }
 
+// dialTransparentUDP opens the backend side of a transparent UDP forward for
+// the client at localIP; see planUserspaceTransparentDial.
 func dialTransparentUDP(localIP net.IP, outIface string, targetAddr *net.UDPAddr) (*net.UDPConn, error) {
 	ip4 := localIP.To4()
 	if ip4 == nil {
 		ip4 = localIP
 	}
+	plan := planUserspaceTransparentDial(ip4, targetAddr.IP, outIface)
+	if !plan.transparent {
+		return dialOutboundUDP(targetAddr, plan.bindIface, "")
+	}
 	dialer := net.Dialer{
 		LocalAddr: &net.UDPAddr{IP: ip4, Port: 0},
-		Control:   controlTransparent(ip4, outIface),
+		Control:   controlTransparent(ip4, plan.bindIface),
 	}
 	conn, err := dialer.Dial("udp4", targetAddr.String())
 	if err != nil {
