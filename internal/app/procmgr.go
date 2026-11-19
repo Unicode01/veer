@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -244,6 +245,7 @@ type ProcessManager struct {
 	preparedGeneration                             uint64
 	appliedGeneration                              uint64
 	reconcilePendingSince                          time.Time
+	panelRelay                                     atomic.Value // string; see notePanelRelayForward
 	reconcileLastError                             string
 	reconcileRetryCount                            int
 	reconcileLastAttemptAt                         time.Time
@@ -1475,6 +1477,7 @@ func (pm *ProcessManager) redistributeWorkersGeneration(generation uint64) error
 	// Auto-configure transparent proxy routing BEFORE dispatching config to workers,
 	// so iptables rules are in place before any worker starts using IP_TRANSPARENT sockets.
 	pm.updateTransparentRouting(enabledRules, enabledRanges)
+	pm.notePanelRelayForward(rules, ranges)
 
 	pm.updateSharedProxy(releaseSharedSiteListenInterfaces(sites, listenScope), generation)
 

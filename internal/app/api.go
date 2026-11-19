@@ -142,7 +142,7 @@ func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) (*apiServer, error) {
 	if err != nil {
 		return nil, err
 	}
-	server := serveAPIListener(listener, handler, panel, func(h http.Handler) *http.Server {
+	server := serveAPIListener(listener, handler, panel, pm.panelRelayForward, func(h http.Handler) *http.Server {
 		return &http.Server{
 			Addr:              addr,
 			Handler:           h,

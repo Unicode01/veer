@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -19,6 +20,17 @@ import (
 // keep working unchanged. A remote browser is sent to https; any other
 // remote request is refused rather than let its token cross the network in
 // clear text.
+//
+// A relay on this host makes remote clients look local, so two kinds of
+// local request count as remote too:
+//   - one with forwarding headers (Forwarded, X-Forwarded-*, X-Real-IP):
+//     a proxy relayed it, and it is served only when the proxy says its
+//     client used HTTPS (X-Forwarded-Proto or Forwarded proto=https). A Veer
+//     site's HTTP route sends such headers.
+//   - any request while one of Veer's own TCP forwards relays clients to the
+//     panel port: a forward passes bytes on without telling the panel, so
+//     its connections cannot be told from local ones. /healthz and /readyz,
+//     which take no token, are still served, for deploy.sh's probe.
 const (
 	apiTLSRecordHandshake = 0x16
 	apiProtocolPeekWait   = 10 * time.Second
@@ -48,8 +60,10 @@ func (s *apiServer) Close() error {
 }
 
 // serveAPIListener serves handler on listener, over HTTPS and plain HTTP when
-// panel is set. It owns listener from here on.
-func serveAPIListener(listener net.Listener, handler http.Handler, panel *panelTLS, newServer func(http.Handler) *http.Server) *apiServer {
+// panel is set. It owns listener from here on. panelRelay names a forward of
+// this host that relays clients to the panel, or returns "" (see the top of
+// this file); nil for none.
+func serveAPIListener(listener net.Listener, handler http.Handler, panel *panelTLS, panelRelay func() string, newServer func(http.Handler) *http.Server) *apiServer {
 	serve := func(name string, run func() error) {
 		go func() {
 			if err := run(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -65,7 +79,7 @@ func serveAPIListener(listener net.Listener, handler http.Handler, panel *panelT
 	split := newAPIProtocolListener(listener)
 	secure := newServer(handler)
 	secure.TLSConfig = panel.config
-	plain := newServer(newAPIPlainHTTPGuard(handler))
+	plain := newServer(newAPIPlainHTTPGuard(handler, panel, panelRelay))
 	go split.run()
 	serve("https", func() error { return secure.ServeTLS(split.tls, "", "") })
 	serve("http", func() error { return plain.Serve(split.plain) })
@@ -216,25 +230,118 @@ func apiAddrIP(addr string) net.IP {
 	return ip
 }
 
-func newAPIPlainHTTPGuard(next http.Handler) http.Handler {
+// apiPlainUnauthenticatedPaths take no token, so serving them in plain text
+// to a relayed client gives nothing away.
+var apiPlainUnauthenticatedPaths = map[string]bool{"/healthz": true, "/readyz": true}
+
+// apiPlainRelayHeaders are the headers by which a proxy says it relayed a
+// request for someone else.
+var apiPlainRelayHeaders = []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Proto", "X-Forwarded-Host", "X-Real-Ip"}
+
+// apiPlainRequestRelayed reports whether a proxy relayed r, and whether it
+// says its client used HTTPS.
+func apiPlainRequestRelayed(r *http.Request) (relayed bool, https bool) {
+	for _, name := range apiPlainRelayHeaders {
+		if len(r.Header.Values(name)) > 0 {
+			relayed = true
+			break
+		}
+	}
+	if !relayed {
+		return false, false
+	}
+	// The first proxy's word on the client counts: it is the leftmost entry.
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		first, _, _ := strings.Cut(proto, ",")
+		return true, strings.EqualFold(strings.TrimSpace(first), "https")
+	}
+	if forwarded := r.Header.Get("Forwarded"); forwarded != "" {
+		first, _, _ := strings.Cut(forwarded, ",")
+		for _, pair := range strings.Split(first, ";") {
+			key, value, ok := strings.Cut(strings.TrimSpace(pair), "=")
+			if ok && strings.EqualFold(key, "proto") {
+				return true, strings.EqualFold(strings.Trim(strings.TrimSpace(value), `"`), "https")
+			}
+		}
+	}
+	return true, false
+}
+
+// apiPlainHTTPRefusal returns why the panel refuses r over plain HTTP, or ""
+// when it serves it.
+func apiPlainHTTPRefusal(r *http.Request, panelRelay func() string) string {
+	if !apiPlainRequestIsLocal(r) {
+		return "from a remote client"
+	}
+	if relayed, https := apiPlainRequestRelayed(r); relayed && !https {
+		if apiPlainUnauthenticatedPaths[r.URL.Path] {
+			return ""
+		}
+		return "relayed by a proxy on this host for a client that did not use HTTPS"
+	}
+	if panelRelay != nil {
+		if relay := panelRelay(); relay != "" && !apiPlainUnauthenticatedPaths[r.URL.Path] {
+			return "from this host while its " + relay + " relays clients to the panel port, so local connections may come from anywhere"
+		}
+	}
+	return ""
+}
+
+func newAPIPlainHTTPGuard(next http.Handler, panel *panelTLS, panelRelay func() string) http.Handler {
 	var mu sync.Mutex
 	var lastLog time.Time
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if apiPlainRequestIsLocal(r) {
+		refusal := apiPlainHTTPRefusal(r, panelRelay)
+		if refusal == "" {
 			next.ServeHTTP(w, r)
 			return
 		}
 		mu.Lock()
 		if time.Since(lastLog) >= apiPlainRefusalLogGap {
 			lastLog = time.Now()
-			log.Printf("web server: plain HTTP %s %s from %s refused; the panel serves remote clients over HTTPS only", r.Method, r.URL.Path, r.RemoteAddr)
+			log.Printf("web server: plain HTTP %s %s from %s refused (%s); the panel serves remote clients over HTTPS only", r.Method, r.URL.Path, r.RemoteAddr, refusal)
 		}
 		mu.Unlock()
 		w.Header().Set("Cache-Control", "no-store")
-		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.Host != "" {
-			http.Redirect(w, r, "https://"+r.Host+r.URL.RequestURI(), http.StatusPermanentRedirect)
-			return
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			if target := apiPlainRedirectTarget(r, panel); target != "" {
+				http.Redirect(w, r, target, http.StatusPermanentRedirect)
+				return
+			}
 		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "this panel accepts remote requests over HTTPS only"})
 	})
+}
+
+// apiPlainRedirectTarget is the https URL a refused GET is sent to, or ""
+// for none. The Host header is the client's word, so it is kept only when
+// the panel's certificate names it; otherwise the redirect goes to the
+// address the client reached, unless that is a loopback address, which
+// names the relay and not the client's way in.
+func apiPlainRedirectTarget(r *http.Request, panel *panelTLS) string {
+	uri := r.URL.RequestURI()
+	if r.Host != "" && panel.coversHost(apiHostName(r.Host)) {
+		return "https://" + r.Host + uri
+	}
+	local, _ := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
+	if local == nil {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(local.String())
+	ip := net.ParseIP(host)
+	if err != nil || ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+		return ""
+	}
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	return "https://" + net.JoinHostPort(ip.String(), port) + uri
+}
+
+// apiHostName strips the port from a Host header.
+func apiHostName(hostport string) string {
+	if host, _, err := net.SplitHostPort(hostport); err == nil {
+		return host
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(hostport, "["), "]")
 }
