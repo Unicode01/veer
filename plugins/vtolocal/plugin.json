@@ -2,7 +2,7 @@
   "api_version": "v1",
   "id": "vtolocal",
   "name": "VTap To Local",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "kind": "control",
   "stability": "stable",
   "description": "Creates one Linux L3 boundary for host egress and Veer reply injection without a veth peer.",
@@ -13,7 +13,7 @@
   },
   "control": {
     "main": "control.js",
-    "sha256": "7a9c9ce0419831bd51cd9bc317fbde80872f7597b97ff8c4ca37ad1e56b3ad1a",
+    "sha256": "5ece4ef5a8aafd06dde8a8dbbc423b0519ee6e1adcf7f5614a78ec21513e7f0c",
     "permissions": ["net.admin", "plugin.register", "resource", "timer", "ui"],
     "net_access": [
       {

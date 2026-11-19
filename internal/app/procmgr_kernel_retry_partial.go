@@ -892,7 +892,7 @@ func (pm *ProcessManager) retryNetlinkTriggeredKernelFallbackOwnersForTrigger(tr
 
 	currentRuleAssignments, currentRangeAssignments := pm.snapshotUserspaceAssignments()
 	enabledRules, enabledRanges, ruleAssignments, rangeAssignments := buildUserspaceAssignments(rules, ranges, rulePlans, rangePlans, maxWorkers)
-	releaseUserspaceListenInterfaces(ruleAssignments, rangeAssignments, rules, ranges, sites)
+	releaseUserspaceListenInterfaces(ruleAssignments, rangeAssignments, newUserspaceListenScope(rules, ranges, sites))
 	userspaceAssignmentsChanged := !ruleAssignmentSlicesEqual(currentRuleAssignments, ruleAssignments) ||
 		!rangeAssignmentSlicesEqual(currentRangeAssignments, rangeAssignments)
 	if userspaceAssignmentsChanged {

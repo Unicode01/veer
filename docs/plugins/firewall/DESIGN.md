@@ -1,6 +1,6 @@
 # Firewall 插件设计（草案）
 
-状态：P0、P1 已实现，以 stable 1.0.0 随默认插件包发布（`plugins/firewall/`）；P2 未实现。适用宿主：Veer dev（e011ecb 之后，`xdp_generic` 默认开启），插件 ABI `control_api_abi=1`、`dataplane.xdp_pipeline.v1`、`dataplane.xdp_tc_fallback.v1`。
+状态：P0、P1 已实现，以 stable 1.0.0 随默认插件包发布（`plugins/firewall/`，当前 1.0.1：TCP 首片读不到标志位时按规避解析丢弃）；P2 未实现。适用宿主：Veer dev（e011ecb 之后，`xdp_generic` 默认开启），插件 ABI `control_api_abi=1`、`dataplane.xdp_pipeline.v1`、`dataplane.xdp_tc_fallback.v1`。
 
 ## 1. 背景与目标
 
@@ -115,8 +115,8 @@ hooks.attach({
 2. PPPoE 会话（ethertype `0x8864`）：6 字节 PPPoE 头加 2 字节 PPP 协议号，`0x0021` 视为 IPv4，`0x0057` 视为 IPv6。发现阶段（`0x8863`）和 PPP 控制协议（LCP/IPCP/IPV6CP/PAP/CHAP）一律 `PASS`，否则会断开拨号。
 3. IPv4：校验 IHL；分片偏移非 0（非首片）时没有端口，直接 `PASS`。
 4. IPv6：自己遍历扩展头（最多 6 个，L4 偏移不超过 2047 字节）；遇到偏移非 0 的分片头时 `PASS`。没有用 helper 的 `veer_ipv6_l4`：它用包指针推进，每条路径的偏移范围都不同，verifier 无法合并，这个程序会被展开到约 28 万条指令；这里改用整数偏移，每步检查上界后再经 asm 屏障掩码成 0–2047，处理量降到约 1.6 万条。
-5. 只处理 TCP 与 UDP（P0/P1），其他协议 `PASS`。只读 L4 头的前 4 字节（端口），不要求完整的 TCP 头。
-6. **规避解析的包**：IPv6 扩展头超过 6 个或 L4 起点超过 2047 字节，以及首片里读不到端口的 IPv4/IPv6 分片。Linux 会照常接收并重组这些包，放行就等于绕过过滤，所以只要当前规则集里有策略就丢弃，并计入全局计数；没有策略时照常放行。
+5. 只处理 TCP 与 UDP（P0/P1），其他协议 `PASS`。只读 L4 头的前 4 字节（端口），不要求完整的 TCP 头；分片的首片除外，TCP 首片还要带上第 14 字节的标志位，SYN 限速靠它认出新连接。
+6. **规避解析的包**：IPv6 扩展头超过 6 个或 L4 起点超过 2047 字节，以及首片里读不到端口（TCP 首片还有标志位）的 IPv4/IPv6 分片。Linux 会照常接收并重组这些包，放行就等于绕过过滤，所以只要当前规则集里有策略就丢弃，并计入全局计数；没有策略时照常放行。
 
 ### 4.3 匹配模型
 
@@ -212,7 +212,7 @@ TCP SYN 且无 ACK 且策略有限速：窗口计数 +1，超限写封禁 ... DR
 
 ```json
 {
-  "id": "firewall", "version": "1.0.0", "kind": "pipeline", "stability": "stable",
+  "id": "firewall", "version": "1.0.1", "kind": "pipeline", "stability": "stable",
   "compatibility": {
     "runtime": ">=1.0.0 <2.0.0", "control_api_abi": 1, "tc_pipeline_abi": 2,
     "os": ["linux"], "architectures": ["amd64", "arm64"], "kernel": ">=5.10.0",

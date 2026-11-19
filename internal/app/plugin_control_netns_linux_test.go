@@ -52,6 +52,53 @@ func TestLinuxPluginTunTapCloseWakesBlockedRead(t *testing.T) {
 	}
 }
 
+// A signal interrupting the poll is no device error: the read polls again
+// and returns the packet that arrives.
+func TestLinuxPluginTunTapReadRetriesInterruptedPoll(t *testing.T) {
+	data := []int{-1, -1}
+	if err := unix.Pipe2(data, unix.O_NONBLOCK|unix.O_CLOEXEC); err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(data[0])
+	defer unix.Close(data[1])
+	wake := []int{-1, -1}
+	if err := unix.Pipe2(wake, unix.O_NONBLOCK|unix.O_CLOEXEC); err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(wake[0])
+	defer unix.Close(wake[1])
+
+	interrupts := 0
+	restore := pluginTunTapPoll
+	pluginTunTapPoll = func(fds []unix.PollFd, timeout int) (int, error) {
+		if interrupts < 2 {
+			interrupts++
+			return -1, unix.EINTR
+		}
+		return restore(fds, timeout)
+	}
+	defer func() { pluginTunTapPoll = restore }()
+
+	if _, err := unix.Write(data[1], []byte("pkt")); err != nil {
+		t.Fatal(err)
+	}
+	handle := &linuxPluginTunTapHandle{fd: data[0], wakeRead: wake[0], wakeWrite: wake[1]}
+	packet, err := handle.read(128, time.Second)
+	if err != nil || string(packet.Packet) != "pkt" || packet.TimedOut {
+		t.Fatalf("read = %+v, %v; want the packet after the interrupted polls", packet, err)
+	}
+	if interrupts != 2 || handle.readErrors.Load() != 0 {
+		t.Fatalf("interrupts = %d, read errors = %d; want 2 and 0", interrupts, handle.readErrors.Load())
+	}
+
+	// Interrupted while waiting for nothing: still a timeout, not an error.
+	interrupts = 0
+	packet, err = handle.read(128, 20*time.Millisecond)
+	if err != nil || !packet.TimedOut {
+		t.Fatalf("idle read = %+v, %v; want a timeout", packet, err)
+	}
+}
+
 func TestLinuxPluginScopedNamespaceNetworkAPIs(t *testing.T) {
 	if os.Getenv(pluginScopedNetNSTestEnv) != "1" {
 		t.Skipf("set %s=1 to run the privileged namespace-scoped network test", pluginScopedNetNSTestEnv)

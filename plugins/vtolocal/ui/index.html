@@ -5,32 +5,22 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VTap To Local</title>
   <style>
-    .local-page { padding: 20px; }
-    .local-config-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 10px;
-      align-items: end;
-    }
-    .local-actions { justify-content: flex-end; gap: 8px; }
-    .local-section-title {
-      margin: 0;
-      color: var(--veer-muted);
-      font-size: var(--veer-fs-xs);
-      font-weight: 600;
-    }
-    .local-effective { display: grid; gap: 9px; }
-    .local-addresses { display: flex; flex-wrap: wrap; gap: 6px; }
+    /* VTap To Local */
+    .local-config-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; align-items: end; }
+    .local-config-grid > :has(.veer-record-picker) { grid-column: span 2; }
+    .local-section-title { margin: 0; color: var(--veer-muted); font-size: var(--veer-fs-xs); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+    /* "Static routes" heads the route editor below it. */
+    .veer-card > .local-section-title { margin-top: 24px; }
+    .veer-card > .local-section-title + .veer-collection-editor { margin-top: 8px; }
+    .local-effective { display: grid; gap: 8px; }
+    .local-addresses { display: flex; flex-wrap: wrap; gap: 8px; }
     .local-route-wrap { overflow-x: auto; }
+    /* Route rows hold addresses and interface names. */
+    .veer-collection-row .veer-input { font-family: var(--veer-mono); }
     @media (max-width: 720px) {
-      .local-config-grid { grid-template-columns: 1fr; }
-      .local-actions .veer-button { flex: 1 1 auto; }
+      .local-config-grid { grid-template-columns: minmax(0, 1fr); }
+      .local-config-grid > :has(.veer-record-picker) { grid-column: auto; }
     }
-    /* Patchbay grammar overrides */
-    .local-page { padding: 0 0 4px; }
-    /* "Static routes" reads as a field label with the same spacing as the fields above it. */
-    .veer-card > .local-section-title { margin: 14px 0 -8px; color: var(--veer-muted); font-size: var(--veer-fs-sm); font-weight: 500; letter-spacing: 0; text-transform: none; }
-    /* End Patchbay grammar overrides */
   </style>
 </head>
 <body>
@@ -208,6 +198,22 @@
       }
       function textNode(tag, opts, key, params) { return bindText(F.h(tag, opts || {}), key, params); }
       function i18nButton(key, handler, secondary) { return bindText(F.button(T(key), handler, secondary), key); }
+      function mono(node) {
+        node.classList.add('veer-mono');
+        return node;
+      }
+      // Relative time, with the absolute time on hover (DESIGN.md §7).
+      function timeStat(label, value) {
+        const at = Date.parse(value || '');
+        if (!Number.isFinite(at)) return F.stat(label, value || '—');
+        const locale = document.documentElement.lang === 'en-US' ? 'en-US' : 'zh-CN';
+        const seconds = Math.round((at - Date.now()) / 1000);
+        const abs = Math.abs(seconds);
+        const unit = abs < 60 ? [seconds, 'second'] : abs < 3600 ? [Math.round(seconds / 60), 'minute'] : abs < 86400 ? [Math.round(seconds / 3600), 'hour'] : [Math.round(seconds / 86400), 'day'];
+        let text;
+        try { text = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' }).format(unit[0], unit[1]); } catch (e) { text = new Date(at).toLocaleString(locale); }
+        return F.stat(label, text, new Date(at).toLocaleString(locale));
+      }
       function input(value, placeholder, type) {
         return F.h('input', { className: F.classes.input, attrs: { type: type || 'text', value, placeholder } });
       }
@@ -283,10 +289,10 @@
         newPlaceholder: function () { return T('profile.newPlaceholder'); },
         defaultKey: 'default'
       });
-      const localInterface = input('veerlocal0', 'veerlocal0');
+      const localInterface = mono(input('veerlocal0', 'veerlocal0'));
       const mtu = input('1492', '1492', 'number');
       const addresses = F.h('textarea', {
-        className: F.classes.input,
+        className: F.classes.input + ' veer-mono',
         attrs: { rows: '3', placeholder: '192.0.2.2/32\n2001:db8::2/128' }
       });
       const routeEditor = F.collectionEditor({
@@ -460,13 +466,13 @@
           return;
         }
         stateBody.appendChild(F.h('div', { className: F.classes.grid }, [
-          F.stat(T('stat.phase'), data.phase || '-'),
-          F.stat(T('stat.local'), (data.local_interface || '-') + (data.local_ifindex ? ' #' + data.local_ifindex : '')),
-          F.stat(T('stat.mtu'), data.mtu || '-'),
+          F.stat(T('stat.phase'), data.phase || '—'),
+          F.stat(T('stat.local'), (data.local_interface || '—') + (data.local_ifindex ? ' #' + data.local_ifindex : '')),
+          F.stat(T('stat.mtu'), data.mtu || '—'),
           F.stat(T('stat.addresses'), Array.isArray(data.addresses) ? data.addresses.length : 0),
-          F.stat(T('stat.routes'), Array.isArray(data.routes) ? data.routes.length : (data.route_count == null ? '-' : data.route_count)),
+          F.stat(T('stat.routes'), Array.isArray(data.routes) ? data.routes.length : (data.route_count == null ? '—' : data.route_count)),
           F.stat(T('stat.managed'), data.managed_link === true ? T('value.yes') : T('value.no')),
-          F.stat(T('stat.updated'), data.updated_at || '-')
+          timeStat(T('stat.updated'), data.updated_at)
         ]));
         if (Array.isArray(data.addresses) && data.addresses.length) {
           stateBody.appendChild(F.h('div', { className: 'local-effective' }, [

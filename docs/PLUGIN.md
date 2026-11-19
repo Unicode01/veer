@@ -593,6 +593,8 @@ async function saveProfile() {
 
 插件 UI 使用 TypeScript 或 `// @ts-check` 时可引用 `sdk/plugin/webui.d.ts`，其中包含 `window.VeerPluginHost`、RPC 错误、record picker 和 collection editor 类型。
 
+宿主注入的基础样式（`plugins.js` 的 `pluginHostComponentCSS()`，规范见 [docs/ui/DESIGN.md](ui/DESIGN.md) 第 6 节）同时给出页面骨架：顶部说明、KPI 条（发丝线分隔，不画卡片）、卡片标题与页脚操作栏、复选框、空状态、`.veer-route` / `.veer-port` 跳线，以及 680px 以下把 `.veer-table` 每行堆叠成卡片（`host.table()` 给单元格加 `data-label`；自建表格可给状态、操作单元格加 `veer-cell-status`、`veer-cell-actions`）。地址、端口、接口名和 MAC 的输入框与文字加 `veer-mono`。插件页面只写自己特有的样式；在较旧的宿主上这些骨架样式缺失，页面仍可用，只是排版回到旧样式。
+
 可用 helper：
 
 - `VeerPluginHost.locale`
@@ -1196,6 +1198,8 @@ socket 生命周期不受单次 handler 结束影响，但一次拨号、手工�
 VPN 的“拆除”保留配置，“删除”清理自有出口、配置和未被其他出口引用的凭据；已安装的核心版本保留。sing-box 可在出站接口旁指定该接口上的出站源 IP，使用核心原生绑定。WAN Core 的 `teardown` 动作支持可选 `forget:true`：仅在网络清理完整成功后移除对应 profiles / sessions / status 记录，失败时保留记录供重试。
 
 WAN 自愈仍会检查实际接口、地址、路由、策略规则、邻居和 offload 状态；状态一致时跳过重复写入及不变的恢复租约更新，发现漂移时再补回。已有的匹配策略规则不会先删除再添加。
+
+PPPoE 的 TC Hook 都设置了 `binding_required`：拨号成功后插件写入 `hook_bindings`（物理口和本地边界），记录出现之前 Hook 不挂载，不会以全局 Hook 跑在每个接口上（那会关掉所有接口的连接缓存，并让核心固定走 TC）。关闭 `sync_hook_bindings` 的 profile 需要自行维护这些记录。
 
 PPPoE tunnel 自愈按接口名重新解析 ifindex，并核对 veth 配对、接口启用状态和已保存的 WAN MAC。同名 handoff 接口重建可更新 map，同时保留当前 PPP 会话的 MAC 身份和接口准备参数；接口缺失或身份不匹配时停用 map、记录 `last_repair_error`，保留配置以便重试。WAN MAC 变化需要重新拨号；旧 tunnel 记录若没有接口名，或接口变化但缺少恢复参数，也需要重新拨号。IPv4/IPv6 MSS clamp 都对双向 SYN/SYN-ACK 生效；IPv6 支持至多 6 层 Hop-by-Hop、Routing、Destination Options 扩展头，不改写分片、AH 或 ESP 报文。
 

@@ -42,6 +42,35 @@ type panelTLS struct {
 	fingerprint string
 	selfSigned  bool
 	certPath    string
+	// source serves a configured certificate; nil for the self-signed one,
+	// which is config.Certificates[0].
+	source *reloadingPanelCertificate
+}
+
+// coversHost reports whether the certificate the panel serves names host, a
+// DNS name or an IP address.
+func (p *panelTLS) coversHost(host string) bool {
+	if p == nil || host == "" {
+		return false
+	}
+	var cert *tls.Certificate
+	if p.source != nil {
+		cert = p.source.current()
+	} else if p.config != nil && len(p.config.Certificates) > 0 {
+		cert = &p.config.Certificates[0]
+	}
+	if cert == nil || len(cert.Certificate) == 0 {
+		return false
+	}
+	leaf := cert.Leaf
+	if leaf == nil {
+		parsed, err := x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			return false
+		}
+		leaf = parsed
+	}
+	return leaf.VerifyHostname(host) == nil
 }
 
 // panelTLSPaths gives the files of the self-signed certificate under baseDir.
@@ -63,7 +92,7 @@ func setupPanelTLS(cfg *Config, baseDir string) (*panelTLS, error) {
 			return nil, err
 		}
 		config.GetCertificate = source.get
-		return &panelTLS{config: config, fingerprint: panelCertificateFingerprint(cert.Certificate[0]), certPath: certFile}, nil
+		return &panelTLS{config: config, fingerprint: panelCertificateFingerprint(cert.Certificate[0]), certPath: certFile, source: source}, nil
 	}
 	certPath, keyPath := panelTLSPaths(baseDir)
 	cert, created, err := loadOrCreateSelfSignedPanelCertificate(certPath, keyPath, panelCertificateNames(cfg), time.Now())
@@ -319,6 +348,13 @@ func (r *reloadingPanelCertificate) loadLocked() (*tls.Certificate, error) {
 	}
 	r.cert, r.stamp, r.checked = &cert, stamp, r.now()
 	return r.cert, nil
+}
+
+// current returns the certificate served last, without checking the files.
+func (r *reloadingPanelCertificate) current() *tls.Certificate {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cert
 }
 
 func (r *reloadingPanelCertificate) get(*tls.ClientHelloInfo) (*tls.Certificate, error) {

@@ -163,6 +163,9 @@ function testRegistration() {
   assert.strictEqual(tunnelObject.programs.length, 1, 'PPPoE should register only the TC tunnel program');
   assert(h.state.hooks.some((item) => item.id === 'pppoe-ingress' && item.attach === 'ingress'), 'physical ingress hook should be registered');
   assert(h.state.hooks.some((item) => item.id === 'pppoe-egress' && item.attach === 'ingress'), 'segmented pipeline ingress hook should be registered');
+  for (const hook of h.state.hooks) {
+    assert.strictEqual(hook.binding_required, true, `${hook.id} must not run as a global hook before its binding exists`);
+  }
   assert(!h.state.capabilities.includes('xdp'), 'PPPoE should not advertise the removed XDP receive path');
   assert(!h.state.hooks.some((item) => item.engine === 'xdp'), 'PPPoE should not register an XDP hook');
   assert(h.state.actions.map((item) => item.id).includes('traffic_probe'), 'traffic_probe action should be registered');

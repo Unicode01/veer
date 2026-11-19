@@ -29,6 +29,81 @@ test('exec is adapter-only and mutually exclusive with remote installation', (t)
   assert.throws(() => unmocked.action('run'), /requires an explicit test adapter/);
 });
 
+test('test host enforces the phase and permission gates of the API contract', (t) => {
+  // The goja host enforces these gates (TestPluginHostCapabilityTableMatchesGojaEnforcement);
+  // the test host must turn the same calls down, or plugin tests pass code the host rejects.
+  const allPermissions = ['blob', 'crypto', 'ebpf.load', 'ebpf.map_read', 'ebpf.map_write', 'event', 'exec', 'hook.attach',
+    'kv', 'metrics', 'net.admin', 'net.dns', 'net.http', 'net.l2', 'net.namespace', 'net.tcp', 'net.tuntap', 'net.udp',
+    'operation', 'plugin.action', 'plugin.event', 'plugin.register', 'plugin.resource', 'resource', 'secret', 'timer',
+    'ui', 'worker'];
+  const args = {
+    'resources.get': ['r', 'k'], 'resources.list': ['r'], 'resources.set': ['r', 'k', {}], 'resources.delete': ['r', 'k'],
+    'resources.transaction': [[]], 'kv.get': ['k'], 'kv.set': ['k', 1], 'kv.delete': ['k'], 'kv.list': [],
+    'secret.get': ['k'], 'secret.set': ['k', 'v'], 'secret.delete': ['k'],
+    'timer.setTimeout': ['t', 1000], 'timer.setInterval': ['t', 1000], 'timer.clear': ['t'], 'timer.list': [],
+    'events.publish': ['plugin.gates.x', {}], 'events.deadLetters': [], 'events.stats': [],
+    'events.retry': ['0'.repeat(32)], 'events.discard': ['0'.repeat(32)],
+    'worker.list': [], 'worker.stats': [], 'metrics.counter': ['m', 1], 'metrics.gauge': ['m', 1], 'metrics.list': [],
+    'crypto.md5': ['x'], 'crypto.randomBytes': [4],
+  };
+  const control = `
+    const methods = ${JSON.stringify(apiContract.control.capabilities.map((capability) => capability.method))};
+    const args = ${JSON.stringify(args)};
+    const results = { registration: {}, runtime: {} };
+    if (typeof plugin.resource === 'function') {
+      try { plugin.resource({ id: 'r', methods: ['get', 'list', 'create', 'update', 'delete'], control_methods: ['get', 'list', 'create', 'update', 'delete'] }); } catch (error) {}
+    }
+    function probe(phase) {
+      for (const method of methods) {
+        const parts = method.split('.');
+        let owner = globalThis;
+        for (const part of parts.slice(0, -1)) owner = owner && owner[part];
+        const fn = owner && owner[parts[parts.length - 1]];
+        if (typeof fn !== 'function') { results[phase][method] = 'missing'; continue; }
+        try { fn.apply(owner, args[method] || [{}]); results[phase][method] = 'ok'; }
+        catch (error) { results[phase][method] = String(error && error.message || error); }
+      }
+    }
+    probe('registration');
+    exports.onReconcile = function () { probe('runtime'); return results; };
+  `;
+  const run = (permissions) => {
+    const manifest = testManifest('gates');
+    manifest.control.permissions = permissions;
+    manifest.control.net_access = [{ interfaces: ['*'], operations: ['link.read'] }];
+    return createTestHost({ pluginDir: writePlugin(t, manifest, control) }).load().reconcile();
+  };
+  const phaseDenied = (message) => /registration/.test(message) && !/is required by/.test(message);
+  const permissionDenied = (message) => /permission|requires one of/.test(message);
+  const all = run(allPermissions);
+  // plugin.register stays granted so the probe resource exists and the
+  // resources.* calls reach their permission gate.
+  const fewest = run(['plugin.register']);
+  const none = run([]);
+  const problems = [];
+  for (const capability of apiContract.control.capabilities) {
+    const method = capability.method;
+    const required = [...(capability.permissions || []), ...(capability.any_permissions || [])];
+    const registrationAllowed = capability.phases.includes('registration');
+    const runtimeAllowed = capability.phases.includes('runtime');
+    if (all.registration[method] === 'missing') { problems.push(`${method}: missing`); continue; }
+    if (!registrationAllowed && !phaseDenied(all.registration[method])) {
+      problems.push(`${method}: allowed during registration (${all.registration[method]})`);
+    }
+    if (runtimeAllowed && phaseDenied(all.runtime[method])) {
+      problems.push(`${method}: refused at runtime (${all.runtime[method]})`);
+    }
+    if (required.length > 0) {
+      const withoutPermission = required.includes('plugin.register') ? none : fewest;
+      const phase = runtimeAllowed ? 'runtime' : 'registration';
+      if (!permissionDenied(withoutPermission[phase][method])) {
+        problems.push(`${method}: ran without ${required.join('/')} (${withoutPermission[phase][method]})`);
+      }
+    }
+  }
+  assert.deepEqual(problems, []);
+});
+
 function writePlugin(t, manifest, control, files = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'veer-plugin-sdk-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

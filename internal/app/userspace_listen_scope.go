@@ -103,14 +103,41 @@ func userspaceListenerNeedsInterface(iface string, ip string, startPort int, end
 }
 
 // userspaceSecondaryUplinkLookup reports whether iface is a secondary uplink
-// for answers from ip (see the top of this file). Tests replace it.
+// for answers from ip (see the top of this file), reading the routing tables
+// through routes. Tests replace it.
 var userspaceSecondaryUplinkLookup = lookupUserspaceSecondaryUplink
 
+// userspaceUplinkRoutes is what the secondary-uplink lookups of one scope
+// read from the routing tables: per address family, the indexes of the
+// interfaces with a default route of their own, listed when first needed.
+// Listing them means dumping every route of every table, which on a host
+// with a full BGP feed takes long, so a scope does it at most once per
+// family.
+type userspaceUplinkRoutes struct {
+	defaultLinks map[int]map[int]bool
+}
+
+// hasDefault reports whether the interface with index has a default route in
+// family, listing the family's default routes with list on first use.
+func (r *userspaceUplinkRoutes) hasDefault(family int, index int, list func(family int) map[int]bool) bool {
+	if r.defaultLinks == nil {
+		r.defaultLinks = make(map[int]map[int]bool)
+	}
+	links, ok := r.defaultLinks[family]
+	if !ok {
+		links = list(family)
+		r.defaultLinks[family] = links
+	}
+	return links[index]
+}
+
 // userspaceListenScope decides which listeners keep their interface, looking
-// each interface and address up at most once.
+// each interface and address up at most once. One scope serves one
+// reconcile: the rules, ranges and sites it applies.
 type userspaceListenScope struct {
 	footprints []userspaceListenerFootprint
 	secondary  map[[2]string]bool
+	routes     userspaceUplinkRoutes
 }
 
 func newUserspaceListenScope(rules []Rule, ranges []PortRange, sites []Site) *userspaceListenScope {
@@ -130,7 +157,7 @@ func (s *userspaceListenScope) needsInterface(iface string, ip string, startPort
 	key := [2]string{iface, ip}
 	secondary, ok := s.secondary[key]
 	if !ok {
-		secondary = userspaceSecondaryUplinkLookup(iface, ip)
+		secondary = userspaceSecondaryUplinkLookup(&s.routes, iface, ip)
 		s.secondary[key] = secondary
 	}
 	return secondary
@@ -139,10 +166,9 @@ func (s *userspaceListenScope) needsInterface(iface string, ip string, startPort
 // releaseSharedSiteListenInterfaces returns the sites for the shared proxy,
 // without their listen interface where none of their listeners (TCP 80 and
 // 443, UDP 443 with QUIC) needs it. The proxy routes by host name alone, so
-// the interface only scopes the listeners.
-func releaseSharedSiteListenInterfaces(sites []Site, rules []Rule, ranges []PortRange) []Site {
+// the interface only scopes the listeners. scope must cover these sites.
+func releaseSharedSiteListenInterfaces(sites []Site, scope *userspaceListenScope) []Site {
 	out := append([]Site(nil), sites...)
-	scope := newUserspaceListenScope(rules, ranges, sites)
 	tcp := ruleProtocolMask("tcp")
 	for i := range out {
 		site := &out[i]
@@ -160,9 +186,9 @@ func releaseSharedSiteListenInterfaces(sites []Site, rules []Rule, ranges []Port
 }
 
 // releaseUserspaceListenInterfaces clears the inbound interface of the rules
-// and ranges assigned to workers whose listeners can do without it.
-func releaseUserspaceListenInterfaces(ruleAssignments [][]Rule, rangeAssignments [][]PortRange, rules []Rule, ranges []PortRange, sites []Site) {
-	scope := newUserspaceListenScope(rules, ranges, sites)
+// and ranges assigned to workers whose listeners can do without it. scope
+// must cover the rules and ranges the assignments were built from.
+func releaseUserspaceListenInterfaces(ruleAssignments [][]Rule, rangeAssignments [][]PortRange, scope *userspaceListenScope) {
 	for _, assigned := range ruleAssignments {
 		for i := range assigned {
 			rule := &assigned[i]

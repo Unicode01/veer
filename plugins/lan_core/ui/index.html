@@ -5,229 +5,52 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LAN Core</title>
   <style>
-    .lan-page {
-      padding: 20px;
-    }
-
-    .lan-hero .veer-toolbar {
-      align-items: flex-start;
-    }
-    .lan-title-row {
-      min-width: 0;
-    }
-    .lan-badges {
-      justify-content: flex-end;
-    }
-    .lan-overview {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-    .lan-config-card {
-      display: grid;
-      gap: 12px;
-    }
-    .lan-config-card > * + * {
-      margin-top: 0;
-    }
-    .lan-section-grid {
-      display: grid;
-      grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr);
-      gap: 12px;
-      align-items: start;
-    }
-    .lan-service-section {
-      grid-column: 1 / -1;
-    }
-    .lan-service-section .lan-form-grid {
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-    }
-    .lan-form-section {
-      min-width: 0;
-      padding: 10px;
-      border: 1px solid var(--veer-border);
-      border-radius: var(--veer-radius-lg);
-      background: color-mix(in srgb, var(--veer-surface-soft) 72%, transparent);
-    }
-    .lan-form-section > * + * {
-      margin-top: 10px;
-    }
-    .lan-section-title {
-      margin: 0;
-      color: var(--veer-text);
-      font-size: var(--veer-fs-md);
-      line-height: 1.25;
-      font-weight: 600;
-    }
-    .lan-form-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px 10px;
-      align-items: end;
-    }
-    .lan-field-label {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      min-width: 0;
-      color: var(--veer-muted);
-      font-size: var(--veer-fs-xs);
-      font-weight: 600;
-    }
-    .lan-field-label > span:first-child {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .lan-hint {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      flex: 0 0 auto;
-      width: 16px;
-      height: 16px;
-      border: 1px solid var(--veer-border);
-      border-radius: var(--veer-radius-pill);
-      color: var(--veer-soft);
-      background: var(--veer-surface);
-      font-size: var(--veer-fs-xs);
-      font-weight: 600;
-      cursor: help;
-    }
-    .lan-check-field {
-      min-height: 31px;
-      padding: 5px 8px;
-      border: 1px solid var(--veer-border);
-      border-radius: var(--veer-radius);
-      background: var(--veer-surface);
-    }
-    .lan-check-field label {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    .lan-check-field .veer-input[type="checkbox"] {
-      flex: 0 0 auto;
-    }
-    .lan-protocols {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      min-height: 31px;
-      padding: 5px 8px;
-      border: 1px solid var(--veer-border);
-      border-radius: var(--veer-radius);
-      background: var(--veer-surface);
-    }
-    .lan-protocols label {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      color: var(--veer-muted);
-      font-size: var(--veer-fs-xs);
-      font-weight: 600;
-    }
-    .lan-protocols .veer-input[type="checkbox"] {
-      width: 30px;
-      min-width: 30px;
-      height: 18px;
-      min-height: 18px;
-    }
-    .lan-protocols .veer-input[type="checkbox"]::before {
-      width: 12px;
-      height: 12px;
-    }
-    .lan-protocols .veer-input[type="checkbox"]:checked::before {
-      transform: translateX(12px);
-    }
-    .lan-effective-list { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
-    .lan-effective-row {
-      display: grid;
-      grid-template-columns: minmax(88px, 120px) minmax(0, 1fr);
-      gap: 8px;
-      align-items: start;
-    }
-    .lan-effective-label {
-      padding-top: 3px;
-      color: var(--veer-muted);
-      font-size: var(--veer-fs-xs);
-      font-weight: 600;
-    }
-    .lan-runtime-note {
-      margin: 0;
-      color: var(--veer-muted);
-      font-size: var(--veer-fs-xs);
-      line-height: 1.45;
-      overflow-wrap: anywhere;
-    }
-    .lan-actions {
-      justify-content: flex-end;
-      gap: 8px;
-      padding-top: 2px;
-    }
-    .lan-output-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-    }
-    .lan-output-card {
-      min-height: 68px;
-    }
-    .lan-traffic-table {
-      min-width: 0;
-      overflow-x: auto;
-    }
-    @media (max-width: 880px) {
-      .lan-section-grid,
-      .lan-output-grid,
-      .lan-overview {
-        grid-template-columns: 1fr;
-      }
-      .lan-service-section .lan-form-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-    }
-    @media (max-width: 620px) {
-      .lan-form-grid {
-        grid-template-columns: 1fr;
-      }
-      .lan-service-section .lan-form-grid {
-        grid-template-columns: 1fr;
-      }
-      .lan-actions .veer-button {
-        flex: 1 1 auto;
-      }
-    }
-    /* Patchbay grammar overrides */
-    .lan-page { padding: 0 0 4px; }
-    /* LAN and WAN sections stack full width; neither leaves an empty half column. */
-    .lan-section-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
-    .lan-form-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-    .lan-service-section .lan-form-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-    /* Every section fills whole rows: the LAN picker spans two columns (dropdown and name side by side),
-       WAN egress uses two columns, and the DHCPv4 switch heads its own section. */
+    /* LAN Core */
+    .lan-badges { justify-content: flex-end; }
+    .lan-config-card { display: grid; gap: 0; }
+    .lan-config-card > * + * { margin-top: 0; }
+    .lan-section-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
+    .lan-form-section { display: grid; gap: 16px; min-width: 0; }
+    .lan-form-section + .lan-form-section { margin-top: 24px; padding-top: 24px; border-top: 1px solid var(--veer-border); }
+    .lan-section-title { color: var(--veer-muted); font-size: var(--veer-fs-xs); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+    .lan-form-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; align-items: end; }
     .lan-form-grid > :has(.veer-record-picker) { grid-column: span 2; }
-    .lan-section-grid > .lan-form-section:nth-child(2) .lan-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .lan-section-grid > .lan-form-section:nth-child(2) .lan-form-grid > :has(.veer-record-picker) { grid-column: auto; }
+    .lan-field-label {
+      display: flex; align-items: center; justify-content: flex-start; gap: 4px; min-width: 0;
+      color: var(--veer-muted); font-size: var(--veer-fs-sm); font-weight: 500;
+    }
+    .lan-field-label > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lan-hint {
+      display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 16px; height: 16px;
+      border: 1px solid var(--veer-border-strong); border-radius: var(--veer-radius-pill);
+      color: var(--veer-muted); font-size: var(--veer-fs-xs); font-weight: 600; line-height: 1; cursor: help;
+    }
+    /* Settings applied on save: checkbox and label, on the row of the inputs. */
+    .lan-check-field, .lan-protocols { display: flex; align-items: center; min-height: 32px; }
+    .lan-check-field label, .lan-protocols label {
+      display: inline-flex; align-items: center; gap: 8px; color: var(--veer-text); font-size: var(--veer-fs-md); cursor: pointer;
+    }
+    .lan-protocols { flex-wrap: wrap; gap: 4px 16px; }
+    .lan-protocols label { font-family: var(--veer-mono); }
     .lan-service-section .lan-form-grid > :first-child { grid-column: 1 / -1; }
-    .lan-form-section { padding: 0; border: 0; border-radius: 0; background: transparent; }
-    .lan-form-section > * + * { margin-top: 14px; }
-    .lan-section-grid > .lan-form-section + .lan-form-section { margin-top: 20px; padding: 20px 0 0; border-top: 1px solid var(--veer-border); }
-    .lan-section-title { color: var(--veer-muted); font-size: var(--veer-fs-xs); letter-spacing: .08em; text-transform: uppercase; }
-    .lan-form-grid { gap: 14px 12px; }
-    .lan-field-label { font-size: var(--veer-fs-sm); font-weight: 500; }
-    .lan-hint { width: 15px; height: 15px; background: transparent; font-weight: 500; }
-    .lan-check-field, .lan-protocols { min-height: 32px; padding: 0; border: 0; background: transparent; }
-    .lan-check-field { display: flex; align-items: center; }
-    .lan-protocols label { color: var(--veer-text); font-family: var(--veer-mono); font-weight: 500; }
-    .lan-actions { padding-top: 16px; border-top: 1px solid var(--veer-border); }
-    @media (max-width: 880px) {
-      .lan-form-grid, .lan-service-section .lan-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .lan-output-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+    .lan-effective-row { display: grid; grid-template-columns: minmax(88px, 120px) minmax(0, 1fr); gap: 8px; align-items: start; }
+    .lan-effective-label { padding-top: 4px; color: var(--veer-muted); font-size: var(--veer-fs-xs); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+    .lan-effective-list { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
+    .lan-runtime-note {
+      margin: 0; padding: 8px 12px; border-radius: var(--veer-radius); background: var(--veer-warn-bg);
+      color: var(--veer-warn); font-size: var(--veer-fs-sm); line-height: 1.5; overflow-wrap: anywhere;
+    }
+    .lan-traffic-table { min-width: 0; overflow-x: auto; }
+    @media (max-width: 960px) {
+      .lan-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .lan-output-grid { grid-template-columns: minmax(0, 1fr); }
     }
     @media (max-width: 620px) {
-      .lan-form-grid, .lan-service-section .lan-form-grid, .lan-section-grid > .lan-form-section:nth-child(2) .lan-form-grid { grid-template-columns: minmax(0, 1fr); }
+      .lan-form-grid { grid-template-columns: minmax(0, 1fr); }
       .lan-form-grid > :has(.veer-record-picker) { grid-column: auto; }
+      .lan-effective-row { grid-template-columns: minmax(0, 1fr); gap: 4px; }
     }
-    /* End Patchbay grammar overrides */
   </style>
 </head>
 <body>
@@ -603,21 +426,21 @@
         newPlaceholder: function () { return T('wan.manualPlaceholder'); },
         defaultKey: 'default'
       });
-      const bridge = input('br-lan', 'br-lan');
-      const ports = input('', 'eth1, eth2, eth3');
-      const addresses = input('192.168.100.1/24', '192.168.100.1/24, fd00:100::1/64');
+      const bridge = mono(input('br-lan', 'br-lan'));
+      const ports = mono(input('', 'eth1, eth2, eth3'));
+      const addresses = mono(input('192.168.100.1/24', '192.168.100.1/24, fd00:100::1/64'));
       const mtu = input('1500', 'mtu', 'number');
-      const wanEgress = input('', 'eth0 / pppoe-wan / veervtap0');
-      const wanSource = input('', 'optional WAN source IP');
+      const wanEgress = mono(input('', 'eth0 / pppoe-wan / veervtap0'));
+      const wanSource = mono(input('', 'optional WAN source IP'));
       const redirectMode = input('', 'blank / prepared_l2');
       const natType = select([['symmetric', 'value.symmetric'], ['full_cone', 'value.fullCone']]);
       const autoNAT = checkbox(true);
       const autoIPv6PD = checkbox(true);
       const dhcpv4Enabled = checkbox(true);
       const dnsMode = select([['auto', 'value.dnsAuto'], ['manual', 'value.dnsManual'], ['disabled', 'value.dnsDisabled']]);
-      const dnsServers = input('', '223.5.5.5, 2400:3200::1');
-      const dhcpv4PoolStart = input('', '192.168.100.100');
-      const dhcpv4PoolEnd = input('', '192.168.100.200');
+      const dnsServers = mono(input('', '223.5.5.5, 2400:3200::1'));
+      const dhcpv4PoolStart = mono(input('', '192.168.100.100'));
+      const dhcpv4PoolEnd = mono(input('', '192.168.100.200'));
       let dnsServersField = null;
       let dhcpv4PoolStartField = null;
       let dhcpv4PoolEndField = null;
@@ -641,6 +464,29 @@
           className: F.classes.input,
           attrs: { type: type || 'text', value, placeholder }
         });
+      }
+
+      function mono(node) {
+        node.classList.add('veer-mono');
+        return node;
+      }
+
+      // Relative time, with the absolute time on hover (DESIGN.md §7).
+      function relativeTime(value) {
+        const at = Date.parse(value || '');
+        if (!Number.isFinite(at)) return { text: value || '—', title: '' };
+        const locale = document.documentElement.lang === 'en-US' ? 'en-US' : 'zh-CN';
+        const seconds = Math.round((at - Date.now()) / 1000);
+        const abs = Math.abs(seconds);
+        const unit = abs < 60 ? [seconds, 'second'] : abs < 3600 ? [Math.round(seconds / 60), 'minute'] : abs < 86400 ? [Math.round(seconds / 3600), 'hour'] : [Math.round(seconds / 86400), 'day'];
+        let text;
+        try { text = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' }).format(unit[0], unit[1]); } catch (e) { text = new Date(at).toLocaleString(locale); }
+        return { text, title: new Date(at).toLocaleString(locale) };
+      }
+
+      function timeStat(label, value) {
+        const time = relativeTime(value);
+        return F.stat(label, time.text, time.title);
       }
 
       function checkbox(checked) {
@@ -1014,7 +860,7 @@
           textNode('span', { className: F.classes.statLabel }, labelKey),
           valueIsKey
             ? textNode('span', { className: F.classes.statValue }, value)
-            : F.h('span', { className: F.classes.statValue, text: value == null || value === '' ? '-' : String(value) })
+            : F.h('span', { className: F.classes.statValue, text: value == null || value === '' ? '—' : String(value) })
         ]);
         if (detailKey) bindAttr(node, 'title', detailKey);
         return node;
@@ -1035,18 +881,18 @@
         const configuredPorts = Array.isArray(data.configured_ports) ? data.configured_ports : (Array.isArray(data.ports) ? data.ports : []);
         const memberGRO = data.member_gro || null;
         stateBody.appendChild(F.h('div', { className: F.classes.grid }, [
-          F.stat(T('stat.phase'), data.phase || '-'),
-          F.stat(T('stat.statusBridge'), data.bridge || '-'),
+          F.stat(T('stat.phase'), data.phase || '—'),
+          F.stat(T('stat.statusBridge'), data.bridge || '—'),
           F.stat(T('stat.statusPorts'), bridgeMembers.length),
           F.stat(T('stat.configuredPorts'), configuredPorts.length),
           F.stat(T('stat.addresses'), Array.isArray(data.bridge_addresses) ? data.bridge_addresses.length : 0),
           F.stat(T('stat.managedPorts'), Array.isArray(data.managed_ports) ? data.managed_ports.length : 0),
-          F.stat(T('stat.groCompat'), memberGRO ? (memberGRO.required ? T('value.groMembers', { count: Array.isArray(memberGRO.members) ? memberGRO.members.length : 0 }) : T('value.notRequired')) : '-'),
-          F.stat(T('stat.wanRef'), data.wan_ref || '-'),
+          F.stat(T('stat.groCompat'), memberGRO ? (memberGRO.required ? T('value.groMembers', { count: Array.isArray(memberGRO.members) ? memberGRO.members.length : 0 }) : T('value.notRequired')) : '—'),
+          F.stat(T('stat.wanRef'), data.wan_ref || '—'),
           F.stat(T('stat.dnsMode'), dnsModeLabel(data.dns && data.dns.mode)),
           F.stat(T('stat.dnsServers'), data.dns && Array.isArray(data.dns.servers) ? data.dns.servers.length : 0),
-          F.stat(T('stat.statusMtu'), data.bridge_mtu || data.mtu || '-'),
-          F.stat(T('stat.updated'), data.updated_at || '-')
+          F.stat(T('stat.statusMtu'), data.bridge_mtu || data.mtu || '—'),
+          timeStat(T('stat.updated'), data.updated_at)
         ]));
         const addressesList = Array.isArray(data.bridge_addresses) ? data.bridge_addresses : [];
         appendEffectiveRow(stateBody, 'status.members', bridgeMembers, memberBadge);
@@ -1101,7 +947,7 @@
         if (lastDHCPv4PlanData) {
           const data = lastDHCPv4PlanData;
           const pool = [data.pool_start, data.pool_end].filter(Boolean).join(' - ') || T('value.auto');
-          const dns = Array.isArray(data.dns_servers) && data.dns_servers.length ? data.dns_servers.join(', ') : '-';
+          const dns = Array.isArray(data.dns_servers) && data.dns_servers.length ? data.dns_servers.join(', ') : '—';
           planBody.appendChild(F.h('div', { className: F.classes.grid }, [
             F.stat(T('stat.dhcpv4'), data.enabled ? T('value.yes') : T('value.no')),
             F.stat(T('stat.dnsMode'), dnsModeLabel(data.dns_mode)),
@@ -1116,12 +962,12 @@
           const data = lastPlanData;
           planBody.appendChild(F.h('div', { className: F.classes.grid }, [
             F.stat(T('stat.enabled'), data.enabled ? T('value.yes') : T('value.no')),
-            F.stat(T('stat.parent'), data.parent_interface || '-'),
-            F.stat(T('stat.out'), data.out_interface || '-'),
-            F.stat(T('stat.source'), data.out_source_ip || '-'),
-            F.stat(T('stat.protocol'), data.protocol || '-'),
-            F.stat(T('stat.natType'), data.nat_type || '-'),
-            F.stat(T('stat.redirect'), data.redirect_mode || '-')
+            F.stat(T('stat.parent'), data.parent_interface || '—'),
+            F.stat(T('stat.out'), data.out_interface || '—'),
+            F.stat(T('stat.source'), data.out_source_ip || '—'),
+            F.stat(T('stat.protocol'), data.protocol || '—'),
+            F.stat(T('stat.natType'), data.nat_type || '—'),
+            F.stat(T('stat.redirect'), data.redirect_mode || '—')
           ]));
           if (data.note || data.last_error) {
             planBody.appendChild(F.h('p', { className: 'lan-runtime-note', text: data.last_error || data.note }));
@@ -1130,9 +976,9 @@
         if (lastIPv6PlanData) {
           const data = lastIPv6PlanData;
           planBody.appendChild(F.h('div', { className: F.classes.grid }, [
-            F.stat(T('stat.pdParent'), data.parent_prefix || '-'),
-            F.stat(T('stat.pdAssigned'), data.assigned_prefix || '-'),
-            F.stat(T('stat.pdGateway'), data.target_interface || '-'),
+            F.stat(T('stat.pdParent'), data.parent_prefix || '—'),
+            F.stat(T('stat.pdAssigned'), data.assigned_prefix || '—'),
+            F.stat(T('stat.pdGateway'), data.target_interface || '—'),
             F.stat(T('stat.enabled'), data.enabled ? T('value.yes') : T('value.no'))
           ]));
           if (data.note || data.last_error) {
@@ -1163,14 +1009,14 @@
         if (value === 'manual') return T('value.dnsManual');
         if (value === 'disabled') return T('value.dnsDisabled');
         if (value === 'auto') return T('value.dnsAuto');
-        return '-';
+        return '—';
       }
 
       function trafficLinkView(link, sampledAt, profileKey) {
         link = link || {};
         const stats = link.statistics || null;
         const view = {
-          name: String(link.name || '-'),
+          name: String(link.name || '—'),
           up: link.up === true,
           oper_state: String(link.oper_state || ''),
           error: String(link.error || ''),
@@ -1215,8 +1061,8 @@
         }
         const bridgeStats = trafficView.bridge;
         trafficBody.appendChild(F.h('div', { className: F.classes.grid }, [
-          F.stat(T('stat.rxRate'), bridgeStats.rx_rate == null ? '-' : formatRate(bridgeStats.rx_rate)),
-          F.stat(T('stat.txRate'), bridgeStats.tx_rate == null ? '-' : formatRate(bridgeStats.tx_rate)),
+          F.stat(T('stat.rxRate'), bridgeStats.rx_rate == null ? '—' : formatRate(bridgeStats.rx_rate)),
+          F.stat(T('stat.txRate'), bridgeStats.tx_rate == null ? '—' : formatRate(bridgeStats.tx_rate)),
           F.stat(T('stat.rxTotal'), formatBytes(bridgeStats.rx_bytes), T('traffic.packets', { count: formatCount(bridgeStats.rx_packets) })),
           F.stat(T('stat.txTotal'), formatBytes(bridgeStats.tx_bytes), T('traffic.packets', { count: formatCount(bridgeStats.tx_packets) }))
         ]));
@@ -1228,8 +1074,8 @@
             portsWithStats.map(function (link) {
               return [
                 link.name,
-                link.rx_rate == null ? '-' : formatRate(link.rx_rate),
-                link.tx_rate == null ? '-' : formatRate(link.tx_rate),
+                link.rx_rate == null ? '—' : formatRate(link.rx_rate),
+                link.tx_rate == null ? '—' : formatRate(link.tx_rate),
                 formatBytes(link.rx_bytes),
                 formatBytes(link.tx_bytes)
               ];

@@ -57,7 +57,7 @@ func TestReleaseUserspaceListenInterfaces(t *testing.T) {
 
 	ruleAssignments := [][]Rule{{rules[0], rules[1]}, {rules[2]}}
 	rangeAssignments := [][]PortRange{{ranges[0]}}
-	releaseUserspaceListenInterfaces(ruleAssignments, rangeAssignments, rules, ranges, sites)
+	releaseUserspaceListenInterfaces(ruleAssignments, rangeAssignments, newUserspaceListenScope(rules, ranges, sites))
 
 	if got := ruleAssignments[0][0].InInterface; got != "" {
 		t.Fatalf("rule 1 interface = %q, want it released", got)
@@ -76,12 +76,31 @@ func TestReleaseUserspaceListenInterfaces(t *testing.T) {
 	}
 }
 
+// A scope lists the default routes of each family once, however many
+// listeners it decides on.
+func TestUserspaceUplinkRoutesListEachFamilyOnce(t *testing.T) {
+	calls := map[int]int{}
+	list := func(family int) map[int]bool {
+		calls[family]++
+		return map[int]bool{3: true}
+	}
+	var routes userspaceUplinkRoutes
+	for i := 0; i < 3; i++ {
+		if !routes.hasDefault(4, 3, list) || routes.hasDefault(4, 5, list) || !routes.hasDefault(6, 3, list) {
+			t.Fatal("hasDefault() answered wrong")
+		}
+	}
+	if calls[4] != 1 || calls[6] != 1 {
+		t.Fatalf("listed families %v times, want each once", calls)
+	}
+}
+
 // withSecondaryUplinks makes the named interface/address pairs secondary
 // uplinks for the test.
 func withSecondaryUplinks(t *testing.T, pairs ...[2]string) {
 	t.Helper()
 	old := userspaceSecondaryUplinkLookup
-	userspaceSecondaryUplinkLookup = func(iface string, ip string) bool {
+	userspaceSecondaryUplinkLookup = func(_ *userspaceUplinkRoutes, iface string, ip string) bool {
 		for _, pair := range pairs {
 			if pair[0] == iface && pair[1] == ip {
 				return true
@@ -104,7 +123,7 @@ func TestReleaseKeepsSecondaryUplinkListenersBound(t *testing.T) {
 
 	ruleAssignments := [][]Rule{{rules[0], rules[1]}}
 	rangeAssignments := [][]PortRange{{ranges[0]}}
-	releaseUserspaceListenInterfaces(ruleAssignments, rangeAssignments, rules, ranges, sites)
+	releaseUserspaceListenInterfaces(ruleAssignments, rangeAssignments, newUserspaceListenScope(rules, ranges, sites))
 	if got := ruleAssignments[0][0].InInterface; got != "ppp1" {
 		t.Fatalf("rule 1 interface = %q, want ppp1 kept on the secondary uplink", got)
 	}
@@ -114,7 +133,7 @@ func TestReleaseKeepsSecondaryUplinkListenersBound(t *testing.T) {
 	if got := rangeAssignments[0][0].InInterface; got != "ppp1" {
 		t.Fatalf("range 3 interface = %q, want ppp1 kept on the secondary uplink", got)
 	}
-	if got := releaseSharedSiteListenInterfaces(sites, rules, ranges)[0].ListenIface; got != "ppp1" {
+	if got := releaseSharedSiteListenInterfaces(sites, newUserspaceListenScope(rules, ranges, sites))[0].ListenIface; got != "ppp1" {
 		t.Fatalf("site 4 interface = %q, want ppp1 kept on the secondary uplink", got)
 	}
 }
@@ -126,7 +145,7 @@ func TestReleaseCountsDualStackSiteListeners(t *testing.T) {
 	rules := []Rule{{ID: 1, Enabled: true, InInterface: "vmbr1", InIP: "2001:db8::10", InPort: 443, Protocol: "tcp"}}
 	sites := []Site{{ID: 2, Enabled: true, Domain: "a.test", ListenIface: "vmbr0", BackendHTTPS: 443}}
 	ruleAssignments := [][]Rule{{rules[0]}}
-	releaseUserspaceListenInterfaces(ruleAssignments, nil, rules, nil, sites)
+	releaseUserspaceListenInterfaces(ruleAssignments, nil, newUserspaceListenScope(rules, nil, sites))
 	if got := ruleAssignments[0][0].InInterface; got != "vmbr1" {
 		t.Fatalf("rule 1 interface = %q, want vmbr1 kept: the site listens on [::]:443 of vmbr0", got)
 	}
@@ -143,7 +162,7 @@ func TestReleaseSharedSiteListenInterfaces(t *testing.T) {
 		{ID: 4, Enabled: true, Domain: "c.test", ListenIface: "vmbr0", ListenIP: "", BackendHTTP: 80},
 	}
 
-	got := releaseSharedSiteListenInterfaces(sites, rules, nil)
+	got := releaseSharedSiteListenInterfaces(sites, newUserspaceListenScope(rules, nil, sites))
 	if got[0].ListenIface != "" {
 		t.Fatalf("site 2 interface = %q, want it released", got[0].ListenIface)
 	}

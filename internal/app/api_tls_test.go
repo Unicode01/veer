@@ -185,6 +185,118 @@ func TestAPIPlainRequestIsLocal(t *testing.T) {
 	}
 }
 
+func apiPlainTestRequest(path, remote, local string, headers map[string]string) *http.Request {
+	r, _ := http.NewRequest(http.MethodGet, "http://panel"+path, nil)
+	r.RemoteAddr = remote
+	if local != "" {
+		addr, _ := net.ResolveTCPAddr("tcp", local)
+		r = r.WithContext(context.WithValue(r.Context(), http.LocalAddrContextKey, addr))
+	}
+	for name, value := range headers {
+		r.Header.Set(name, value)
+	}
+	return r
+}
+
+// A local request is served plain unless a relay may have brought it from
+// elsewhere: a proxy that says so without vouching for HTTPS, or one of
+// Veer's own forwards to the panel port. Health probes take no token and
+// stay served.
+func TestAPIPlainHTTPRefusal(t *testing.T) {
+	const local, here = "127.0.0.1:5000", "127.0.0.1:8080"
+	noRelay := func() string { return "" }
+	relay := func() string { return "rule #7" }
+	for _, item := range []struct {
+		name    string
+		r       *http.Request
+		relay   func() string
+		refused bool
+	}{
+		{"local", apiPlainTestRequest("/api/rules", local, here, nil), noRelay, false},
+		{"local without a relay func", apiPlainTestRequest("/api/rules", local, here, nil), nil, false},
+		{"remote", apiPlainTestRequest("/api/rules", "198.51.100.9:5000", "10.0.0.5:8080", nil), noRelay, true},
+		{"proxy relayed plain", apiPlainTestRequest("/api/rules", local, here, map[string]string{"X-Forwarded-For": "198.51.100.9"}), noRelay, true},
+		{"proxy says http", apiPlainTestRequest("/api/rules", local, here, map[string]string{"X-Forwarded-Proto": "http"}), noRelay, true},
+		{"proxy relayed https", apiPlainTestRequest("/api/rules", local, here, map[string]string{"X-Forwarded-For": "198.51.100.9", "X-Forwarded-Proto": "HTTPS, http"}), noRelay, false},
+		{"forwarded proto https", apiPlainTestRequest("/api/rules", local, here, map[string]string{"Forwarded": `for=198.51.100.9;proto="https", for=10.0.0.1;proto=http`}), noRelay, false},
+		{"forwarded without proto", apiPlainTestRequest("/api/rules", local, here, map[string]string{"Forwarded": "for=198.51.100.9"}), noRelay, true},
+		{"proxy relayed probe", apiPlainTestRequest("/readyz", local, here, map[string]string{"X-Real-IP": "198.51.100.9"}), noRelay, false},
+		{"veer forward to the panel", apiPlainTestRequest("/api/rules", local, here, nil), relay, true},
+		{"veer forward, health probe", apiPlainTestRequest("/healthz", local, here, nil), relay, false},
+		{"veer forward, remote probe", apiPlainTestRequest("/healthz", "198.51.100.9:5000", "10.0.0.5:8080", nil), relay, true},
+	} {
+		got := apiPlainHTTPRefusal(item.r, item.relay)
+		if (got != "") != item.refused {
+			t.Errorf("%s: refusal = %q, want refused %v", item.name, got, item.refused)
+		}
+	}
+}
+
+// A refused GET goes to a host the certificate names, else to the address
+// the client reached; never to a Host header the panel cannot vouch for, nor
+// to a loopback address that names only the relay.
+func TestAPIPlainRedirectTarget(t *testing.T) {
+	enabled := true
+	panel, err := setupPanelTLS(&Config{WebTLSSetting: &enabled, WebBind: "0.0.0.0"}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct {
+		host, local, want string
+	}{
+		{"127.0.0.1:8080", "127.0.0.1:8080", "https://127.0.0.1:8080/app?tab=1"},
+		{"localhost:8080", "10.0.0.5:8080", "https://localhost:8080/app?tab=1"},
+		{"evil.example", "10.0.0.5:8080", "https://10.0.0.5:8080/app?tab=1"},
+		{"evil.example:8080", "[2001:db8::5]:8080", "https://[2001:db8::5]:8080/app?tab=1"},
+		{"evil.example", "127.0.0.1:8080", ""},
+		{"", "", ""},
+	} {
+		r := apiPlainTestRequest("/app?tab=1", "198.51.100.9:5000", item.local, nil)
+		r.Host = item.host
+		if got := apiPlainRedirectTarget(r, panel); got != item.want {
+			t.Errorf("Host %q via %s: redirect %q, want %q", item.host, item.local, got, item.want)
+		}
+	}
+	if got := apiPlainRedirectTarget(apiPlainTestRequest("/", "198.51.100.9:5000", "127.0.0.1:8080", nil), nil); got != "" {
+		t.Errorf("without a panel certificate: redirect %q, want none", got)
+	}
+}
+
+// A forward relays clients to the panel when it is an enabled TCP rule or
+// range to the panel port at an address of this host the panel listens on.
+func TestFindPanelRelayForward(t *testing.T) {
+	enabled := true
+	cfg := &Config{WebTLSSetting: &enabled, WebBind: "0.0.0.0", WebPort: 8080}
+	addrs := func() hostInterfaceAddrs {
+		return hostInterfaceAddrs{"eth0": {"10.0.0.5": {}}}
+	}
+	rule := func(id int64, ip string, port int, protocol string, on bool) Rule {
+		return Rule{ID: id, OutIP: ip, OutPort: port, Protocol: protocol, Enabled: on}
+	}
+	for _, item := range []struct {
+		name   string
+		cfg    *Config
+		rules  []Rule
+		ranges []PortRange
+		want   string
+	}{
+		{"loopback backend", cfg, []Rule{rule(1, "127.0.0.1", 8080, "tcp", true)}, nil, "rule #1"},
+		{"host address backend", cfg, []Rule{rule(2, "10.0.0.5", 8080, "tcp+udp", true)}, nil, "rule #2"},
+		{"disabled", cfg, []Rule{rule(3, "127.0.0.1", 8080, "tcp", false)}, nil, ""},
+		{"udp only", cfg, []Rule{rule(4, "127.0.0.1", 8080, "udp", true)}, nil, ""},
+		{"other port", cfg, []Rule{rule(5, "127.0.0.1", 8081, "tcp", true)}, nil, ""},
+		{"remote backend", cfg, []Rule{rule(6, "10.0.0.9", 8080, "tcp", true)}, nil, ""},
+		{"panel bound elsewhere", &Config{WebTLSSetting: &enabled, WebBind: "10.0.0.5", WebPort: 8080}, []Rule{rule(7, "127.0.0.1", 8080, "tcp", true)}, nil, ""},
+		{"web_tls off", &Config{WebBind: "0.0.0.0", WebPort: 8080}, []Rule{rule(8, "127.0.0.1", 8080, "tcp", true)}, nil, ""},
+		{"range covering the port", cfg, nil, []PortRange{{ID: 9, StartPort: 9000, EndPort: 9100, OutIP: "127.0.0.1", OutStartPort: 8000, Protocol: "tcp", Enabled: true}}, "port range #9"},
+		{"range short of the port", cfg, nil, []PortRange{{ID: 10, StartPort: 9000, EndPort: 9010, OutIP: "127.0.0.1", OutStartPort: 8000, Protocol: "tcp", Enabled: true}}, ""},
+	} {
+		if got := findPanelRelayForward(item.cfg, item.rules, item.ranges, addrs); got != item.want {
+			t.Errorf("%s: relay = %q, want %q", item.name, got, item.want)
+		}
+	}
+}
+
 func TestServeAPIListenerSplitsProtocols(t *testing.T) {
 	enabled := true
 	panel, err := setupPanelTLS(&Config{WebTLSSetting: &enabled}, t.TempDir())
@@ -202,7 +314,7 @@ func TestServeAPIListenerSplitsProtocols(t *testing.T) {
 		}
 		_, _ = io.WriteString(w, scheme+" "+r.Method)
 	})
-	server := serveAPIListener(listener, handler, panel, func(h http.Handler) *http.Server {
+	server := serveAPIListener(listener, handler, panel, nil, func(h http.Handler) *http.Server {
 		return &http.Server{Handler: h, ReadHeaderTimeout: 5 * time.Second}
 	})
 	defer server.Close()
@@ -241,6 +353,18 @@ func TestServeAPIListenerSplitsProtocols(t *testing.T) {
 	resp.Body.Close()
 	if string(body) != "http GET" {
 		t.Fatalf("plain HTTP from this host: %d %q, want it served", resp.StatusCode, body)
+	}
+
+	// A proxy on this host relaying a plain HTTP client is no local client.
+	relayed, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/api/x", nil)
+	relayed.Header.Set("X-Forwarded-For", "198.51.100.9")
+	resp, err = plain.Do(relayed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusPermanentRedirect || resp.Header.Get("Location") != "https://"+addr+"/api/x" {
+		t.Fatalf("relayed plain GET: %d %q, want a redirect to https", resp.StatusCode, resp.Header.Get("Location"))
 	}
 
 	restore := apiPlainRequestIsLocal

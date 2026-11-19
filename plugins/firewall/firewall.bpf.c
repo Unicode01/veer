@@ -564,10 +564,12 @@ static __always_inline __u32 fw_ipv6_l4_offset(const struct veer_packet *p, __u3
 
 /*
  * Fills pkt and returns FW_PARSE_OK for TCP or UDP the filter can judge.
- * Only the 4 port bytes of the L4 header are required. A first fragment
- * without them is FW_PARSE_EVASIVE: the host reassembles it and would hand
- * the ports to a service the filter never checked. Other packets without
- * them are truncated and the stack drops them anyway.
+ * Only the 4 port bytes of the L4 header are required, and for TCP in a
+ * first fragment also the flags. A first fragment without them is
+ * FW_PARSE_EVASIVE: the host reassembles it and would hand the ports to a
+ * service the filter never checked, or a SYN to it the SYN limit never
+ * counted. Other packets without them are truncated and the stack drops
+ * them anyway.
  *
  * more says whether the packet may go on past p->data_end. XDP passes 0: its
  * data_end is the end of the packet. TC passes 1, since a GRO aggregate or a
@@ -651,12 +653,16 @@ static __always_inline int fw_parse(const struct veer_packet *p, __u32 ifindex, 
 	}
 	pkt->dport = ports->dest;
 	pkt->sport = ports->source;
-	/* The flags byte is the 14th of the TCP header; only SYN limits read it. */
+	/* The flags byte is the 14th of the TCP header; only SYN limits read it.
+	 * A first fragment that ends before it hides a SYN from the limit: the
+	 * host reassembles it, so it is evasive like one that hides its ports. */
 	if (pkt->proto == FW_PROTO_TCP) {
 		if (veer_bounds_ok(p, ports, 14))
 			pkt->tcp_flags = ((__u8 *)ports)[13];
 		else if (more)
 			return FW_PARSE_SHORT;
+		else if (fragmented)
+			return FW_PARSE_EVASIVE;
 	}
 	return FW_PARSE_OK;
 }

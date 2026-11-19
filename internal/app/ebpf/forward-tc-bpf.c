@@ -4048,6 +4048,28 @@ static __always_inline void ensure_flow_nat_owner_v6(__u8 bank, const struct nat
 }
 
 /*
+ * Whether an existing flow's NAT reservation is in place: the peer entry and
+ * the port's class of a flow on a shared port, or its exclusive port. The
+ * full NAT paths re-assert the reservation on every packet they take, not
+ * only when an entry changes, so they ask this first: lookups take no lock
+ * and the JIT inlines them, where the inserts would take each entry's bucket
+ * lock only to fail.
+ */
+static __always_inline int flow_nat_owner_present_v4(__u8 bank, const struct nat_peer_key_v4 *key, __u16 flow_flags)
+{
+	if ((flow_flags & FORWARD_FLOW_FLAG_NAT_PEER) != 0 && !lookup_nat_peer_v4_in_bank(bank, key))
+		return 0;
+	return lookup_nat_port_v4_in_bank(bank, &key->port) != 0;
+}
+
+static __always_inline int flow_nat_owner_present_v6(__u8 bank, const struct nat_peer_key_v6 *key, __u16 flow_flags)
+{
+	if ((flow_flags & FORWARD_FLOW_FLAG_NAT_PEER) != 0 && !lookup_nat_peer_v6_in_bank(bank, key))
+		return 0;
+	return lookup_nat_port_v6_in_bank(bank, &key->port) != 0;
+}
+
+/*
  * Releases a flow's NAT reservation: the mapping of a flow on a shared port,
  * whose class stays until user space reclaims it, or the exclusive port.
  */
@@ -4495,7 +4517,8 @@ static __always_inline int handle_fullnat_forward_existing(struct __sk_buff *skb
 	}
 
 	build_nat_peer_key_from_reply(&reply_key, &nat_key);
-	ensure_flow_nat_owner_v4(bank, &nat_key, front_value->flags, rule->rule_id, front_value->session_id);
+	if (!flow_nat_owner_present_v4(bank, &nat_key, front_value->flags))
+		ensure_flow_nat_owner_v4(bank, &nat_key, front_value->flags, rule->rule_id, front_value->session_id);
 
 	if (is_datagram_proto(ctx->proto)) {
 		if (front_value->last_seen_ns == 0 || now < front_value->last_seen_ns || (now - front_value->last_seen_ns) >= FORWARD_UDP_FLOW_REFRESH_NS) {
@@ -6052,7 +6075,8 @@ static __always_inline int handle_fullnat_forward_v6(struct __sk_buff *skb, cons
 
 		build_reply_flow_key_from_front_v6(rule, front_value, ctx->proto, close_reply_key);
 		build_nat_peer_key_from_reply_v6(close_reply_key, &reply_or_nat.peer);
-		ensure_flow_nat_owner_v6(flow_bank, &reply_or_nat.peer, front_value->flags, rule->rule_id, front_value->session_id);
+		if (!flow_nat_owner_present_v6(flow_bank, &reply_or_nat.peer, front_value->flags))
+			ensure_flow_nat_owner_v6(flow_bank, &reply_or_nat.peer, front_value->flags, rule->rule_id, front_value->session_id);
 	} else {
 		if (ctx->proto == IPPROTO_TCP && !is_initial_tcp_syn_v6(ctx))
 			return TC_ACT_SHOT;

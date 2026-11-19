@@ -79,6 +79,7 @@ type managedNetworkDHCPv4Server struct {
 	config             managedNetworkDHCPv4Config
 	stopCh             chan struct{}
 	doneCh             chan struct{}
+	wake               *serviceWaker
 	currentFDs         []int
 	stickyIfaces       []string
 	listeningSince     time.Time
@@ -217,6 +218,7 @@ func newManagedNetworkDHCPv4Server(config managedNetworkDHCPv4Config) *managedNe
 		config:   config,
 		stopCh:   make(chan struct{}),
 		doneCh:   make(chan struct{}),
+		wake:     newServiceWaker(),
 		leases:   make(map[string]managedNetworkDHCPv4Lease),
 		ipOwners: make(map[string]string),
 	}
@@ -290,17 +292,12 @@ func (srv *managedNetworkDHCPv4Server) stop() {
 	if srv == nil {
 		return
 	}
+	// The sockets belong to run(), which closes them on its way out; see
+	// serviceWaker for why stop() must not close them itself.
 	close(srv.stopCh)
-	srv.mu.Lock()
-	fds := append([]int(nil), srv.currentFDs...)
-	srv.currentFDs = nil
-	srv.mu.Unlock()
-	for _, fd := range fds {
-		if fd >= 0 {
-			_ = unix.Close(fd)
-		}
-	}
+	srv.wake.wake()
 	<-srv.doneCh
+	srv.wake.close()
 }
 
 type managedNetworkDHCPv4Socket struct {
@@ -382,7 +379,10 @@ func (srv *managedNetworkDHCPv4Server) run() {
 				default:
 				}
 
-				ready, err := unix.Poll(pollFDs, 2000)
+				ready, woken, err := srv.wake.wait(pollFDs, 2*time.Second)
+				if woken {
+					return
+				}
 				if err != nil {
 					if errors.Is(err, unix.EINTR) {
 						select {
@@ -740,10 +740,13 @@ func resolveManagedNetworkDHCPv4ListenInterfacesWithInfos(config managedNetworkD
 	return names
 }
 
+// readManagedNetworkDHCPv4Frame reads the next DHCPv4 frame without blocking
+// (EAGAIN once none is queued): run() waits in serviceWaker.wait, so that
+// stop() can end the wait.
 func readManagedNetworkDHCPv4Frame(fd int) (managedNetworkDHCPv4Frame, error) {
 	buf := make([]byte, dhcpv4MaxMessageSize)
 	for {
-		n, _, err := unix.Recvfrom(fd, buf, 0)
+		n, _, err := unix.Recvfrom(fd, buf, unix.MSG_DONTWAIT)
 		if err != nil {
 			return managedNetworkDHCPv4Frame{}, err
 		}

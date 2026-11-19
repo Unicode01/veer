@@ -5,15 +5,66 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Firewall</title>
   <style>
-    .fw-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-    .fw-grow { flex: 1 1 220px; min-width: 0; }
-    .fw-banner { border-left: 4px solid var(--veer-warning, #d97706); padding: 10px 12px; }
-    .fw-error { color: var(--veer-danger, #dc2626); white-space: pre-wrap; }
-    .fw-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
-    .fw-ifaces { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px; }
-    .fw-iface { display: flex; gap: 6px; align-items: flex-start; }
-    textarea.veer-input { min-height: 84px; resize: vertical; }
-    .fw-counter { white-space: nowrap; }
+    /* Firewall */
+    .fw-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .fw-actions { flex: 0 0 auto; }
+    .fw-banner {
+      padding: 12px 16px; border: 1px solid color-mix(in srgb, var(--veer-warn) 30%, transparent);
+      border-radius: var(--veer-radius); background: var(--veer-warn-bg); color: var(--veer-text);
+    }
+    .fw-banner > strong { color: var(--veer-warn); font-weight: 600; }
+    .fw-banner p, .fw-banner ul { margin: 4px 0 0; line-height: 1.6; }
+    .fw-banner ul { padding-left: 20px; }
+    .fw-banner .fw-row { margin-top: 12px; }
+    .fw-banner.fw-error { border-color: color-mix(in srgb, var(--veer-danger) 30%, transparent); background: var(--veer-danger-soft); }
+    .fw-banner.fw-error > strong { color: var(--veer-danger); }
+    .fw-error { margin: 0; color: var(--veer-danger); white-space: pre-wrap; }
+    p.fw-error:empty { display: none; }
+    .fw-mono { font-family: var(--veer-mono); font-size: var(--veer-fs-sm); }
+    .fw-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .fw-grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .fw-span { grid-column: 1 / -1; }
+    /* Interfaces to bind: one checkbox per interface. */
+    .fw-ifaces { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; }
+    .fw-iface {
+      display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 8px 12px;
+      border: 1px solid var(--veer-border); border-radius: var(--veer-radius); background: var(--veer-surface);
+      color: var(--veer-text); font-size: var(--veer-fs-md); cursor: pointer;
+    }
+    .fw-iface:has(input:checked) { border-color: var(--veer-border-strong); background: var(--veer-surface-soft); }
+    .fw-iface-name { font-family: var(--veer-mono); font-weight: 500; }
+    .fw-iface .veer-muted { margin-left: auto; font-size: var(--veer-fs-xs); white-space: nowrap; }
+    .fw-switch { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; color: var(--veer-text); font-size: var(--veer-fs-md); cursor: pointer; }
+    .fw-limit {
+      display: grid; gap: 12px; padding: 16px; border: 1px solid var(--veer-border); border-radius: var(--veer-radius);
+    }
+    .fw-limit .fw-switch { justify-self: start; }
+    .fw-state {
+      display: inline-flex; align-items: center; gap: 8px; min-height: 22px; padding: 0 8px;
+      border-radius: var(--veer-radius-pill); background: var(--veer-success-bg); color: var(--veer-success-text);
+      font-size: var(--veer-fs-xs); font-weight: 600; white-space: nowrap;
+    }
+    .fw-state::before { width: 5px; height: 5px; border-radius: 50%; background: currentColor; content: ""; }
+    .fw-state.is-off { background: var(--veer-off-bg); color: var(--veer-muted); }
+    .fw-row-actions { flex-wrap: nowrap; justify-content: flex-end; }
+    .fw-counter { font-family: var(--veer-mono); font-size: var(--veer-fs-sm); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .fw-table .veer-table td:last-child { width: 1%; }
+    /* The match column may wrap at its spaces; the other cells stay on one line. */
+    .fw-table .veer-table td:has(> .fw-mono) { min-width: 180px; white-space: normal; }
+    .fw-empty {
+      margin: 0; padding: 16px; border: 1px dashed var(--veer-border-strong);
+      border-radius: var(--veer-radius); text-align: center;
+    }
+    @media (max-width: 720px) {
+      .fw-grid, .fw-grid-4 { grid-template-columns: minmax(0, 1fr); }
+      .fw-ifaces { grid-template-columns: minmax(0, 1fr); }
+      .fw-actions { width: 100%; }
+      .veer-card .fw-actions .veer-button { flex: 1 1 0; }
+    }
+    @media (max-width: 679px) {
+      .fw-table .veer-table td:last-child { width: auto; }
+      .fw-row-actions { flex-wrap: wrap; }
+    }
   </style>
 </head>
 <body>
@@ -106,7 +157,19 @@
   function lines(text) { return String(text || '').split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean); }
   function field(label, input) { return F.h('label', {className: C.field}, [F.h('span', {text: label}), input]); }
   function input(value, attrs) { var el = F.h('input', {className: C.input, attrs: attrs || {}}); el.value = value == null ? '' : value; return el; }
-  function textarea(value) { var el = F.h('textarea', {className: C.input}); el.value = value || ''; return el; }
+  // Every textarea here holds addresses.
+  function textarea(value) { var el = F.h('textarea', {className: C.input + ' veer-mono'}); el.value = value || ''; return el; }
+  function mono(el) { el.classList.add('veer-mono'); return el; }
+  // Relative time, with the absolute time on hover (DESIGN.md §7).
+  function timeCell(ms) {
+    var locale = document.documentElement.lang === 'en-US' ? 'en-US' : 'zh-CN';
+    var seconds = Math.round((ms - Date.now()) / 1000);
+    var abs = Math.abs(seconds);
+    var unit = abs < 60 ? [seconds, 'second'] : abs < 3600 ? [Math.round(seconds / 60), 'minute'] : abs < 86400 ? [Math.round(seconds / 3600), 'hour'] : [Math.round(seconds / 86400), 'day'];
+    var text;
+    try { text = new Intl.RelativeTimeFormat(locale, {numeric: 'auto'}).format(unit[0], unit[1]); } catch (e) { text = new Date(ms).toLocaleString(locale); }
+    return F.h('span', {text: text, title: new Date(ms).toLocaleString(locale)});
+  }
   function select(options, value) {
     var el = F.h('select', {className: C.input});
     options.forEach(function (o) { var opt = F.h('option', {text: o[1], attrs: {value: o[0]}}); el.appendChild(opt); });
@@ -196,29 +259,33 @@
   function statusCard() {
     var st = state.status;
     var children = [];
-    var toolbar = F.h('div', {className: 'fw-row'}, [
-      F.button(t('apply'), apply),
-      F.button(t('refresh'), load, true)
+    var toolbar = F.h('div', {className: 'fw-row fw-actions'}, [
+      F.button(t('refresh'), load, true),
+      F.button(t('apply'), apply, !!(state.status && state.status.pending))
     ]);
-    children.push(F.h('h2', {className: C.title, text: t('title')}));
-    children.push(F.h('p', {className: C.description, text: t('desc')}));
-    children.push(toolbar);
+    children.push(F.h('div', {className: C.toolbar}, [
+      F.h('div', null, [
+        F.h('h2', {className: C.title, text: t('title')}),
+        F.h('p', {className: C.description, text: t('desc')})
+      ]),
+      toolbar
+    ]));
     var ck = state.check;
     if (ck && (ck.errors.length || ck.warnings.length)) {
       var items = ck.errors.length ? ck.errors : ck.warnings.map(function (w) { return w.message; });
-      children.push(F.h('div', {className: C.card + ' fw-banner' + (ck.errors.length ? ' fw-error' : '')}, [
+      children.push(F.h('div', {className: 'fw-banner' + (ck.errors.length ? ' fw-error' : '')}, [
         F.h('strong', {text: ck.errors.length ? t('errorsTitle') : t('warningsTitle')}),
         F.h('ul', {}, items.map(function (text) { return F.h('li', {text: text}); }))
       ]));
     }
     if (st) {
-      var badges = F.h('div', {className: 'fw-row'}, [
+      var badges = F.h('div', {className: 'fw-row fw-chips'}, [
         F.badge(t('generation') + ' ' + st.generation),
         F.badge(st.draft_changed ? t('draftChanged') : t('draftSame'))
       ]);
       children.push(badges);
       if (st.pending) {
-        children.push(F.h('div', {className: C.card + ' fw-banner'}, [
+        children.push(F.h('div', {className: 'fw-banner'}, [
           F.h('strong', {text: t('pendingTitle')}),
           F.h('p', {text: t('pendingBody', {seconds: st.pending.remaining_seconds})}),
           F.h('div', {className: 'fw-row'}, [F.button(t('confirm'), confirmNow), F.button(t('rollback'), rollbackNow, true)])
@@ -230,14 +297,14 @@
       var at = st.attachments;
       if (at && at.error) children.push(F.h('p', {className: 'fw-error', text: t('attachFailed') + ': ' + at.error}));
       if (at && at.interfaces.length) {
-        children.push(F.h('div', {className: 'fw-row'}, at.interfaces.map(function (a) {
+        children.push(F.h('div', {className: 'fw-row fw-chips'}, at.interfaces.map(function (a) {
           var label = a.error ? t('attachError', {error: a.error}) : !a.attached ? t('attachNone') : a.mode === 'generic' ? t('attachGeneric') : a.mode === 'tc' ? t('attachTC') : t('attachDriver');
           return F.badge(a.interface + ': ' + label);
         })));
       }
       if (st.core && st.core.pinned_to_tc) children.push(F.h('p', {className: C.muted, text: t('corePinned')}));
       if (st.last_error) children.push(F.h('p', {className: 'fw-error', text: t('lastError') + ': ' + st.last_error}));
-      if (st.evasive_drops) children.push(F.stat(t('evasive'), st.evasive_drops));
+      if (st.evasive_drops) children.push(F.h('div', {className: C.grid}, [F.stat(t('evasive'), st.evasive_drops)]));
     }
     return F.card(children);
   }
@@ -247,20 +314,20 @@
     var chosen = {};
     (current.interfaces || []).forEach(function (n) { chosen[n] = true; });
     var boxes = state.interfaces.map(function (l) {
-      var box = F.h('input', {attrs: {type: 'checkbox'}});
+      var box = F.h('input', {className: C.input, attrs: {type: 'checkbox'}});
       box.checked = !!chosen[l.name];
       box.addEventListener('change', function () { chosen[l.name] = box.checked; });
       var note = [l.kind || 'device'];
       if (l.master) note.push('→ ' + l.master);
       if (l.l3) note.push('L3');
-      return F.h('label', {className: 'fw-iface'}, [box, F.h('span', {text: l.name}), F.h('span', {className: C.muted, text: note.join(' ')})]);
+      return F.h('label', {className: 'fw-iface'}, [box, F.h('span', {className: 'fw-iface-name', text: l.name}), F.h('span', {className: C.muted, text: note.join(' ')})]);
     });
     (current.interfaces || []).forEach(function (n) {
       if (!state.interfaces.some(function (l) { return l.name === n; })) {
-        var box = F.h('input', {attrs: {type: 'checkbox'}});
+        var box = F.h('input', {className: C.input, attrs: {type: 'checkbox'}});
         box.checked = true;
         box.addEventListener('change', function () { chosen[n] = box.checked; });
-        boxes.push(F.h('label', {className: 'fw-iface'}, [box, F.h('span', {text: n + ' (?)'})]));
+        boxes.push(F.h('label', {className: 'fw-iface'}, [box, F.h('span', {className: 'fw-iface-name', text: n + ' (?)'})]));
       }
     });
     var trusted = textarea((current.trusted_sources || []).join('\n'));
@@ -274,30 +341,32 @@
         log_per_second: Math.max(0, Math.min(1000, Math.floor(Number(logRate.value) || 0)))
       };
       try { await F.data.upsert('settings', 'default', data); F.toast(t('saved')); await load(); } catch (e) { F.toastError(e); }
-    });
+    }, true);
     return F.card([
       F.h('h3', {className: C.title, text: t('settings')}),
       F.h('div', {className: C.description, text: t('interfacesHint')}),
       state.status && state.status.core && state.status.core.prefers_xdp && !state.status.core.pinned_to_tc
         ? F.h('div', {className: C.description, text: t('corePrefersXDP')}) : null,
       field(t('interfaces'), F.h('div', {className: 'fw-ifaces'}, boxes)),
-      field(t('trusted'), trusted),
-      field(t('timeout'), timeout),
-      field(t('logRate'), logRate),
-      save
+      F.h('div', {className: 'fw-grid'}, [
+        F.h('div', {className: 'fw-span'}, field(t('trusted'), trusted)),
+        field(t('timeout'), timeout),
+        field(t('logRate'), logRate)
+      ]),
+      F.h('div', {className: C.toolbar}, [save])
     ]);
   }
 
   function countersFor(key) {
     var st = state.status;
     var item = st && (st.policies || []).find(function (p) { return p.key === key; });
-    if (!item || !item.counters) return '–';
+    if (!item || !item.counters) return '—';
     var c = item.counters;
     return [c.pass, c.drop, c.trusted, c.banned || 0, c.rate_limited || 0].join(' / ');
   }
 
   function limitText(limit) {
-    if (!limit) return '–';
+    if (!limit) return '—';
     var text = t('limitShort', {max: limit.max_new, window: limit.window_seconds});
     return limit.ban_seconds ? text + ', ' + t('banShort', {ban: limit.ban_seconds}) : text;
   }
@@ -314,8 +383,8 @@
       allows + ' ' + t('allow') + ', ' + drops + ' ' + t('drop'),
       limitText(d.syn_limit),
       F.h('span', {className: 'fw-counter', text: countersFor(record.key)}),
-      record.enabled === false ? t('off') : t('on'),
-      F.h('div', {className: 'fw-row'}, [
+      F.h('span', {className: 'fw-state' + (record.enabled === false ? ' is-off' : ''), text: record.enabled === false ? t('off') : t('on')}),
+      F.h('div', {className: 'fw-row fw-row-actions'}, [
         F.button(t('edit'), function () { state.editing = record; render(); }, true),
         F.button(t('remove'), async function () {
           if (!(await F.confirm({title: t('remove'), message: t('deleteConfirm', {name: d.name || record.key}), danger: true}))) return;
@@ -330,24 +399,24 @@
     var d = record.data || {};
     var name = input(d.name || '');
     var protocol = select([['tcp', 'TCP'], ['udp', 'UDP'], ['tcp+udp', 'TCP + UDP']], d.protocol || 'tcp');
-    var ports = input((d.ports || []).join(', '));
+    var ports = mono(input((d.ports || []).join(', ')));
     var dsts = textarea((d.destinations || []).join('\n'));
     var def = select([['drop', t('drop')], ['allow', t('allow')]], d.default_action || 'drop');
     var sources = textarea((d.sources || []).map(function (s) { return s.cidr + ' ' + s.action; }).join('\n'));
-    var enabled = F.h('input', {attrs: {type: 'checkbox'}});
+    var enabled = F.h('input', {className: C.input, attrs: {type: 'checkbox'}});
     enabled.checked = record.enabled !== false;
     var lim = d.syn_limit || {};
-    var limitOn = F.h('input', {attrs: {type: 'checkbox'}});
+    var limitOn = F.h('input', {className: C.input, attrs: {type: 'checkbox'}});
     limitOn.checked = !!d.syn_limit;
     var maxNew = input(lim.max_new || 20, {type: 'number', min: 1, max: 1000000});
     var windowSeconds = input(lim.window_seconds || 10, {type: 'number', min: 1, max: 3600});
     var banSeconds = input(lim.ban_seconds === undefined ? 300 : lim.ban_seconds, {type: 'number', min: 0, max: 604800});
     var ipv6Prefix = input(lim.ipv6_prefix || 64, {type: 'number', min: 32, max: 128});
-    var limitFields = F.h('div', {className: 'fw-row'}, [
-      F.h('div', {className: 'fw-grow'}, field(t('maxNew'), maxNew)),
-      F.h('div', {className: 'fw-grow'}, field(t('windowSeconds'), windowSeconds)),
-      F.h('div', {className: 'fw-grow'}, field(t('banSeconds'), banSeconds)),
-      F.h('div', {className: 'fw-grow'}, field(t('ipv6Prefix'), ipv6Prefix))
+    var limitFields = F.h('div', {className: 'fw-grid fw-grid-4'}, [
+      field(t('maxNew'), maxNew),
+      field(t('windowSeconds'), windowSeconds),
+      field(t('banSeconds'), banSeconds),
+      field(t('ipv6Prefix'), ipv6Prefix)
     ]);
     limitFields.hidden = !limitOn.checked;
     limitOn.addEventListener('change', function () { limitFields.hidden = !limitOn.checked; F.requestResize(); });
@@ -382,43 +451,59 @@
         error.textContent = F.errorText(e);
         F.requestResize();
       }
-    });
+    }, true);
     return F.card([
       F.h('h3', {className: C.title, text: record.key ? t('edit') + ' ' + (d.name || record.key) : t('newPolicy')}),
-      F.h('div', {className: 'fw-row'}, [F.h('div', {className: 'fw-grow'}, field(t('name'), name)), F.h('div', {className: 'fw-grow'}, field(t('protocol'), protocol))]),
-      field(t('ports'), ports),
-      field(t('destinations'), dsts),
-      field(t('defaultAction'), def),
-      field(t('sources'), sources),
-      F.h('label', {className: 'fw-iface'}, [limitOn, F.h('span', {text: t('synLimit')})]),
-      F.h('div', {className: C.description, text: t('synLimitHint')}),
-      limitFields,
-      F.h('label', {className: 'fw-iface'}, [enabled, F.h('span', {text: t('enabled')})]),
+      F.h('div', {className: 'fw-grid'}, [
+        field(t('name'), name),
+        field(t('protocol'), protocol),
+        F.h('div', {className: 'fw-span'}, field(t('ports'), ports)),
+        field(t('destinations'), dsts),
+        field(t('sources'), sources),
+        field(t('defaultAction'), def)
+      ]),
+      F.h('div', {className: 'fw-limit'}, [
+        F.h('label', {className: 'fw-switch'}, [limitOn, F.h('span', {text: t('synLimit')})]),
+        F.h('div', {className: C.description, text: t('synLimitHint')}),
+        limitFields
+      ]),
+      F.h('label', {className: 'fw-switch'}, [enabled, F.h('span', {text: t('enabled')})]),
       error,
-      F.h('div', {className: 'fw-row'}, [save, F.button(t('cancel'), function () { state.editing = null; render(); }, true)])
+      F.h('div', {className: C.toolbar}, [F.button(t('cancel'), function () { state.editing = null; render(); }, true), save])
     ]);
   }
 
   // F.table turns every cell into text; the policy rows hold elements too.
   function cell(tag, value) {
-    return F.h(tag, null, [value instanceof Node ? value : (value == null || value === '' ? '-' : String(value))]);
+    return F.h(tag, null, [value instanceof Node ? value : (value == null || value === '' ? '—' : String(value))]);
   }
-  function nodeTable(headers, rows) {
-    return F.h('table', {className: C.table}, [
+  // roles[i] marks a column as 'status' or 'actions' for the stacked phone layout.
+  function nodeTable(headers, rows, roles) {
+    roles = roles || [];
+    return F.h('div', {className: 'fw-table'}, F.h('table', {className: C.table}, [
       F.h('thead', null, F.h('tr', null, headers.map(function (h) { return cell('th', h); }))),
-      F.h('tbody', null, rows.map(function (row) { return F.h('tr', null, row.map(function (c) { return cell('td', c); })); }))
-    ]);
+      F.h('tbody', null, rows.map(function (row) {
+        return F.h('tr', null, row.map(function (c, i) {
+          var td = cell('td', c);
+          if (headers[i]) td.setAttribute('data-label', headers[i]);
+          if (roles[i] === 'status') td.className = 'veer-cell-status';
+          if (roles[i] === 'actions') td.className = 'veer-cell-actions';
+          return td;
+        }));
+      }))
+    ]));
   }
 
   function policiesCard() {
     var rows = state.policies.map(policyRow);
     var body = rows.length
-      ? nodeTable([t('colName'), t('colMatch'), t('colDefault'), t('colSources'), t('colLimit'), t('colCounters'), t('colEnabled'), ''], rows)
-      : F.h('p', {className: C.muted, text: t('none')});
+      ? nodeTable([t('colName'), t('colMatch'), t('colDefault'), t('colSources'), t('colLimit'), t('colCounters'), t('colEnabled'), ''], rows,
+        [null, null, null, null, null, null, 'status', 'actions'])
+      : F.h('p', {className: C.muted + ' fw-empty', text: t('none')});
     return F.card([
-      F.h('div', {className: 'fw-row'}, [
-        F.h('h3', {className: C.title + ' fw-grow', text: t('policies')}),
-        F.button(t('newPolicy'), function () { state.editing = {key: '', data: {protocol: 'tcp', default_action: 'drop'}, enabled: true}; render(); })
+      F.h('div', {className: C.toolbar}, [
+        F.h('h3', {className: C.title, text: t('policies')}),
+        F.button(t('newPolicy'), function () { state.editing = {key: '', data: {protocol: 'tcp', default_action: 'drop'}, enabled: true}; render(); }, true)
       ]),
       body
     ]);
@@ -441,25 +526,25 @@
   function bansCard() {
     var bans = state.bans;
     var items = bans && bans.items ? bans.items : [];
-    var head = F.h('div', {className: 'fw-row'}, [F.h('h3', {className: C.title + ' fw-grow', text: t('bans')})]);
+    var head = F.h('div', {className: C.toolbar}, [F.h('h3', {className: C.title, text: t('bans')})]);
     if (items.length) head.appendChild(F.button(t('unbanAll'), function () { unban({all: true}, t('unbanAllConfirm')); }, true));
     var body = items.length
       ? nodeTable([t('colSource'), t('colPolicy'), t('colRemaining'), ''], items.map(function (b) {
         return [
           F.h('span', {className: 'fw-mono', text: b.source}),
-          b.policy_name || b.policy || '–',
+          b.policy_name || b.policy || '—',
           b.remaining_seconds === null ? t('remainingUnknown') : t('remaining', {seconds: b.remaining_seconds}),
           F.button(t('unban'), function () { unban({key: b.key}); }, true)
         ];
-      }))
-      : F.h('p', {className: C.muted, text: t('bansNone')});
+      }), [null, null, null, 'actions'])
+      : F.h('p', {className: C.muted + ' fw-empty', text: t('bansNone')});
     var parts = [head, body];
     if (bans && !bans.done && bans.cursor) parts.push(F.button(t('more'), moreBans, true));
     return F.card(parts);
   }
 
   function endpoint(addr, port) {
-    if (!addr) return '–';
+    if (!addr) return '—';
     return (addr.indexOf(':') >= 0 ? '[' + addr + ']' : addr) + (port ? ':' + port : '');
   }
 
@@ -471,15 +556,15 @@
     parts.push(events.length
       ? nodeTable([t('colTime'), t('colReason'), t('colIface'), t('colFrom'), t('colTo'), t('colPolicy')], events.map(function (e) {
         return [
-          e.at_ms ? new Date(e.at_ms).toLocaleTimeString() : '–',
+          e.at_ms ? timeCell(e.at_ms) : '—',
           t('reasonDrop_' + e.reason),
-          e.interface,
+          F.h('span', {className: 'fw-mono', text: e.interface || '—'}),
           F.h('span', {className: 'fw-mono', text: endpoint(e.source, e.source_port)}),
           F.h('span', {className: 'fw-mono', text: (e.protocol ? e.protocol + ' ' : '') + endpoint(e.destination, e.port)}),
-          e.policy_name || e.policy || '–'
+          e.policy_name || e.policy || '—'
         ];
       }))
-      : F.h('p', {className: C.muted, text: t('logEmpty')}));
+      : F.h('p', {className: C.muted + ' fw-empty', text: t('logEmpty')}));
     return F.card(parts);
   }
 
