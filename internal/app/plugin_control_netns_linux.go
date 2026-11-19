@@ -494,41 +494,59 @@ func (handle *linuxPluginTunTapHandle) read(maxBytes int, timeout time.Duration)
 	}
 	handle.readMu.Lock()
 	defer handle.readMu.Unlock()
-	timeoutMS := int(timeout.Milliseconds())
-	poll := []unix.PollFd{
-		{Fd: int32(handle.fd), Events: unix.POLLIN},
-		{Fd: int32(handle.wakeRead), Events: unix.POLLIN},
-	}
-	ready, err := unix.Poll(poll, timeoutMS)
-	if err != nil {
-		handle.readErrors.Add(1)
-		return pluginControlNetTunTapPacket{}, err
-	}
-	if ready == 0 {
-		return pluginControlNetTunTapPacket{TimedOut: true}, nil
-	}
-	if poll[1].Revents != 0 {
-		var wake [8]byte
-		_, _ = unix.Read(handle.wakeRead, wake[:])
-		return pluginControlNetTunTapPacket{}, fmt.Errorf("device is closing")
-	}
-	if poll[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
-		handle.readErrors.Add(1)
-		return pluginControlNetTunTapPacket{}, fmt.Errorf("device poll failed with revents 0x%x", poll[0].Revents)
-	}
+	deadline := time.Now().Add(timeout)
 	packet := make([]byte, maxBytes)
-	n, err := unix.Read(handle.fd, packet)
-	if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
-		return pluginControlNetTunTapPacket{TimedOut: true}, nil
+	for {
+		// A signal (the Go runtime preempts threads with one) interrupts
+		// a blocking poll or read with EINTR; that is no failure of the
+		// device, so both are retried for the time that is left.
+		timeoutMS := 0
+		if remaining := time.Until(deadline); remaining > 0 {
+			timeoutMS = int((remaining + time.Millisecond - 1) / time.Millisecond)
+		}
+		poll := []unix.PollFd{
+			{Fd: int32(handle.fd), Events: unix.POLLIN},
+			{Fd: int32(handle.wakeRead), Events: unix.POLLIN},
+		}
+		ready, err := pluginTunTapPoll(poll, timeoutMS)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			handle.readErrors.Add(1)
+			return pluginControlNetTunTapPacket{}, err
+		}
+		if ready == 0 {
+			return pluginControlNetTunTapPacket{TimedOut: true}, nil
+		}
+		if poll[1].Revents != 0 {
+			var wake [8]byte
+			_, _ = unix.Read(handle.wakeRead, wake[:])
+			return pluginControlNetTunTapPacket{}, fmt.Errorf("device is closing")
+		}
+		if poll[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
+			handle.readErrors.Add(1)
+			return pluginControlNetTunTapPacket{}, fmt.Errorf("device poll failed with revents 0x%x", poll[0].Revents)
+		}
+		n, err := unix.Read(handle.fd, packet)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
+			return pluginControlNetTunTapPacket{TimedOut: true}, nil
+		}
+		if err != nil {
+			handle.readErrors.Add(1)
+			return pluginControlNetTunTapPacket{}, err
+		}
+		handle.reads.Add(1)
+		handle.readBytes.Add(uint64(n))
+		return pluginControlNetTunTapPacket{Packet: packet[:n]}, nil
 	}
-	if err != nil {
-		handle.readErrors.Add(1)
-		return pluginControlNetTunTapPacket{}, err
-	}
-	handle.reads.Add(1)
-	handle.readBytes.Add(uint64(n))
-	return pluginControlNetTunTapPacket{Packet: packet[:n]}, nil
 }
+
+// pluginTunTapPoll is unix.Poll; tests replace it to interrupt it.
+var pluginTunTapPoll = unix.Poll
 
 func (handle *linuxPluginTunTapHandle) write(packet []byte) (int, error) {
 	handle.lifecycle.RLock()
