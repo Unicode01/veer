@@ -1197,6 +1197,8 @@ VPN 的“拆除”保留配置，“删除”清理自有出口、配置和未�
 
 WAN 自愈仍会检查实际接口、地址、路由、策略规则、邻居和 offload 状态；状态一致时跳过重复写入及不变的恢复租约更新，发现漂移时再补回。已有的匹配策略规则不会先删除再添加。
 
+PPPoE 的 TC Hook 都设置了 `binding_required`：拨号成功后插件写入 `hook_bindings`（物理口和本地边界），记录出现之前 Hook 不挂载，不会以全局 Hook 跑在每个接口上（那会关掉所有接口的连接缓存，并让核心固定走 TC）。关闭 `sync_hook_bindings` 的 profile 需要自行维护这些记录。
+
 PPPoE tunnel 自愈按接口名重新解析 ifindex，并核对 veth 配对、接口启用状态和已保存的 WAN MAC。同名 handoff 接口重建可更新 map，同时保留当前 PPP 会话的 MAC 身份和接口准备参数；接口缺失或身份不匹配时停用 map、记录 `last_repair_error`，保留配置以便重试。WAN MAC 变化需要重新拨号；旧 tunnel 记录若没有接口名，或接口变化但缺少恢复参数，也需要重新拨号。IPv4/IPv6 MSS clamp 都对双向 SYN/SYN-ACK 生效；IPv6 支持至多 6 层 Hop-by-Hop、Routing、Destination Options 扩展头，不改写分片、AH 或 ESP 报文。
 
 `release.sh` 和 `scripts/package-plugins.sh` 默认只把 stable 插件放入 `veer-plugins.tar.gz`。

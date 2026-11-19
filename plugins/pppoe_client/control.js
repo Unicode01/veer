@@ -85,13 +85,17 @@ ebpf.loadObject({
     {id: 'tc_tunnel', section: 'tc/veer/pre_forward', type: 'tc'}
   ]
 });
+// Every hook waits for its hook_bindings record (written when a session is
+// dialed): unbound, a hook would run on every interface, which turns the core
+// flow cache off everywhere and pins the core to TC.
 pipeline.attach({
   id: 'pppoe-ingress',
   direction: 'forward',
   attach: 'ingress',
   priority: 20,
   program: 'pppoe_tunnel:tc_tunnel',
-  mode: 'rewrite'
+  mode: 'rewrite',
+  binding_required: true
 });
 pipeline.attach({
   id: 'pppoe-egress',
@@ -99,7 +103,8 @@ pipeline.attach({
   attach: 'ingress',
   priority: 20,
   program: 'pppoe_tunnel:tc_tunnel',
-  mode: 'rewrite'
+  mode: 'rewrite',
+  binding_required: true
 });
 if (KFUNCS) pipeline.attach({
   id: 'pppoe-local-egress', direction: 'forward', attach: 'egress',
