@@ -673,6 +673,13 @@ class VeerPluginTestHost {
     if (!this.permissions.has(permission)) throw new Error(`permission ${permission} is required by ${api}`);
   }
 
+  // Runtime-only APIs whose permission is otherwise usable while registering
+  // (event): the goja host turns them down during registration.
+  #requireRuntimePermission(permission, api) {
+    if (this.registrationPhase) throw new Error(`${api} is unavailable during plugin registration`);
+    this.#requirePermission(permission, api);
+  }
+
   #requireAnyPermission(permissions, api) {
     if (this.registrationPhase) throw new Error(`${api} is unavailable during plugin registration`);
     if (!permissions.some((permission) => this.permissions.has(permission))) {
@@ -1000,12 +1007,18 @@ class VeerPluginTestHost {
         call: (name, handler, payload) => this.#workerCall(name, handler, payload),
         dispatch: (name, handler, payload) => this.#workerDispatch(name, handler, payload),
         list: () => this.#workerList(),
-        stats: () => ({ pending_requests: 0, pending_bytes: 0, peak_pending_requests: 0, peak_pending_bytes: 0, rejected_requests: 0, request_limit: 256, byte_limit: 16 << 20 }),
+        stats: () => {
+          this.#requirePermission('worker', 'worker.stats');
+          return { pending_requests: 0, pending_bytes: 0, peak_pending_requests: 0, peak_pending_bytes: 0, rejected_requests: 0, request_limit: 256, byte_limit: 16 << 20 };
+        },
       }),
       events: Object.freeze({
         subscribe: (spec) => this.#eventSubscribe(spec),
         publish: (topic, payload, options) => this.#eventPublish(topic, payload, options),
-        stats: () => ({ published: this.state.publications.length, subscriptions: cloneJSON(this.surface.event_subscriptions) }),
+        stats: () => {
+          this.#requirePermission('event', 'events.stats');
+          return { published: this.state.publications.length, subscriptions: cloneJSON(this.surface.event_subscriptions) };
+        },
         deadLetters: (options) => this.#eventDeadLetters(options),
         retry: (deliveryID) => this.#eventRetry(deliveryID),
         discard: (deliveryID) => this.#eventDiscard(deliveryID),
@@ -2058,7 +2071,7 @@ class VeerPluginTestHost {
   }
 
   #eventPublish(topic, payload, options = {}) {
-    this.#requirePermission('event', 'events.publish');
+    this.#requireRuntimePermission('event', 'events.publish');
     const normalized = eventTopic(topic, 'event topic');
     if (!normalized.startsWith(`plugin.${this.manifest.id}.`)) throw new Error(`events.publish topic must use plugin.${this.manifest.id}.*`);
     const schemaVersion = eventSchemaVersion(options && options.schema_version, 'events.publish');
@@ -2074,14 +2087,14 @@ class VeerPluginTestHost {
   }
 
   #eventDeadLetters(options = {}) {
-    this.#requirePermission('event', 'events.deadLetters');
+    this.#requireRuntimePermission('event', 'events.deadLetters');
     const limit = Number(options && options.limit != null ? options.limit : 50);
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('events.deadLetters limit must be between 1 and 100');
     return [...this.state.eventDeliveries.values()].filter((item) => item.status === 'dead').slice(-limit).reverse().map(cloneJSON);
   }
 
   #eventRetry(deliveryID) {
-    this.#requirePermission('event', 'events.retry');
+    this.#requireRuntimePermission('event', 'events.retry');
     const id = String(deliveryID || '').trim().toLowerCase();
     if (!/^[0-9a-f]{32}$/.test(id)) throw new Error('events.retry delivery id is invalid');
     const item = this.state.eventDeliveries.get(id);
@@ -2094,7 +2107,7 @@ class VeerPluginTestHost {
   }
 
   #eventDiscard(deliveryID) {
-    this.#requirePermission('event', 'events.discard');
+    this.#requireRuntimePermission('event', 'events.discard');
     const id = String(deliveryID || '').trim().toLowerCase();
     if (!/^[0-9a-f]{32}$/.test(id)) throw new Error('events.discard delivery id is invalid');
     return this.state.eventDeliveries.delete(id);
