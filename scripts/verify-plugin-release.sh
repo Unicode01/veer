@@ -446,6 +446,19 @@ run_flow_churn() {
 	do
 		require_test_pass "$flow_churn_log" "$required_test"
 	done
+
+	# A daemon under guest, rule and network churn with hot restarts, while
+	# the diagnostics page polls: no failed request, no stalled shutdown, no
+	# descriptor or goroutine growth.
+	churn_soak_log="$TMP_DIR/churn-soak.log"
+	run_no_skips "daemon churn soak" "$churn_soak_log" \
+		env \
+		FORWARD_RUN_CHURN_SOAK_TEST=1 \
+		FORWARD_CHURN_SOAK_RESTART_CYCLES=10 \
+		FORWARD_CHURN_SOAK_LEAK_CYCLES=10 \
+		"$flow_churn_binary" \
+		-test.v -test.run '^TestDaemonChurnSoak$' -test.count=1 -test.timeout=15m
+	require_test_pass "$churn_soak_log" TestDaemonChurnSoak
 }
 
 run_core_dataplane() {
