@@ -6,12 +6,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/vishvananda/netlink"
+	"github.com/Unicode01/veer/internal/nlretry"
 	"golang.org/x/sys/unix"
 )
 
 func LoadInterfaceInfos() ([]InterfaceInfo, error) {
-	links, err := netlink.LinkList()
+	links, err := nlretry.LinkList()
 	if err != nil {
 		return nil, err
 	}
@@ -42,7 +42,7 @@ func LoadInterfaceInfos() ([]InterfaceInfo, error) {
 			info.Parent = nameByIndex[attrs.ParentIndex]
 		}
 
-		addrs, err := netlink.AddrList(link, unix.AF_UNSPEC)
+		addrs, err := nlretry.AddrList(link, unix.AF_UNSPEC)
 		if err == nil {
 			seen := make(map[string]struct{})
 			seenNetworks := make(map[string]struct{})

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/Unicode01/veer/internal/netservice"
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -41,7 +42,7 @@ func (ops *linuxNetOps) EnsureIPv4ForwardingEnabledOnInterface(interfaceName str
 	if err := writeLinuxIPv4Sysctl(filepath.Join("/proc/sys/net/ipv4/conf", interfaceName, "forwarding"), "1\n"); err != nil {
 		return err
 	}
-	link, err := netlink.LinkByName(interfaceName)
+	link, err := nlretry.LinkByName(interfaceName)
 	if err != nil || link == nil || link.Attrs() == nil || link.Attrs().MasterIndex <= 0 {
 		return nil
 	}
@@ -59,7 +60,7 @@ func (ops *linuxNetOps) EnsureManagedNetworkInterface(spec InterfaceSpec) error 
 		return fmt.Errorf("interface is required")
 	}
 
-	link, err := netlink.LinkByName(interfaceName)
+	link, err := nlretry.LinkByName(interfaceName)
 	if err != nil {
 		var linkNotFound netlink.LinkNotFoundError
 		if !errors.As(err, &linkNotFound) {
@@ -77,7 +78,7 @@ func (ops *linuxNetOps) EnsureManagedNetworkInterface(spec InterfaceSpec) error 
 		if err := netlink.LinkAdd(bridge); err != nil {
 			return err
 		}
-		link, err = netlink.LinkByName(interfaceName)
+		link, err = nlretry.LinkByName(interfaceName)
 		if err != nil {
 			return err
 		}
@@ -176,7 +177,7 @@ func linuxManagedNetworkIPv4AddressFromSpec(spec IPv4AddressSpec) (netlink.Link,
 	if ifaceName == "" {
 		return nil, nil, fmt.Errorf("interface is required")
 	}
-	link, err := netlink.LinkByName(ifaceName)
+	link, err := nlretry.LinkByName(ifaceName)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -198,7 +199,7 @@ func linuxManagedNetworkHasIPv4Address(link netlink.Link, want *netlink.Addr) (b
 		return false, fmt.Errorf("ipv4 address is required")
 	}
 	wantCIDR := (&net.IPNet{IP: want.IPNet.IP.To4(), Mask: want.IPNet.Mask}).String()
-	addrs, err := netlink.AddrList(link, unix.AF_INET)
+	addrs, err := nlretry.AddrList(link, unix.AF_INET)
 	if err != nil {
 		return false, err
 	}

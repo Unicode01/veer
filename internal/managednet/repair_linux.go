@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -30,7 +31,7 @@ type managedNetworkInterfaceSpec struct {
 }
 
 func (linuxRepairLinkOps) LinkByName(name string) (netlink.Link, error) {
-	return netlink.LinkByName(name)
+	return nlretry.LinkByName(name)
 }
 
 func (linuxRepairLinkOps) LinkByIndex(index int) (netlink.Link, error) {
@@ -322,7 +323,7 @@ func managedNetworkInterfaceNeedsRepair(item ManagedNetwork) bool {
 	if bridgeName == "" {
 		return false
 	}
-	link, err := netlink.LinkByName(bridgeName)
+	link, err := nlretry.LinkByName(bridgeName)
 	if err != nil || link == nil || link.Attrs() == nil || link.Attrs().Index <= 0 {
 		return true
 	}
@@ -369,7 +370,7 @@ func ensureManagedNetworkInterface(spec managedNetworkInterfaceSpec) error {
 		return fmt.Errorf("interface is required")
 	}
 
-	link, err := netlink.LinkByName(interfaceName)
+	link, err := nlretry.LinkByName(interfaceName)
 	if err != nil {
 		var linkNotFound netlink.LinkNotFoundError
 		if !errors.As(err, &linkNotFound) {
@@ -387,7 +388,7 @@ func ensureManagedNetworkInterface(spec managedNetworkInterfaceSpec) error {
 		if err := netlink.LinkAdd(bridge); err != nil {
 			return err
 		}
-		link, err = netlink.LinkByName(interfaceName)
+		link, err = nlretry.LinkByName(interfaceName)
 		if err != nil {
 			return err
 		}

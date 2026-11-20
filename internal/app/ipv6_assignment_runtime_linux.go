@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/Unicode01/veer/internal/netservice"
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -86,7 +87,7 @@ func (ops *linuxIPv6AssignmentNetOps) IPv6InterfaceGone(name string) bool {
 	if name == "" {
 		return false
 	}
-	_, err := netlink.LinkByName(name)
+	_, err := nlretry.LinkByName(name)
 	var linkNotFound netlink.LinkNotFoundError
 	return errors.As(err, &linkNotFound)
 }
@@ -106,7 +107,7 @@ func (ops *linuxIPv6AssignmentNetOps) EnsureIPv6ForwardingEnabledOnInterface(int
 	if err := writeLinuxIPv6Sysctl(filepath.Join("/proc/sys/net/ipv6/conf", interfaceName, "forwarding"), "1\n"); err != nil {
 		return err
 	}
-	link, err := netlink.LinkByName(interfaceName)
+	link, err := nlretry.LinkByName(interfaceName)
 	if err != nil || link == nil || link.Attrs() == nil || link.Attrs().MasterIndex <= 0 {
 		return nil
 	}
@@ -199,7 +200,7 @@ func (ops *linuxIPv6AssignmentNetOps) deleteOrphanIPv6AssignmentRoute(spec ipv6A
 		return nil
 	}
 	linkIndex := ops.rememberedRouteLink(spec)
-	routes, err := netlink.RouteListFiltered(unix.AF_INET6, &netlink.Route{Dst: prefix, Table: unix.RT_TABLE_MAIN}, netlink.RT_FILTER_DST|netlink.RT_FILTER_TABLE)
+	routes, err := nlretry.RouteListFiltered(unix.AF_INET6, &netlink.Route{Dst: prefix, Table: unix.RT_TABLE_MAIN}, netlink.RT_FILTER_DST|netlink.RT_FILTER_TABLE)
 	if err != nil {
 		return err
 	}
@@ -246,7 +247,7 @@ func isIPv6AssignmentRoute(route *netlink.Route, parent *net.IPNet, mask net.IPM
 func (ops *linuxIPv6AssignmentNetOps) SweepIPv6AssignmentRoutes(scopes []ipv6AssignmentRouteSweepScope, keep map[string]struct{}) error {
 	var failures []error
 	for _, scope := range scopes {
-		link, err := netlink.LinkByName(scope.Bridge)
+		link, err := nlretry.LinkByName(scope.Bridge)
 		if err != nil {
 			var linkNotFound netlink.LinkNotFoundError
 			if !errors.As(err, &linkNotFound) {
@@ -254,7 +255,7 @@ func (ops *linuxIPv6AssignmentNetOps) SweepIPv6AssignmentRoutes(scopes []ipv6Ass
 			}
 			continue
 		}
-		routes, err := netlink.RouteList(link, unix.AF_INET6)
+		routes, err := nlretry.RouteList(link, unix.AF_INET6)
 		if err != nil {
 			failures = append(failures, fmt.Errorf("list routes on %s: %w", scope.Bridge, err))
 			continue
@@ -380,7 +381,7 @@ func linuxIPv6AssignmentAddressFromSpec(spec ipv6AssignmentAddressSpec) (netlink
 	if targetInterface == "" {
 		return nil, nil, fmt.Errorf("target interface is required")
 	}
-	link, err := netlink.LinkByName(targetInterface)
+	link, err := nlretry.LinkByName(targetInterface)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -398,7 +399,7 @@ func linuxIPv6AssignmentRejectRouteFromSpec(spec ipv6AssignmentRejectRouteSpec) 
 	if err != nil || prefix == nil || prefix.IP == nil || prefix.IP.To4() != nil {
 		return nil, fmt.Errorf("invalid ipv6 reject prefix %q", prefixText)
 	}
-	loopback, err := netlink.LinkByName("lo")
+	loopback, err := nlretry.LinkByName("lo")
 	if err != nil {
 		return nil, fmt.Errorf("resolve loopback interface: %w", err)
 	}
@@ -414,7 +415,7 @@ func linuxIPv6AssignmentRejectRouteFromSpec(spec ipv6AssignmentRejectRouteSpec) 
 }
 
 func resolveIPv6AssignmentRouteLink(targetInterface string) (netlink.Link, error) {
-	link, err := netlink.LinkByName(targetInterface)
+	link, err := nlretry.LinkByName(targetInterface)
 	if err != nil {
 		return nil, err
 	}
@@ -443,7 +444,7 @@ func linuxIPv6AssignmentProxyFromSpec(spec ipv6AssignmentProxySpec) (*netlink.Ne
 	if address == nil || address.To4() != nil {
 		return nil, fmt.Errorf("invalid ipv6 proxy address %q", spec.Address)
 	}
-	link, err := netlink.LinkByName(parentInterface)
+	link, err := nlretry.LinkByName(parentInterface)
 	if err != nil {
 		return nil, err
 	}

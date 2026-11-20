@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -101,7 +102,7 @@ func lookupBridgeNeighborTarget(bridgeIndex int, backendIP net.IP) (bridgeNeighb
 	if err != nil {
 		return bridgeNeighborTarget{}, err
 	}
-	neighbors, err := netlink.NeighList(bridgeIndex, unix.AF_INET)
+	neighbors, err := nlretry.NeighList(bridgeIndex, unix.AF_INET)
 	if err != nil {
 		return bridgeNeighborTarget{}, err
 	}
@@ -109,7 +110,7 @@ func lookupBridgeNeighborTarget(bridgeIndex int, backendIP net.IP) (bridgeNeighb
 		return target, nil
 	}
 
-	neighbors, err = netlink.NeighList(0, unix.AF_INET)
+	neighbors, err = nlretry.NeighList(0, unix.AF_INET)
 	if err != nil {
 		return bridgeNeighborTarget{}, err
 	}

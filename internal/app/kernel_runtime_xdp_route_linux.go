@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -128,7 +129,7 @@ func resolveXDPNeighborMAC(ifindex int, ip net.IP, ifName string, family string)
 	if family == ipFamilyIPv6 {
 		af = unix.AF_INET6
 	}
-	neighbors, err := netlink.NeighList(ifindex, af)
+	neighbors, err := nlretry.NeighList(ifindex, af)
 	if err != nil {
 		return nil, fmt.Errorf("xdp dataplane cannot inspect %s neighbors on %q: %w", kernelFamilyLabel(family), ifName, err)
 	}

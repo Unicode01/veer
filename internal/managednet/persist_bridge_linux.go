@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/vishvananda/netlink"
 )
 
@@ -27,7 +28,7 @@ func PersistBridge(item ManagedNetwork) (PersistBridgeResult, error) {
 		return PersistBridgeResult{}, PersistBridgeIssue{Field: "bridge_mode", Message: "managed network bridge persistence requires create mode"}
 	}
 
-	link, err := netlink.LinkByName(bridgeName)
+	link, err := nlretry.LinkByName(bridgeName)
 	if err != nil {
 		var linkNotFound netlink.LinkNotFoundError
 		if errors.As(err, &linkNotFound) {
@@ -112,7 +113,7 @@ func ensureBridgeHardwareAddr(link netlink.Link) (net.HardwareAddr, error) {
 		return nil, fmt.Errorf("set hardware address for bridge %q: %w", link.Attrs().Name, err)
 	}
 
-	refreshed, err := netlink.LinkByName(link.Attrs().Name)
+	refreshed, err := nlretry.LinkByName(link.Attrs().Name)
 	if err == nil && refreshed != nil && refreshed.Attrs() != nil && hasUsableHardwareAddr(refreshed.Attrs().HardwareAddr) {
 		return append(net.HardwareAddr(nil), refreshed.Attrs().HardwareAddr...), nil
 	}

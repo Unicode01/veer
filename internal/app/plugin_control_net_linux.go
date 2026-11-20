@@ -10,14 +10,11 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
-	"time"
 
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/vishvananda/netlink"
-	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
 )
-
-const pluginControlNetLinkLookupAttempts = 8
 
 // Supply the address in RTM_NEWLINK, before udev can apply its persistent-MAC
 // policy. A kernel-generated random address can otherwise change after the
@@ -102,23 +99,10 @@ func pluginControlNetRetryLinkLookup(lookup func() (netlink.Link, error)) (netli
 	return pluginControlNetRetryDump(lookup)
 }
 
+// pluginControlNetRetryDump dumps again when the kernel flags a dump as
+// interrupted; see nlretry.
 func pluginControlNetRetryDump[T any](operation func() (T, error)) (T, error) {
-	var zero T
-	var lastErr error
-	for attempt := 0; attempt < pluginControlNetLinkLookupAttempts; attempt++ {
-		value, err := operation()
-		if err == nil {
-			return value, nil
-		}
-		if !errors.Is(err, nl.ErrDumpInterrupted) {
-			return zero, err
-		}
-		lastErr = err
-		if attempt+1 < pluginControlNetLinkLookupAttempts {
-			time.Sleep(time.Duration(1<<attempt) * time.Millisecond)
-		}
-	}
-	return zero, lastErr
+	return nlretry.Do(operation)
 }
 
 func (linuxPluginControlNetAdmin) LinkList() ([]pluginControlNetLinkInfo, error) {

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/vishvananda/netlink"
 )
 
@@ -177,7 +178,7 @@ func listTCBridgeMemberIndexes(bridgeIndex int) (map[int]struct{}, error) {
 }
 
 func listTCBridgeMemberLinks(bridgeIndex int) ([]netlink.Link, error) {
-	links, err := netlink.LinkList()
+	links, err := nlretry.LinkList()
 	if err != nil {
 		return nil, err
 	}

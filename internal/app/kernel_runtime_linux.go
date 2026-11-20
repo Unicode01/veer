@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/vishvananda/netlink"
@@ -541,12 +542,12 @@ func newKernelPrepareContext(enableTrafficStats bool, enablePreparedL2 bool, ena
 
 func (ctx *kernelPrepareContext) linkByName(name string) (netlink.Link, error) {
 	if ctx == nil {
-		return netlink.LinkByName(name)
+		return nlretry.LinkByName(name)
 	}
 	if item, ok := ctx.links[name]; ok {
 		return item.link, item.err
 	}
-	link, err := netlink.LinkByName(name)
+	link, err := nlretry.LinkByName(name)
 	ctx.links[name] = cachedKernelLink{link: link, err: err}
 	return link, err
 }
@@ -5325,7 +5326,7 @@ func resolveKernelSNATIPv4(link netlink.Link, backendIP string, preferredIP stri
 		if ip4.IsLoopback() || ip4.IsUnspecified() {
 			return 0, fmt.Errorf("preferred source IPv4 %q must be a specific non-loopback address", preferredIP)
 		}
-		addrs, err := netlink.AddrList(link, unix.AF_INET)
+		addrs, err := nlretry.AddrList(link, unix.AF_INET)
 		if err != nil {
 			return 0, err
 		}
@@ -5349,7 +5350,7 @@ func resolveKernelSNATIPv4(link netlink.Link, backendIP string, preferredIP stri
 		return ipv4BytesToUint32(routeSource), nil
 	}
 
-	addrs, err := netlink.AddrList(link, unix.AF_INET)
+	addrs, err := nlretry.AddrList(link, unix.AF_INET)
 	if err != nil {
 		return 0, err
 	}
@@ -5374,7 +5375,7 @@ func resolveKernelEgressSNATIPv4(link netlink.Link, preferredIP string) (uint32,
 		return resolveKernelSNATIPv4(link, "0.0.0.0", preferredIP)
 	}
 
-	addrs, err := netlink.AddrList(link, unix.AF_INET)
+	addrs, err := nlretry.AddrList(link, unix.AF_INET)
 	if err != nil {
 		return 0, err
 	}
@@ -5407,7 +5408,7 @@ func resolveKernelSNATIPv6(link netlink.Link, backendIP string, preferredIP stri
 		if ip6.IsLoopback() || ip6.IsUnspecified() {
 			return nil, fmt.Errorf("preferred source IPv6 %q must be a specific non-loopback address", preferredIP)
 		}
-		addrs, err := netlink.AddrList(link, unix.AF_INET6)
+		addrs, err := nlretry.AddrList(link, unix.AF_INET6)
 		if err != nil {
 			return nil, err
 		}
@@ -5428,7 +5429,7 @@ func resolveKernelSNATIPv6(link netlink.Link, backendIP string, preferredIP stri
 		return append(net.IP(nil), routeSource...), nil
 	}
 
-	addrs, err := netlink.AddrList(link, unix.AF_INET6)
+	addrs, err := nlretry.AddrList(link, unix.AF_INET6)
 	if err != nil {
 		return nil, err
 	}
@@ -5521,7 +5522,7 @@ func resolveKernelTransientFallbackBackendMAC(rule Rule, reasonClass string) str
 		return ""
 	}
 
-	link, err := netlink.LinkByName(strings.TrimSpace(rule.OutInterface))
+	link, err := nlretry.LinkByName(strings.TrimSpace(rule.OutInterface))
 	if err != nil || link == nil || link.Attrs() == nil || !isXDPBridgeLink(link) {
 		return ""
 	}

@@ -8,7 +8,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/vishvananda/netlink"
+	"github.com/Unicode01/veer/internal/nlretry"
 	"golang.org/x/net/bpf"
 	"golang.org/x/sys/unix"
 )
@@ -56,7 +56,7 @@ func resolveIPv6ControlIdentity(targetInterface string) (ipv6ControlIdentity, er
 		return ipv6ControlIdentity{}, fmt.Errorf("interface %q is unavailable", targetInterface)
 	}
 
-	link, err := netlink.LinkByName(targetInterface)
+	link, err := nlretry.LinkByName(targetInterface)
 	if err != nil {
 		return ipv6ControlIdentity{}, fmt.Errorf("resolve link-local identity for %q: %w", targetInterface, err)
 	}

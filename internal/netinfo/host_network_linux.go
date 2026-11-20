@@ -7,12 +7,13 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
 
 func LoadHostNetworkInterfaces() ([]HostNetworkInterface, error) {
-	links, err := netlink.LinkList()
+	links, err := nlretry.LinkList()
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +48,7 @@ func LoadHostNetworkInterfaces() ([]HostNetworkInterface, error) {
 			item.Parent = nameByIndex[attrs.ParentIndex]
 		}
 
-		addrs, err := netlink.AddrList(link, unix.AF_UNSPEC)
+		addrs, err := nlretry.AddrList(link, unix.AF_UNSPEC)
 		if err == nil {
 			seen := make(map[string]struct{})
 			for _, addr := range addrs {
@@ -76,7 +77,7 @@ func LoadHostNetworkInterfaces() ([]HostNetworkInterface, error) {
 }
 
 func loadHostDefaultRouteLinkIndexes(family int) map[int]struct{} {
-	routes, err := netlink.RouteListFiltered(family, &netlink.Route{}, 0)
+	routes, err := nlretry.RouteListFiltered(family, &netlink.Route{}, 0)
 	if err != nil {
 		return nil
 	}

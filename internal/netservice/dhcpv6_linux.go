@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vishvananda/netlink"
+	"github.com/Unicode01/veer/internal/nlretry"
 	"golang.org/x/net/bpf"
 	"golang.org/x/sys/unix"
 )
@@ -672,7 +672,7 @@ func resolveIPv6DHCPv6RemoteMAC(ifIndex int, dstIP net.IP, remoteMAC net.Hardwar
 }
 
 func lookupIPv6DHCPv6NeighborMAC(ifIndex int, dstIP net.IP) net.HardwareAddr {
-	neighbors, err := netlink.NeighList(ifIndex, unix.AF_INET6)
+	neighbors, err := nlretry.NeighList(ifIndex, unix.AF_INET6)
 	if err != nil {
 		return nil
 	}

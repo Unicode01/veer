@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/cilium/ebpf"
 	ebpflink "github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
@@ -2712,12 +2713,12 @@ func prepareXDPKernelRuleRef(rule *Rule, opts xdpPrepareOptions) ([]preparedXDPK
 	if rule.ID <= 0 || rule.ID > int64(^uint32(0)) {
 		return nil, fmt.Errorf("xdp dataplane requires a rule id in uint32 range")
 	}
-	inLink, err := netlink.LinkByName(rule.InInterface)
+	inLink, err := nlretry.LinkByName(rule.InInterface)
 	if err != nil {
 		return nil, fmt.Errorf("resolve inbound interface %q: %w", rule.InInterface, err)
 	}
 
-	outLink, err := netlink.LinkByName(rule.OutInterface)
+	outLink, err := nlretry.LinkByName(rule.OutInterface)
 	if err != nil {
 		return nil, fmt.Errorf("resolve outbound interface %q: %w", rule.OutInterface, err)
 	}

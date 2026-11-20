@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -468,7 +469,7 @@ func kernelNetlinkRecoveryTriggerFromAddrUpdate(family int, names ...string) ker
 }
 
 func snapshotKernelNetlinkLinkStates() (map[int]kernelNetlinkLinkSnapshot, error) {
-	links, err := netlink.LinkList()
+	links, err := nlretry.LinkList()
 	if err != nil {
 		return nil, err
 	}
