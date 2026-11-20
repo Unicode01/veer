@@ -94,8 +94,6 @@
     color: var(--ink-2);
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: .08em;
-    text-transform: uppercase;
     list-style: none;
 }
 summary.popover-section-title { cursor: pointer; border-radius: var(--r-sm); }
