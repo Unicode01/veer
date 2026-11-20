@@ -57,6 +57,48 @@ select {
 
 .auth-modal {
     z-index: var(--z-auth-modal);
+    overflow-y: auto;
+    align-items: flex-start;
+    background: var(--bg);
+}
+
+/* Sign-in page: a left-aligned form on the plain canvas. margin:auto keeps the
+   card centred while it fits and lets the page scroll when it does not. The
+   .auth-modal prefix outranks the generic .modal-content rules below. */
+.auth-modal .auth-card {
+    width: min(100%, 400px);
+    margin: auto;
+    padding: 28px 28px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    text-align: left;
+    box-shadow: none;
+}
+.auth-modal .auth-card [hidden] { display: none !important; }
+.auth-modal .auth-card p { margin: 0; }
+.auth-brand { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--ink); font-size: var(--fs-md); font-weight: 600; }
+.auth-brand svg { flex: none; }
+.auth-host { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-size: var(--fs-xs); font-weight: 400; }
+.auth-modal .auth-card h2 { margin: 6px 0 0; font-size: var(--fs-xl); font-weight: 500; }
+.auth-modal .auth-card .auth-description { margin-top: -8px; color: var(--ink-2); font-size: var(--fs-base); line-height: 1.5; }
+.auth-modal .segmented-control button { width: auto; min-height: 28px; font-size: var(--fs-md); }
+.auth-modal .segmented-control button:hover:not(:disabled) { border: 0; background: transparent; color: var(--ink); }
+.auth-modal .segmented-control button[aria-pressed='true']:hover { background: var(--surface); }
+.auth-modal .segmented-control button:disabled { opacity: .45; cursor: not-allowed; }
+.auth-fields { display: grid; gap: 14px; }
+.auth-fields .form-group { min-width: 0; }
+.auth-modal .auth-fields .form-group label { margin-bottom: 6px; color: var(--ink-2); font-size: var(--fs-sm); }
+.auth-modal .auth-card input { margin-bottom: 0; }
+.auth-modal .auth-fields .field-hint { margin: -4px 0 0; color: var(--ink-2); font-size: var(--fs-sm); line-height: 1.5; }
+.auth-modal .auth-card .auth-message { padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); color: var(--ink-2); font-size: var(--fs-sm); line-height: 1.5; }
+.auth-modal .auth-card .auth-message.is-warn { border-color: transparent; background: var(--warn-bg); color: var(--warn); }
+.auth-modal .auth-card .auth-message.is-error { border-color: transparent; background: var(--danger-bg); color: var(--danger); }
+.auth-modal .auth-card .auth-submit { width: 100%; min-height: 36px; margin-top: 2px; justify-content: center; }
+
+@media (max-width: 480px) {
+    .auth-modal { padding: 16px; }
+    .auth-modal .auth-card { padding: 22px 18px 18px; }
 }
 
 .modal-content {
@@ -546,6 +588,11 @@ strong, b { font-weight: 600; }
 .sidebar-tool:hover, .sidebar-tool[aria-expanded='true'] { background: var(--surface-2); color: var(--ink); }
 .locale-tool { font-family: var(--font-mono); }
 .sidebar-settings #logoutBtn { margin-left: auto; }
+.sidebar-settings { flex-wrap: wrap; }
+.session-identity { display: flex; flex: 1 0 100%; align-items: center; gap: 6px; min-width: 0; padding: 0 8px 6px; color: var(--ink-2); font-size: var(--fs-sm); }
+.session-identity[hidden] { display: none; }
+.session-identity svg { flex: none; }
+.session-identity span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
 .theme-menu { position: absolute; bottom: calc(100% + 8px); left: 0; width: 180px; }
 .theme-menu button::after { content: ''; margin-left: auto; width: 5px; height: 9px; border: solid transparent; border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
 .theme-menu button[aria-checked='true']::after { border-color: currentColor; }

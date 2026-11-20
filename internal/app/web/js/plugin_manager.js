@@ -398,18 +398,13 @@
 
   async function managerRawRequest(method, path, body, headers) {
     managerRequireInstallAPI(method, path);
-    const requestHeaders = Object.assign({ Authorization: 'Bearer ' + app.getToken() }, headers || {});
+    const requestHeaders = Object.assign({}, headers || {});
 	const adminToken = typeof app.getPluginAdminToken === 'function' ? app.getPluginAdminToken() : '';
 	if (adminToken) requestHeaders['X-Veer-Plugin-Admin'] = adminToken;
     app.state.activeRequests = Number(app.state.activeRequests || 0) + 1;
     if (typeof app.renderOverview === 'function') app.renderOverview();
     try {
-      const response = await fetch(path, { method, headers: requestHeaders, body });
-      if (response.status === 401) {
-        app.clearToken();
-        app.showTokenModal({ rejected: true });
-        throw new Error('unauthorized');
-      }
+      const response = await app.authFetch(path, { method, headers: requestHeaders, body });
       let payload = {};
       try {
         payload = await response.json();

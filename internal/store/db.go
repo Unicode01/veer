@@ -263,6 +263,13 @@ var Schema = map[string][][2]string{
 		{"created_at", "TEXT NOT NULL DEFAULT ''"},
 		{"updated_at", "TEXT NOT NULL DEFAULT ''"},
 	},
+	// Panel sessions are signed cookies; a logout records the session here
+	// until it would have expired anyway, so it stays revoked across
+	// restarts and hot restarts.
+	"web_session_revocations": {
+		{"session_id", "TEXT PRIMARY KEY"},
+		{"expires_unix", "INTEGER NOT NULL DEFAULT 0"},
+	},
 }
 
 var SchemaIndexes = []IndexDefinition{

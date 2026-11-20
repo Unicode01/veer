@@ -38,12 +38,13 @@ VEER_REF=dev bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/
 WEB_BIND=0.0.0.0 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
 WEB_UI_ENABLED=false bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
 WEB_TLS=true bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
+WEB_AUTH_REALMS=system,token bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
 READY_TIMEOUT_SECONDS=180 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
 VEER_INSTALL_PLUGINS=1 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh)
 bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/main/bootstrap.sh) -- --no-inherit-stats
 ```
 
-`WEB_BIND=0.0.0.0` 会让管理面接受远程连接。新安装的管理面默认使用 HTTPS（`web_tls: true`，自签证书）；升级已有安装时保持原样，`config.json` 里没有 `web_tls` 的会写成 `false`，继续用明文 HTTP，需要时用 `WEB_TLS=true` 重新部署或改配置后重启开启，`WEB_TLS=false` 则关闭。明文 HTTP 的管理面仅应在受信管理网或 VPN 内使用。详见下文“管理面 HTTPS”。对新建非回环配置、首次从回环地址改为远程监听，或在远程监听下显式更换令牌，`deploy.sh` 要求 `web_token`（以及非空的 `plugin_admin_token`）至少包含 24 个字符，一键部署生成的 32 字符随机令牌已满足要求。Veer 运行时为兼容既有及手工管理的配置，只会对远程监听下的短令牌输出安全警告而不会拒绝启动；应安排轮换，但不要在未同步更新 WHMCS/API 客户端时直接更换。
+`WEB_BIND=0.0.0.0` 会让管理面接受远程连接。新安装的管理面默认使用 HTTPS（`web_tls: true`，自签证书）；升级已有安装时保持原样，`config.json` 里没有 `web_tls` 的会写成 `false`，继续用明文 HTTP，需要时用 `WEB_TLS=true` 重新部署或改配置后重启开启，`WEB_TLS=false` 则关闭。明文 HTTP 的管理面仅应在受信管理网或 VPN 内使用。详见下文“管理面 HTTPS”。`WEB_AUTH_REALMS` 选择网页登录方式：新安装默认 `system,token`（宿主机管理员账户或访问令牌），升级已有安装时保持原样，没有设置过的写成 `token`，详见下文“网页登录”。对新建非回环配置、首次从回环地址改为远程监听，或在远程监听下显式更换令牌，`deploy.sh` 要求 `web_token`（以及非空的 `plugin_admin_token`）至少包含 24 个字符，一键部署生成的 32 字符随机令牌已满足要求。Veer 运行时为兼容既有及手工管理的配置，只会对远程监听下的短令牌输出安全警告而不会拒绝启动；应安排轮换，但不要在未同步更新 WHMCS/API 客户端时直接更换。
 
 `bootstrap.sh` 默认下载最新 [GitHub Release](https://github.com/Unicode01/veer/releases) 中对应架构的 `veer-linux-<arch>.tar.gz`，按同一 release 的 `sha256sums.txt` 校验后，用包内的 `deploy.sh` 安装或热更新；目标机只需运行依赖，不安装 Go、clang 或 Git。安装方式由以下变量控制：
 
@@ -219,6 +220,8 @@ API 认证：
 Authorization: Bearer <web_token>
 ```
 
+网页登录用 `web_token`（访问令牌），或在 `web_auth_realms` 加入 `system` 后用本机管理员账户（见下文“网页登录”）。
+
 ## 配置
 
 完整示例见 [config.example.json](../config.example.json)。使用指南不再复制整份 JSON，避免示例配置和实际默认值漂移。
@@ -228,7 +231,12 @@ Authorization: Bearer <web_token>
 - `web_bind`：Web UI / API 监听地址，默认 `127.0.0.1`
 - `web_ui_enabled`：是否启用静态 Web UI；关闭后仍保留 `/api/*`、`/metrics`、`/debug/pprof/`、`/healthz`、`/readyz`
 - `web_port`：监听端口
-- `web_token`：Web UI 和 API 共用的 Bearer Token
+- `web_token`：API 的 Bearer Token，也是网页登录的访问令牌
+- `web_auth_realms`：网页登录方式，`system`（宿主机账户）和 / 或 `token`（访问令牌）；没有这一项时只有 `token`。`deploy.sh` 新安装写为 `["system", "token"]`，见下文“网页登录”
+- `web_session_idle_minutes` / `web_session_max_hours`：网页会话的空闲超时（默认 30 分钟，1–1440）和最长有效期（默认 12 小时，1–720）
+- `web_admin_groups`：除 uid 0 外允许用系统账户登录的组，默认 `["sudo", "wheel"]`；`[]` 表示只允许 uid 0
+- `web_root_login`：是否允许 uid 0 账户直接登录，默认 `true`
+- `web_trusted_proxies`：可信反向代理的地址或网段（如 `["127.0.0.1", "10.0.0.0/24"]`）。只有来自这些地址的请求，才采信 `X-Forwarded-For`、`X-Forwarded-Proto`、`X-Forwarded-Host`
 - `default_engine`：`auto`、`userspace`、`kernel`
 - `kernel_engine_order`：Linux 内核引擎尝试顺序；省略时默认 `["tc"]`
 - `managed_network_auto_repair`：托管网络链路变化后的自动修复
@@ -270,6 +278,42 @@ Authorization: Bearer <web_token>
 没有配置 `web_tls_cert_file` 时，Veer 第一次启动在安装目录的 `tls/` 下生成自签证书（ECDSA P-256，有效期 10 年，私钥 0600），包含 localhost、回环地址、主机名、`web_bind` 和当时各网卡的地址。证书生成后保持不变，重启和升级后指纹不变，客户端可以固定它；只在过期、文件损坏或执行 `veer tls regenerate` 时重新生成，指纹随之改变。浏览器首次访问会提示证书不受信任，请与 `veer tls fingerprint` 输出的 SHA-256 指纹（部署结束时也会打印）核对后继续。WHMCS 等远程 API 客户端改用 `https://` 地址；使用自签证书时需开启其跳过证书校验选项，或把证书导入客户端的信任库。
 
 自备证书（例如 ACME 签发）时设置 `web_tls_cert_file` 和 `web_tls_key_file`；文件更新后约 30 秒内自动换用新证书，不用重启。`veer tls regenerate` 只用于自签证书，执行后需重启服务。
+
+## 网页登录
+
+WebUI 有两种登录方式，由 `web_auth_realms` 决定：
+
+- **系统账户**（`system`）：用宿主机的账户和密码登录，类似 PVE 的 `root@pam`，登录后身份显示为 `root@system`、`alice@system`。
+- **访问令牌**（`token`）：输入 `config.json` 的 `web_token`，身份显示为 `token`。
+
+`deploy.sh` 新安装写入 `["system", "token"]`；升级已有安装时，没有这一项的配置写成 `["token"]`，行为和以前一样。用 `WEB_AUTH_REALMS=system,token` 重新部署，或改配置后重启，即可开启系统账户登录。脚本和集成用 `Authorization: Bearer <web_token>` 调 API，不受登录方式影响。
+
+**系统账户**
+
+- **谁能登录：** uid 0 的账户，以及 `web_admin_groups`（默认 `sudo`、`wheel`）的成员。组成员按 `/etc/group` 的成员列表和账户的主组判断，不解析 sudoers。`web_root_login: false` 时禁止 uid 0 账户直接登录，管理员用自己的账户登录。
+- **连接要求：** 只在 HTTPS（`web_tls`）或本机回环连接上接受系统账户密码。前面有反向代理时，把代理地址写进 `web_trusted_proxies`，代理用 `X-Forwarded-Proto: https` 声明客户端用的是 HTTPS，`X-Forwarded-For` 给出客户端地址；不在列表里的来源发来的这些头一律忽略。代理到 Veer 这一段由部署者保护：放在同一台主机或受信网络里；开着 `web_tls` 时远程代理必须用 HTTPS 连 Veer。本机上的代理不在列表里时，带转发头的回环请求不算本机访问；Veer 自己有规则把管理面端口转发出去时，本机明文连接也不算。条件不满足时登录页把“系统账户”置灰并说明原因。
+- **同机反向代理：** 和 Veer 在同一台主机上的反向代理必须二选一：
+  - 写进 `web_trusted_proxies`，并发送 `X-Forwarded-For` 和 `X-Forwarded-Proto`；
+  - 只对客户端提供 HTTPS，自己终止 TLS。
+
+  对外用明文 HTTP、又不发转发头的本机代理（例如 nginx 默认不加 `X-Forwarded-For`），会让远程客户端在 Veer 看来是本机回环连接，系统账户密码就会经明文网络传输。Veer 无法分辨这种情况，只能由部署者避免。
+- **校验方式：** 发布版是静态二进制，不链接 libpam。守护进程以 root 运行，直接读 `/etc/passwd`、`/etc/shadow`、`/etc/group`，用纯 Go 校验 yescrypt（`$y$`，Debian 12 / PVE 8 / Ubuntu 22.04 起的默认）、sha512-crypt（`$6$`）、sha256-crypt（`$5$`）、md5-crypt（`$1$`，OpenWrt 常见）和 bcrypt（`$2a$`、`$2b$`、`$2y$`）。因此：
+  - 只有 `/etc/shadow` 里的本地账户能登录；LDAP、SSSD、NIS 等账户不能登录。
+  - PAM 里配置的策略不生效，包括 pam_faillock、pam_access、二次验证模块和密码复杂度要求。
+  - 锁定的账户（`passwd -l`，哈希以 `!` 或 `*` 开头）、没有密码的账户（OpenWrt 默认的 root 就是这样）、按 shadow 字段已过期的账户（`chage -E`）和已过期或必须先修改的密码（`passwd -e`）都会被拒绝。网页不提供改密码；需要时在主机上用 `passwd` 修改。
+- **RHEL 系：** `/etc/shadow` 权限为 `0000`，root 也需要 `CAP_DAC_READ_SEARCH` 才能读取。`deploy.sh` 检测到这种情况会给服务加上这项能力；它在服务冷重启后生效。读不到账户文件时，日志和登录页会说明。
+- **登录失败：** 无论是密码错、账户不存在、不是管理员还是账户被锁，浏览器看到的都是同一句“用户名或密码错误”，原因只写进 Veer 日志（`journalctl -u veer`）。
+
+**会话**
+
+登录成功后服务端下发会话 Cookie（HttpOnly、SameSite=Strict，HTTPS 下带 Secure），浏览器不再保存令牌；以前保存在浏览器里的 `web_token` 会在打开面板时自动换成会话并删除。
+
+- **有效期：** 空闲 `web_session_idle_minutes`（默认 30）分钟没有操作，或登录满 `web_session_max_hours`（默认 12）小时，会话结束。面板的自动刷新不算操作。
+- **重启：** 会话用安装目录下 `auth/session.key` 签名，重启和热重启后仍然有效。删除这个文件再重启，所有会话立即失效。
+- **失效条件：** 登出会撤销会话；系统账户改了密码、被锁定、过期或移出管理组，访问令牌会话在 `web_token` 轮换后，都会立即失效。
+- **写操作：** 带 Cookie 的写请求要带登录时下发的 CSRF 令牌，并校验 `Origin`，详见 [API.md](API.md#网页登录与会话)。
+
+**限速与日志：** 网页登录失败和错误的 Bearer Token 按客户端共用一组限速（每分钟 10 次；IPv4 按地址，IPv6 按 /64 前缀），在校验之前计数，并发请求也绕不过去。成功、失败、登出都写入日志，格式便于 fail2ban 匹配（`auth: login failed client=<地址> ...`），日志不含密码，用户名里的空格、引号等字符会被替换。过滤规则示例见 [API.md](API.md#日志)。
 
 ## Dataplane
 
@@ -581,6 +625,7 @@ modules/addons/forward/
 
 - 不要提交真实 `config.json`
 - 不要泄露 `web_token`
+- 系统账户登录只放管理员（uid 0 和 `web_admin_groups`），并且只在 HTTPS 或本机连接上接受密码；需要更严格时用 `web_root_login: false` 禁止 root 直接登录
 - 管理面默认绑定 `127.0.0.1`，不要无保护暴露到公网
 - 如需远程管理，建议放在 VPN、堡垒机、反向代理鉴权或受限管理网后面
 - 部署脚本仅在首次交互安装时显示新生成的管理令牌；升级或非交互执行会隐藏令牌，避免写入自动化日志
@@ -590,16 +635,16 @@ modules/addons/forward/
 
 ### 信任模型
 
-Veer 是宿主机网络控制面，核心进程需要修改接口、路由、TC/XDP、nftables 与网络命名空间。获得 `web_token` 的主体等同于网络管理员；获得 `web_token` 和 `plugin_admin_token` 的主体还可以安装、信任、启停和更新插件。宿主机 root 始终在信任边界内，Veer 不试图防御 root。
+Veer 是宿主机网络控制面，核心进程需要修改接口、路由、TC/XDP、nftables 与网络命名空间。获得 `web_token` 的主体，以及能用系统账户登录的主机管理员，都等同于网络管理员；获得 `web_token` 和 `plugin_admin_token` 的主体还可以安装、信任、启停和更新插件。宿主机 root 始终在信任边界内，Veer 不试图防御 root。
 
-管理 API 不内置 TLS。默认回环监听是安全基线；远程管理必须置于受信管理网、VPN、堡垒机或启用 TLS 和访问控制的反向代理之后。`/healthz` 与 `/readyz` 故意匿名开放，只返回最小存活状态；其余 `/api/*`、`/metrics` 与 `/debug/pprof/` 均需要 Bearer Token。
+管理 API 不内置 TLS。默认回环监听是安全基线；远程管理必须置于受信管理网、VPN、堡垒机或启用 TLS 和访问控制的反向代理之后。`/healthz` 与 `/readyz` 故意匿名开放，只返回最小存活状态；其余 `/api/*`、`/metrics` 与 `/debug/pprof/` 均需要 Bearer Token 或网页会话（`/api/auth/*` 登录接口除外）。
 
 ### 已有门禁
 
 | 边界 | 门禁 | 使用影响 |
 | --- | --- | --- |
-| 管理面 | 默认 `127.0.0.1`、常量时间令牌比较、失败尝试限速；`deploy.sh` 对新建远程配置、首次从回环地址改为远程监听或在远程监听下显式轮换令牌时要求至少 24 个字符；既有远程配置的短令牌为兼容升级仅告警、不会阻断；无 Cookie/CORS、请求体和 HTTP 超时上限 | 正常请求无感；连续输错令牌会短暂返回 `429`；既有短令牌应安排轮换 |
-| 浏览器 | CSP、禁止嵌套、无引用来源、能力策略；插件 UI 在无同源权限的 sandbox iframe 中运行 | 主令牌为保持日常体验保存在 `localStorage`；插件高权令牌仅保存在当前标签页 `sessionStorage` |
+| 管理面 | 默认 `127.0.0.1`、常量时间令牌比较、失败尝试限速（网页登录与 Bearer 共用，可信代理按真实客户端计数）；系统账户只放管理员、只在 HTTPS 或本机连接上接受密码；`deploy.sh` 对新建远程配置、首次从回环地址改为远程监听或在远程监听下显式轮换令牌时要求至少 24 个字符；既有远程配置的短令牌为兼容升级仅告警、不会阻断；网页会话 Cookie 为 HttpOnly + SameSite=Strict（HTTPS 下 Secure），写请求要求 CSRF 令牌并校验 Origin；无 CORS、请求体和 HTTP 超时上限 | 正常请求无感；连续输错密码或令牌会短暂返回 `429`；既有短令牌应安排轮换 |
+| 浏览器 | CSP、禁止嵌套、无引用来源、能力策略；插件 UI 在无同源权限的 sandbox iframe 中运行，拿不到会话 | 浏览器只持有 HttpOnly 会话 Cookie，空闲 30 分钟或 12 小时后需重新登录；旧版保存在 `localStorage` 的令牌打开面板时自动换成会话并删除；插件高权令牌仅保存在当前标签页 `sessionStorage`，登出时清除 |
 | 本地文件 | 配置、SQLite/WAL/SHM、插件密钥与 IPC 默认 `0600/0700`；拒绝敏感路径符号链接 | 权限不安全时启动阶段自动收紧或拒绝 |
 | 插件供应链 | 插件默认关闭；包签名、发布者审核、TUF 仓库元数据、摘要复核、原子安装/回滚与配额 | 首次发布者或权限扩张需要一次明确审核 |
 | 插件运行时 | 默认独立进程、full sandbox、seccomp/cgroup/资源上限、显式权限与网络 CIDR、Host broker | 宿主机不满足 full sandbox 时拒绝外部插件，不静默降级 |
@@ -620,7 +665,7 @@ Veer 是宿主机网络控制面，核心进程需要修改接口、路由、TC/
 
 ### 保留风险与后续门禁
 
-1. Web 主令牌保存在 `localStorage` 以避免每次打开面板都重新输入。当前通过无第三方脚本、DOM 文本构造、CSP 和插件 iframe 隔离降低 XSS 风险；未来若引入任何第三方前端代码，必须先改为短期会话凭据或受保护的认证代理。
+1. 系统账户登录直接读 `/etc/shadow`，不经过 PAM：PAM 里的锁定、二次验证和访问控制策略对网页登录不生效，LDAP/SSSD 账户不能登录；网页登录目前没有二次验证，暴力破解依靠限速和 fail2ban。访问令牌仍是一个长期共享凭据，暂不支持多个具名 API 令牌。
 2. 核心服务仍是高权限网络守护进程。systemd 已限制可写路径和 capability 集，但 `CAP_SYS_ADMIN` 等能力由插件命名空间与网络编排路径需要；应继续拆分可由低权限 broker 承担的操作。
 3. WHMCS 域名所有权和跨进程配额分别属于业务授权与并发边界。本次已修复配额竞态；域名验证需要结合实际域名资产来源设计，不能用 DNS 解析结果冒充所有权证明。
 4. 稳定性和性能测试需要 root Linux、真实内核能力和可重复的硬件基线，发布前应在专用测试机按发布风险运行 `sh scripts/verify-plugin-release.sh stability` 与 `performance`。`privileged`（插件特权集成与 PPPoE 黑盒）已在 GitHub CI 中以 root 运行，专用测试机上仍可手动复跑。

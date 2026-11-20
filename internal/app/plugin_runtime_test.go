@@ -15577,15 +15577,6 @@ func (c *pluginControlNetAdminTest) updateLinkInfo(info pluginControlNetLinkInfo
 	c.links[info.Name] = info
 }
 
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
-}
-
 func countStringsWithPrefix(values []string, prefix string) int {
 	count := 0
 	for _, value := range values {

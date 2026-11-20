@@ -195,7 +195,7 @@
 
   app.startPolling = function startPolling() {
     app.stopPolling();
-    if (!app.getToken() || document.hidden) return;
+    if (!app.isAuthenticated() || document.hidden) return;
 
     app.state.pollerId = setInterval(() => app.runAutoRefresh(), 5000);
   };
@@ -291,7 +291,7 @@
         includeWorkers: true,
         includeStats: app.state.activeTab === 'diagnostics'
       });
-      if (app.getToken() && Object.keys(app.state.requestFailures || {}).length === 0) {
+      if (app.isAuthenticated() && Object.keys(app.state.requestFailures || {}).length === 0) {
         app.notify('success', app.t('toast.refreshed', { item: app.t('overview.title') }));
       }
     });
@@ -357,32 +357,6 @@
   if (app.el.emptyAddIPv6AssignmentBtn) {
     app.el.emptyAddIPv6AssignmentBtn.addEventListener('click', () => app.focusSection('ipv6-assignments', app.el.ipv6AssignmentFormTitle, app.el.ipv6ParentPicker || app.el.ipv6ParentInterface));
   }
-
-  app.el.tokenSubmit.addEventListener('click', () => {
-    const token = app.el.tokenInput.value.trim();
-    if (!token) return;
-    app.setToken(token);
-    app.hideTokenModal();
-    app.init();
-  });
-
-  app.el.tokenInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') app.el.tokenSubmit.click();
-  });
-
-  app.el.logoutBtn.addEventListener('click', async () => {
-    const confirmed = await app.confirmAction({
-      title: app.t('confirm.logoutTitle'),
-      message: app.t('auth.logoutConfirm'),
-      confirmText: app.t('auth.logout'),
-      cancelText: app.t('common.cancel')
-    });
-    if (!confirmed) return;
-
-    app.clearToken();
-    app.notify('success', app.t('toast.loggedOut'));
-    app.showTokenModal();
-  });
 
   bindInterfacePicker(app.el.inInterface, app.el.inInterfacePicker, {
     onSync() {
@@ -601,7 +575,7 @@
       return;
     }
 
-    if (!app.getToken()) return;
+    if (!app.isAuthenticated()) return;
     app.runAutoRefresh();
     app.startPolling();
   });
@@ -1323,9 +1297,14 @@
     });
   }
 
+  // init starts the dashboard once there is a session; restoreSession (in
+  // auth.js) shows the sign-in form otherwise, and signing in calls init
+  // again.
   app.init = function init() {
-    if (!app.getToken()) {
-      app.showTokenModal();
+    if (!app.isAuthenticated()) {
+      app.restoreSession().then((ready) => {
+        if (ready) app.init();
+      });
       return;
     }
 

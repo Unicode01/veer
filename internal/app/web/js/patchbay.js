@@ -90,14 +90,14 @@
     if (list.length > TRAFFIC_SLOTS) list.shift();
   }
   async function sampleTraffic(cfg) {
-    if (!cfg || !cfg.stats || !app.getToken() || document.hidden) return;
+    if (!cfg || !cfg.stats || !app.isAuthenticated() || document.hidden) return;
     const store = trafficFor(cfg);
     if (store.busy || Date.now() - store.at < 4000) return;
     store.busy = true;
     store.at = Date.now();
     try {
       const query = cfg.state === 'sites' ? '' : '?page=1&page_size=500';
-      const response = await fetch(cfg.stats + query, { headers: { Authorization: 'Bearer ' + app.getToken() }, cache: 'no-store' });
+      const response = await app.authFetch(cfg.stats + query, { cache: 'no-store' }, { background: true });
       if (!response.ok) return;
       const payload = await response.json();
       const items = Array.isArray(payload) ? payload : (payload && payload.items) || [];

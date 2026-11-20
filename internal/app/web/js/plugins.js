@@ -2624,14 +2624,7 @@ div:has(> .veer-table) { max-width: 100%; overflow-x: auto; }
     const basePath = String(plugin && plugin.asset_base_path || '').trim();
     const entryPath = normalizePluginUIAssetPath(entry);
     const url = basePath + entryPath.encoded;
-    const resp = await fetch(url, {
-      headers: { Authorization: 'Bearer ' + app.getToken() }
-    });
-    if (resp.status === 401) {
-      app.clearToken();
-      app.showTokenModal({ rejected: true });
-      throw new Error('unauthorized');
-    }
+    const resp = await app.authFetch(url);
     if (!resp.ok) throw new Error(resp.statusText || String(resp.status));
     const raw = await resp.text();
     return decoratePluginHTML(raw, plugin);
@@ -2925,13 +2918,12 @@ div:has(> .veer-table) { max-width: 100%; overflow-x: auto; }
       throw pluginRPCFailure('plugin UI assets are unavailable', 404, 'plugin_ui_asset_unavailable');
     }
     const assetPath = normalizePluginUIAssetPath(rawPath);
-    const response = await fetch(basePath + assetPath.encoded, {
-      headers: { Authorization: 'Bearer ' + app.getToken() }
-    });
-    if (response.status === 401) {
-      app.clearToken();
-      app.showTokenModal({ rejected: true });
-      throw pluginRPCFailure('unauthorized', 401, 'unauthorized');
+    let response;
+    try {
+      response = await app.authFetch(basePath + assetPath.encoded);
+    } catch (err) {
+      if (err && err.message === 'unauthorized') throw pluginRPCFailure('unauthorized', 401, 'unauthorized');
+      throw err;
     }
     if (!response.ok) {
       throw pluginRPCFailure(response.statusText || 'plugin UI asset request failed', response.status || 500, 'plugin_ui_asset_fetch');

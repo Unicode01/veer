@@ -208,9 +208,7 @@ function createHarness() {
     formatBytes(value) {
       return String(Number(value || 0)) + ' B';
     },
-    getToken() {
-      return 'test-token';
-    },
+
 	getPluginAdminToken() {
 	  return pluginAdminToken;
 	},
@@ -220,8 +218,23 @@ function createHarness() {
 	clearPluginAdminToken() {
 	  pluginAdminToken = '';
 	},
-    clearToken() {
-      this.clearedToken = true;
+    isAuthenticated() {
+      return true;
+    },
+    async authFetch(url, init) {
+      const request = Object.assign({ credentials: 'same-origin' }, init || {});
+      request.headers = Object.assign({}, request.headers || {});
+      const method = String(request.method || 'GET').toUpperCase();
+      if (method !== 'GET' && method !== 'HEAD') request.headers['X-Veer-CSRF'] = 'test-csrf';
+      const response = await rawHandler(url, request);
+      if (response.status === 401) {
+        this.handleUnauthorized(response);
+        throw new Error('unauthorized');
+      }
+      return response;
+    },
+    handleUnauthorized() {
+      this.unauthorizedHandled = true;
     },
     showTokenModal() {
       this.showedTokenModal = true;
@@ -337,7 +350,9 @@ test('package staging sends one self-contained package without detached signatur
   assert.equal(rawRequest.path, '/api/plugin-packages/stage');
   assert.equal(rawRequest.options.method, 'POST');
 	assert.equal(rawRequest.options.body, packageFile);
-  assert.equal(rawRequest.options.headers.Authorization, 'Bearer test-token');
+  assert.equal(rawRequest.options.headers.Authorization, undefined);
+  assert.equal(rawRequest.options.headers['X-Veer-CSRF'], 'test-csrf');
+  assert.equal(rawRequest.options.credentials, 'same-origin');
 	assert.equal(rawRequest.options.headers['X-Veer-Plugin-Admin'], 'test-plugin-admin');
 	assert.equal(rawRequest.options.headers['Content-Type'], 'application/zip');
 	assert.equal(rawRequest.options.headers['X-Veer-Plugin-Signer'], undefined);

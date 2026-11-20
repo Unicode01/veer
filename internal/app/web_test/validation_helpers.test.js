@@ -885,8 +885,11 @@ function createHarness() {
       pendingRows[type + ':' + id] = !!pending;
       if (!pending) delete pendingRows[type + ':' + id];
     },
-    getToken() {
-      return '';
+    isAuthenticated() {
+      return false;
+    },
+    restoreSession() {
+      return Promise.resolve(false);
     },
     showTokenModal() {},
     refreshLocalizedUI() {},
@@ -2820,7 +2823,7 @@ test('polling refreshes only the active tab and skips overlapping ticks', async 
   const { app, intervals } = createHarness();
   const calls = [];
   const resolvers = [];
-  app.getToken = () => 'token';
+  app.isAuthenticated = () => true;
   app.state.activeTab = 'sites';
   app.refreshDashboard = (options) => {
     calls.push(options);

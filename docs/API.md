@@ -22,7 +22,7 @@ Veer 当前不只是规则转发 API，还包含：
 - Base URL: `http://<host>:<web_port>`
 - 默认端口: `8080`
 - API 前缀: `/api`
-- 认证方式: `Authorization: Bearer <web_token>`
+- 认证方式: `Authorization: Bearer <web_token>`（脚本与集成）；WebUI 用登录换来的会话 Cookie，见[网页登录与会话](#网页登录与会话)
 - 插件高权限操作额外要求: `X-Veer-Plugin-Admin: <plugin_admin_token>`
 - 写操作默认使用 `application/json`
 - 探活端点: `/healthz`、`/readyz` 不使用 `/api` 前缀
@@ -51,9 +51,9 @@ Veer 当前不只是规则转发 API，还包含：
 
 ## 认证与错误约定
 
-所有 `/api/*` 端点以及 `/metrics`、`/debug/pprof/` 都需要 Bearer Token。`/healthz` 和 `/readyz` 用于本机或负载均衡探活，不需要 Bearer Token。
+所有 `/api/*` 端点以及 `/metrics`、`/debug/pprof/` 都需要 Bearer Token 或有效的网页会话；`/api/auth/session`、`/api/auth/login`、`/api/auth/logout` 例外（见[网页登录与会话](#网页登录与会话)）。`/healthz` 和 `/readyz` 用于本机或负载均衡探活，不需要 Bearer Token。脚本和集成照旧只用 Bearer Token，不需要 Cookie，也不需要 CSRF 头。
 
-Bearer Token 认证失败按客户端地址限流：1 分钟窗口内允许 10 次失败，之后返回 `429 Too Many Requests`，并通过 `Retry-After` 告知剩余等待秒数。一次成功的 Bearer Token 认证会清除该客户端的失败记录；插件管理员 Token 错误返回 `403`，不单独计入这组 `401` 限流。
+认证失败按客户端限流：IPv4 按地址，IPv6 按 /64 前缀（一台主机通常拥有整个 /64），1 分钟窗口内允许 10 次失败，之后返回 `429 Too Many Requests`，并通过 `Retry-After` 告知剩余等待秒数。错误的 Bearer Token 和失败的网页登录（系统账户或访问令牌）计入同一组；网页登录在校验凭据之前就先占用一次额度、成功后清零，所以并发请求也只能校验 10 次；在校验前就被拒绝的登录（请求体错误、登录方式未启用、连接不安全、账户文件读不到）不占额度；没有凭据的请求和过期的会话 Cookie 不计入，以免页面开着过期后把自己的地址锁住。一次成功的认证会清除该客户端的失败记录；插件管理员 Token 错误返回 `403`，不单独计入这组限流。配置了 `web_trusted_proxies` 时，经可信代理的请求按代理报告的客户端地址计数。失败记录最多保存 4096 个客户端；记满时遗忘窗口开始最早的那个，不会因此拒绝新的客户端。日志里的 `client=` 始终是完整地址。
 
 请求头示例：
 
@@ -72,8 +72,8 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 
 - `200 OK`: 成功
 - `400 Bad Request`: 参数错误或请求体非法
-- `401 Unauthorized`: Token 错误或缺失
-- `403 Forbidden`: 插件管理员 Token 缺失、错误或该 API 未配置启用
+- `401 Unauthorized`: Token 错误或缺失，或会话已失效（响应头 `X-Veer-Auth-Reason` 说明原因）
+- `403 Forbidden`: 插件管理员 Token 缺失、错误或该 API 未配置启用；会话请求缺少或带错 `X-Veer-CSRF`、来源不符（`code` 为 `csrf` / `cross_origin`）
 - `404 Not Found`: 资源不存在
 - `405 Method Not Allowed`: 请求方法不支持
 - `429 Too Many Requests`: 同一客户端的认证失败次数超过限制
@@ -116,7 +116,110 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - `401` 和部分 `405` 仍可能是纯文本响应
 - `Kernel Runtime` 的调试字段会随版本演进增加，外部解析时应按“已知字段尽量读取，未知字段忽略”处理
 
+## 网页登录与会话
+
+WebUI 不再保存 `web_token`：登录时把凭据交给服务端，换一个会话 Cookie。登录方式由 `config.json` 的 `web_auth_realms` 决定：
+
+- `token`（访问令牌）：输入 `web_token` 登录，身份显示为 `token`。明文 HTTP 下照常可用，但日志和登录页会提示令牌以明文传输。
+- `system`（系统账户）：输入宿主机账户和密码，身份显示为 `root@system`、`alice@system`。只接受 uid 0 账户（`web_root_login: false` 时不接受）和 `web_admin_groups`（默认 `sudo`、`wheel`）的成员。连接必须是 TLS（`web_tls`）、本机回环，或来自 `web_trusted_proxies` 且代理声明客户端使用 HTTPS；否则返回 `403`、`code: insecure_channel`。
+
+老配置没有 `web_auth_realms` 时只启用 `token`，行为不变。
+
+系统账户由守护进程直接读 `/etc/passwd`、`/etc/shadow`、`/etc/group` 校验（发布版是不链接 libpam 的静态二进制）：支持 yescrypt（`$y$`）、sha512-crypt（`$6$`）、sha256-crypt（`$5$`）、md5-crypt（`$1$`）和 bcrypt（`$2a$`、`$2b$`、`$2y$`）；锁定（`!`、`*`）、空密码、按 shadow 字段已过期的账户和密码一律拒绝。LDAP、SSSD 等 NSS 账户和 PAM 里配置的策略（faillock、二次验证、pam_access 等）都不生效。
+
+### 会话
+
+- Cookie `veer_session`：HttpOnly、SameSite=Strict、`Path=/`，TLS 下（含可信代理声明的 HTTPS）带 Secure；不设过期时间，关闭浏览器即丢弃。
+- 内容是用 `auth/session.key`（安装目录下，0600，首次启动生成）签名的票据，所以重启和热重启后会话仍然有效。删除该文件并重启会让所有会话失效。
+- 空闲 `web_session_idle_minutes`（默认 30）分钟没有用户操作、或登录满 `web_session_max_hours`（默认 12）小时，会话结束。带 `X-Veer-Background: 1` 的请求（WebUI 的自动刷新）不算操作，不延长空闲时间；其他请求每分钟最多刷新一次 Cookie。
+- 每个请求都重新检查：登出的会话被撤销（记录在数据库，重启后仍有效）；系统账户被锁定、过期、移出管理组或改了密码，访问令牌会话在 `web_token` 轮换后，都立即失效；从 `web_auth_realms` 去掉某种登录方式，该方式的会话也失效。系统账户的会话同样只在安全连接上有效。
+
+会话失效时，需要认证的接口返回 `401`，并在 `X-Veer-Auth-Reason` 说明原因：`session_idle`、`session_expired`、`session_revoked`、`session_credentials_changed`、`session_account_refused`、`session_realm_disabled`、`session_insecure_channel`、`session_invalid`。
+
+### CSRF
+
+带会话 Cookie 的 `POST`、`PUT`、`PATCH`、`DELETE` 请求必须带 `X-Veer-CSRF: <csrf_token>`（登录响应和 `GET /api/auth/session` 返回，用途与 PVE 的 `CSRFPreventionToken` 相同），否则返回 `403`、`code: csrf`。浏览器发了 `Origin` 时，它的主机和端口必须与请求的 `Host` 一致（经可信代理时与 `X-Forwarded-Host` 一致）；`Sec-Fetch-Site` 为 `cross-site` 或 `same-site` 的请求也被拒绝（`code: cross_origin`）。反向代理请保留 `Host` 或设置 `X-Forwarded-Host`。Bearer 请求不受这些限制。
+
+### `GET /api/auth/session`
+
+不需要凭据。返回当前身份（若有）、可用的登录方式和本次连接的情况：
+
+```json
+{
+  "authenticated": true,
+  "identity": { "realm": "system", "user": "root", "name": "root@system", "via": "session" },
+  "csrf_token": "q0bY…",
+  "session": { "issued_at": "2026-11-20T08:00:00Z", "expires_at": "2026-11-20T20:00:00Z", "idle_timeout_seconds": 1800 },
+  "methods": {
+    "realms": ["system", "token"],
+    "system": { "enabled": true, "available": true, "default_user": "root" },
+    "token": { "enabled": true, "available": true }
+  },
+  "transport": { "secure": true, "loopback": false }
+}
+```
+
+- 未登录时 `authenticated` 为 `false`，没有 `identity`、`csrf_token`、`session`；带着失效 Cookie 访问时 `refused` 给出上面的原因。
+- `methods.system.available` 为 `false` 时 `reason` 是 `disabled`（未在 `web_auth_realms` 启用）、`insecure_channel`（需要 HTTPS 或本机访问）或 `accounts_unreadable`（读不到账户文件）。`default_user` 在禁止 root 登录时为空。
+- 用 Bearer Token 调用时 `identity.via` 为 `bearer`，没有 `csrf_token`。
+
+### `POST /api/auth/login`
+
+请求体必须是 `application/json`；浏览器带 `Origin` 时须与本面板同源。
+
+```json
+{ "realm": "system", "username": "root", "password": "…" }
+```
+
+```json
+{ "realm": "token", "token": "<web_token>" }
+```
+
+成功返回 `200`、设置 `veer_session`，响应体同 `GET /api/auth/session`。失败：
+
+| 状态 | `code` | 含义 |
+| --- | --- | --- |
+| `400` | `bad_request` | 请求体不合法或 `realm` 未知 |
+| `401` | `invalid_credentials` | 用户名、密码或令牌不对。账户不存在、不是管理员、被锁定、已过期都返回同样的结果，原因只写进日志 |
+| `403` | `realm_disabled` | 该登录方式没有在 `web_auth_realms` 启用 |
+| `403` | `insecure_channel` | 系统账户登录需要 TLS、本机回环或可信代理的 HTTPS |
+| `403` | `cross_origin` | `Origin` 与面板不一致 |
+| `415` | `bad_request` | 不是 JSON 请求体 |
+| `429` | — | 失败次数超过限制，见 `Retry-After` |
+| `503` | `unavailable` | 读不到账户文件，或同时校验的系统账户登录过多 |
+
+### `POST /api/auth/logout`
+
+带会话 Cookie 和 `X-Veer-CSRF`。撤销当前会话并清除 Cookie，返回 `{"ok": true}`。没有有效会话时只清除 Cookie。
+
+### 日志
+
+登录结果写入服务日志，不含密码和令牌，用户名中空格、引号等字符替换为 `?`：
+
+```text
+auth: login accepted client=203.0.113.9 realm=system user=root session=Zk3x9Q2a
+auth: login failed client=203.0.113.9 realm=system user=root reason=bad_password
+auth: login refused client=203.0.113.9 realm=system user=root reason=insecure_channel (plain HTTP from a remote client)
+auth: bearer token rejected client=203.0.113.9
+auth: logout client=203.0.113.9 realm=system user=root session=Zk3x9Q2a
+```
+
+fail2ban 过滤规则示例（`client=` 写在用户名之前，用户名无法伪造它）：
+
+```ini
+[Definition]
+failregex = auth: (?:login failed|bearer token rejected) client=<HOST>\b
+```
+
+经 `web_trusted_proxies` 中的代理访问时，`client=` 是代理报告的客户端地址；fail2ban 需要在代理所在主机上封禁。
+
 ## 接口总览
+
+### 登录与会话
+
+- `GET /api/auth/session`（无需凭据）
+- `POST /api/auth/login`（无需凭据）
+- `POST /api/auth/logout`（会话 + `X-Veer-CSRF`）
 
 ### 健康检查
 

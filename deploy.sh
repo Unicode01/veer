@@ -20,6 +20,8 @@
 #   WEB_PORT      Web 管理端口   (默认 8080)
 #   WEB_TLS       管理面使用 HTTPS（自签证书），对应 config.json 的 web_tls
 #                 (新安装默认 true；已有安装不指定时保持原状，未设置过的写为 false)
+#   WEB_AUTH_REALMS 网页登录方式，逗号分隔的 system（系统账户）/token（访问令牌），对应 web_auth_realms
+#                 (新安装默认 system,token；已有安装不指定时保持原状，未设置过的写为 token)
 #   WEB_TOKEN     Bearer Token，对应 config.json 的 web_token (默认随机生成；新远程配置至少 24 个字符)
 #   PLUGIN_ADMIN_TOKEN 插件高权限 Token，对应 plugin_admin_token (首次安装默认独立随机生成；新远程配置至少 24 个字符)
 #   VEER_SERVICE_MANAGER 服务管理器，auto/systemd/openrc，默认 auto
@@ -92,6 +94,8 @@ WEB_UI_ENABLED_EXPLICIT=0
 [[ ${WEB_UI_ENABLED+x} ]] && WEB_UI_ENABLED_EXPLICIT=1
 WEB_TLS_EXPLICIT=0
 [[ ${WEB_TLS+x} ]] && WEB_TLS_EXPLICIT=1
+WEB_AUTH_REALMS_EXPLICIT=0
+[[ ${WEB_AUTH_REALMS+x} ]] && WEB_AUTH_REALMS_EXPLICIT=1
 WEB_PORT_EXPLICIT=0
 [[ ${WEB_PORT+x} ]] && WEB_PORT_EXPLICIT=1
 WEB_TOKEN_EXPLICIT=0
@@ -117,6 +121,7 @@ WEB_PORT="${WEB_PORT:-8080}"
 WEB_BIND="${WEB_BIND:-127.0.0.1}"
 WEB_UI_ENABLED="${WEB_UI_ENABLED:-true}"
 WEB_TLS="${WEB_TLS:-true}"
+WEB_AUTH_REALMS="${WEB_AUTH_REALMS:-system,token}"
 WEB_TOKEN="${WEB_TOKEN:-$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)}"
 PLUGIN_ADMIN_TOKEN="${PLUGIN_ADMIN_TOKEN:-$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)}"
 REMOTE_MANAGEMENT_MINIMUM_TOKEN_CHARACTERS=24
@@ -409,6 +414,16 @@ write_service_definition() {
     if kernel_helper_module_installed; then
         kernel_module_capability="CAP_SYS_MODULE"
     fi
+    # System account login reads /etc/shadow. Root reads it as its owner where
+    # the owner may read it (Debian, Alpine, Arch); where it is mode 0000
+    # (RHEL family) only CAP_DAC_READ_SEARCH lets the service read it.
+    local shadow_capability="" shadow_owner="" shadow_mode=""
+    if shadow_owner="$(stat -c '%u' /etc/shadow 2>/dev/null)" && shadow_mode="$(stat -c '%a' /etc/shadow 2>/dev/null)"; then
+        shadow_mode="$(printf '%03d' "$((10#${shadow_mode}))")"
+        if [[ "${shadow_owner}" != "0" ]] || (( (${shadow_mode: -3:1} & 4) == 0 )); then
+            shadow_capability="CAP_DAC_READ_SEARCH"
+        fi
+    fi
 
     cat > "${INSTALL_DIR}/veer-runtime-prepare" <<EOF
 #!/bin/sh
@@ -482,8 +497,8 @@ ReadWritePaths=-${BPF_STATE_DIR}
 ReadWritePaths=/sys/fs/cgroup
 PrivateTmp=true
 
-AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_SETUID CAP_SETGID CAP_KILL CAP_SYS_CHROOT CAP_SYS_ADMIN CAP_SYS_PTRACE ${kernel_module_capability}
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_SETUID CAP_SETGID CAP_KILL CAP_SYS_CHROOT CAP_SYS_ADMIN CAP_SYS_PTRACE ${kernel_module_capability}
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_SETUID CAP_SETGID CAP_KILL CAP_SYS_CHROOT CAP_SYS_ADMIN CAP_SYS_PTRACE ${kernel_module_capability} ${shadow_capability}
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_SETUID CAP_SETGID CAP_KILL CAP_SYS_CHROOT CAP_SYS_ADMIN CAP_SYS_PTRACE ${kernel_module_capability} ${shadow_capability}
 
 StandardOutput=journal
 StandardError=journal
@@ -1095,12 +1110,14 @@ sync_config_file() {
     FORWARD_DEPLOY_EXPLICIT_WEB_BIND="${WEB_BIND_EXPLICIT}" \
     FORWARD_DEPLOY_EXPLICIT_WEB_UI_ENABLED="${WEB_UI_ENABLED_EXPLICIT}" \
     FORWARD_DEPLOY_EXPLICIT_WEB_TLS="${WEB_TLS_EXPLICIT}" \
+    FORWARD_DEPLOY_EXPLICIT_WEB_AUTH_REALMS="${WEB_AUTH_REALMS_EXPLICIT}" \
     FORWARD_DEPLOY_EXPLICIT_WEB_PORT="${WEB_PORT_EXPLICIT}" \
     FORWARD_DEPLOY_EXPLICIT_WEB_TOKEN="${WEB_TOKEN_EXPLICIT}" \
     FORWARD_DEPLOY_EXPLICIT_PLUGIN_ADMIN_TOKEN="${PLUGIN_ADMIN_TOKEN_EXPLICIT}" \
     FORWARD_DEPLOY_WEB_BIND="${WEB_BIND}" \
     FORWARD_DEPLOY_WEB_UI_ENABLED="${WEB_UI_ENABLED}" \
     FORWARD_DEPLOY_WEB_TLS="${WEB_TLS}" \
+    FORWARD_DEPLOY_WEB_AUTH_REALMS="${WEB_AUTH_REALMS}" \
     FORWARD_DEPLOY_WEB_PORT="${WEB_PORT}" \
     FORWARD_DEPLOY_WEB_TOKEN="${WEB_TOKEN}" \
     FORWARD_DEPLOY_PLUGIN_ADMIN_TOKEN="${PLUGIN_ADMIN_TOKEN}" \
@@ -1181,6 +1198,25 @@ def get_current_port(key: str):
     return value
 
 
+WEB_AUTH_REALM_NAMES = ("system", "token")
+
+
+def parse_web_auth_realms(value, label: str, from_env: bool = False):
+    # WEB_AUTH_REALMS is comma-separated; config.json holds a JSON list.
+    if from_env and isinstance(value, str):
+        value = [item for item in value.split(",") if item.strip()]
+    if not isinstance(value, list) or not value:
+        raise SystemExit(f"{label} 必须列出至少一种登录方式：system、token")
+    realms = []
+    for item in value:
+        if not isinstance(item, str) or item.strip().lower() not in WEB_AUTH_REALM_NAMES:
+            raise SystemExit(f"{label} 只支持 system、token，收到 {item!r}")
+        realm = item.strip().lower()
+        if realm not in realms:
+            realms.append(realm)
+    return realms
+
+
 def choose_value(key: str, default_value):
     if explicit_keys.get(key, False):
         return explicit_values[key]
@@ -1209,6 +1245,7 @@ explicit_keys = {
     "web_bind": os.environ["FORWARD_DEPLOY_EXPLICIT_WEB_BIND"] == "1",
     "web_ui_enabled": os.environ["FORWARD_DEPLOY_EXPLICIT_WEB_UI_ENABLED"] == "1",
     "web_tls": os.environ.get("FORWARD_DEPLOY_EXPLICIT_WEB_TLS", "0") == "1",
+    "web_auth_realms": os.environ.get("FORWARD_DEPLOY_EXPLICIT_WEB_AUTH_REALMS", "0") == "1",
     "web_port": os.environ["FORWARD_DEPLOY_EXPLICIT_WEB_PORT"] == "1",
     "web_token": os.environ["FORWARD_DEPLOY_EXPLICIT_WEB_TOKEN"] == "1",
     "plugin_admin_token": os.environ["FORWARD_DEPLOY_EXPLICIT_PLUGIN_ADMIN_TOKEN"] == "1",
@@ -1218,6 +1255,7 @@ explicit_values = {
     "web_bind": os.environ["FORWARD_DEPLOY_WEB_BIND"],
     "web_ui_enabled": env_bool("FORWARD_DEPLOY_WEB_UI_ENABLED"),
     "web_tls": os.environ.get("FORWARD_DEPLOY_WEB_TLS", "true") == "true",
+    "web_auth_realms": parse_web_auth_realms(os.environ.get("FORWARD_DEPLOY_WEB_AUTH_REALMS", "system,token"), "WEB_AUTH_REALMS", from_env=True),
     "web_port": env_int("FORWARD_DEPLOY_WEB_PORT"),
     "web_token": os.environ["FORWARD_DEPLOY_WEB_TOKEN"],
     "plugin_admin_token": os.environ["FORWARD_DEPLOY_PLUGIN_ADMIN_TOKEN"],
@@ -1230,6 +1268,12 @@ hardcoded_defaults = OrderedDict([
     ("web_port", env_int("FORWARD_DEPLOY_DEFAULT_WEB_PORT")),
     ("web_token", os.environ["FORWARD_DEPLOY_DEFAULT_WEB_TOKEN"]),
     ("plugin_admin_token", os.environ["FORWARD_DEPLOY_DEFAULT_PLUGIN_ADMIN_TOKEN"]),
+    ("web_auth_realms", ["system", "token"]),
+    ("web_session_idle_minutes", 30),
+    ("web_session_max_hours", 12),
+    ("web_admin_groups", ["sudo", "wheel"]),
+    ("web_root_login", True),
+    ("web_trusted_proxies", []),
     ("max_workers", 0),
     ("drain_timeout_hours", 24),
     ("managed_network_auto_repair", True),
@@ -1303,6 +1347,10 @@ defaults["web_ui_enabled"] = env_bool("FORWARD_DEPLOY_DEFAULT_WEB_UI_ENABLED")
 # New installs serve the panel over HTTPS. A config written before web_tls
 # existed ran plain HTTP, so it gets false and keeps doing so.
 defaults["web_tls"] = not config_exists
+# New installs log in with a host account (over HTTPS, see web_tls) or the
+# token. A config written before web_auth_realms logged in with the token
+# only and keeps exactly that.
+defaults["web_auth_realms"] = ["system", "token"] if not config_exists else ["token"]
 defaults["web_port"] = env_int("FORWARD_DEPLOY_DEFAULT_WEB_PORT")
 defaults["web_token"] = os.environ["FORWARD_DEPLOY_DEFAULT_WEB_TOKEN"]
 defaults["plugin_admin_token"] = os.environ["FORWARD_DEPLOY_DEFAULT_PLUGIN_ADMIN_TOKEN"]
@@ -1325,6 +1373,8 @@ if isinstance(experimental_features, dict) and "kernel_tc_flow_cache" in experim
 # choice. A top-level value already present is kept.
 if isinstance(experimental_features, dict):
     experimental_features.pop("xdp_generic", None)
+
+result["web_auth_realms"] = parse_web_auth_realms(result["web_auth_realms"], "config.json 中的 web_auth_realms")
 
 if result["web_token"] == "":
     raise SystemExit("web_token 不能为空")
@@ -1412,6 +1462,7 @@ values = {
     "WEB_BIND": str(data.get("web_bind", "127.0.0.1")),
     "WEB_UI_ENABLED": "true" if data.get("web_ui_enabled", True) else "false",
     "WEB_TLS": "true" if data.get("web_tls", False) is True else "false",
+    "WEB_AUTH_REALMS": ",".join(data.get("web_auth_realms") or ["token"]),
     "WEB_PORT": str(data.get("web_port", 8080)),
     "WEB_TOKEN": str(data.get("web_token", "")),
 	"PLUGIN_ADMIN_TOKEN": str(data.get("plugin_admin_token", "")),
@@ -1433,6 +1484,9 @@ log_explicit_config_overrides() {
     fi
     if [[ "${WEB_TLS_EXPLICIT}" == "1" ]]; then
         overrides="${overrides} web_tls"
+    fi
+    if [[ "${WEB_AUTH_REALMS_EXPLICIT}" == "1" ]]; then
+        overrides="${overrides} web_auth_realms"
     fi
     if [[ "${WEB_PORT_EXPLICIT}" == "1" ]]; then
         overrides="${overrides} web_port"
@@ -1855,6 +1909,18 @@ if [[ "${WEB_TLS}" == "true" ]]; then
         fi
     fi
 fi
+case ",${WEB_AUTH_REALMS}," in
+    *,system,*)
+        if [[ "${WEB_TLS}" == "true" ]] || is_loopback_bind "$WEB_BIND"; then
+            echo -e "  网页登录:  ${CYAN}系统账户（root 或 sudo/wheel 组成员）或访问令牌${NC}"
+        else
+            echo -e "  网页登录:  ${CYAN}访问令牌；系统账户只能在本机或经 HTTPS 登录（WEB_TLS=true）${NC}"
+        fi
+        ;;
+    *)
+        echo -e "  网页登录:  ${CYAN}访问令牌${NC}（启用系统账户登录：WEB_AUTH_REALMS=system,token）"
+        ;;
+esac
 echo -e "  就绪探针:  ${CYAN}${API_READY_URL}${NC}"
 echo -e "  就绪超时:  ${CYAN}${READY_TIMEOUT_SECONDS}s${NC}"
 if [[ "${CONFIG_BACKED_UP}" != "true" && -t 1 ]]; then

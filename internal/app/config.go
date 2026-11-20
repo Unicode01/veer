@@ -43,6 +43,12 @@ type Config struct {
 	WebTLSCertFile                         string                    `json:"web_tls_cert_file,omitempty"`
 	WebTLSKeyFile                          string                    `json:"web_tls_key_file,omitempty"`
 	PluginAdminToken                       string                    `json:"plugin_admin_token,omitempty"`
+	WebAuthRealmsSetting                   []string                  `json:"web_auth_realms,omitempty"` // unset: ["token"] (see WebAuthRealms)
+	WebSessionIdleMinutes                  int                       `json:"web_session_idle_minutes,omitempty"`
+	WebSessionMaxHours                     int                       `json:"web_session_max_hours,omitempty"`
+	WebAdminGroupsSetting                  *[]string                 `json:"web_admin_groups,omitempty"`
+	WebRootLoginSetting                    *bool                     `json:"web_root_login,omitempty"`
+	WebTrustedProxies                      []string                  `json:"web_trusted_proxies,omitempty"`
 	MaxWorkers                             int                       `json:"max_workers"`
 	DrainTimeoutHours                      int                       `json:"drain_timeout_hours"`
 	ManagedNetworkAutoRepair               *bool                     `json:"managed_network_auto_repair,omitempty"`
@@ -126,6 +132,9 @@ func loadConfig(path string) (*Config, error) {
 	cfg.WebTLSKeyFile = strings.TrimSpace(cfg.WebTLSKeyFile)
 	if (cfg.WebTLSCertFile == "") != (cfg.WebTLSKeyFile == "") {
 		return nil, fmt.Errorf("web_tls_cert_file and web_tls_key_file must be set together")
+	}
+	if err := normalizeWebAuthConfig(&cfg); err != nil {
+		return nil, err
 	}
 	if cfg.MaxWorkers < 0 {
 		cfg.MaxWorkers = 0

@@ -160,7 +160,35 @@ const pluginCatalog = {
   ]
 };
 
+function signedInView(name, realm) {
+  return {
+    authenticated: true,
+    identity: { realm, user: realm === 'system' ? name.split('@')[0] : '', name, via: 'session' },
+    csrf_token: 'e2e-csrf',
+    session: { issued_at: '2026-11-20T08:00:00Z', expires_at: '2026-11-20T20:00:00Z', idle_timeout_seconds: 1800 },
+    methods: {
+      realms: ['system', 'token'],
+      system: { enabled: true, available: true, default_user: 'root' },
+      token: { enabled: true, available: true }
+    },
+    transport: { secure: true, loopback: false }
+  };
+}
+
+function signedOutView(overrides) {
+  return Object.assign({
+    authenticated: false,
+    methods: {
+      realms: ['system', 'token'],
+      system: { enabled: true, available: true, default_user: 'root' },
+      token: { enabled: true, available: true }
+    },
+    transport: { secure: true, loopback: false }
+  }, overrides || {});
+}
+
 const apiFixtures = new Map([
+  ['/api/auth/session', signedInView('root@system', 'system')],
   ['/api/tags', []],
   ['/api/interfaces', []],
   ['/api/host-network', { interfaces: [], host: { name: 'pve-node-03', os: 'linux', arch: 'amd64', kernel_release: '6.8.12-pve', uptime_seconds: 3564000 } }],
@@ -585,7 +613,6 @@ async function installDashboardFixtures(page, locale) {
 
   await page.addInitScript((selectedLocale) => {
     if (window !== window.top) return;
-    localStorage.setItem('veer_token', 'e2e-token');
     localStorage.setItem('veer_locale', selectedLocale);
     localStorage.setItem('veer_theme', 'light');
   }, locale);
@@ -1249,4 +1276,171 @@ test('confirmation dialog stays above plugin management', async ({ page }, testI
   expect(layers.confirm).toBeGreaterThan(layers.manager);
   await page.locator('#confirmCancelBtn').click();
   await expect(confirm).toBeHidden();
+});
+
+// A rejected sign-in or an ended session is a 401 the browser logs by itself.
+function allowUnauthorizedResponses(page) {
+  browserErrors.set(page, (browserErrors.get(page) || []).filter((entry) => !/Failed to load resource: the server responded with a status of 401/.test(entry)));
+}
+
+async function openSignIn(page, testInfo, options) {
+  const opts = options || {};
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const locale = testInfo.project.name.startsWith('mobile') ? 'en-US' : 'zh-CN';
+  await installDashboardFixtures(page, locale);
+  if (opts.storage) {
+    await page.addInitScript((entries) => {
+      if (window !== window.top) return;
+      Object.entries(entries).forEach(([key, value]) => localStorage.setItem(key, value));
+    }, opts.storage);
+  }
+  const state = { signedIn: null, logins: [], logouts: [] };
+  await page.route('**/api/auth/session', (route) => route.fulfill({ json: state.signedIn || opts.signedOut || signedOutView() }));
+  await page.route('**/api/auth/login', async (route) => {
+    const body = route.request().postDataJSON();
+    state.logins.push(body);
+    const accepted = body.realm === 'system'
+      ? body.username === 'root' && body.password === 'correct horse'
+      : body.token === 'e2e-web-token' || body.token === 'legacy-e2e-token';
+    if (!accepted) {
+      await route.fulfill({ status: 401, json: { code: 'invalid_credentials', error: 'invalid credentials' } });
+      return;
+    }
+    state.signedIn = body.realm === 'system' ? signedInView('root@system', 'system') : signedInView('token', 'token');
+    await route.fulfill({ json: state.signedIn });
+  });
+  await page.route('**/api/auth/logout', async (route) => {
+    state.logouts.push(route.request().headers());
+    state.signedIn = null;
+    await route.fulfill({ json: { ok: true } });
+  });
+  await page.goto('/');
+  return state;
+}
+
+async function signInScreenshots(page, testInfo, name) {
+  const widths = testInfo.project.name.startsWith('mobile') ? [390] : [1440, 390];
+  const original = page.viewportSize();
+  for (const width of widths) {
+    await page.setViewportSize({ width, height: width < 600 ? 844 : 1000 });
+    for (const theme of ['light', 'dark']) {
+      await page.evaluate((value) => window.VeerApp.setTheme(value), theme);
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      expect(await contrastIssues(page.locator('#tokenModal')), name + ' ' + width + ' ' + theme).toEqual([]);
+      if (theme === 'dark') expect(await brightDarkSurfaces(page.locator('#tokenModal'))).toEqual([]);
+      await expectNoPageOverflow(page);
+      await page.screenshot({ path: testInfo.outputPath(name + '-' + width + '-' + theme + '.png') });
+    }
+  }
+  await page.setViewportSize(original);
+  await page.evaluate(() => window.VeerApp.setTheme('light'));
+}
+
+test('sign-in form switches methods and signs in with a system account', async ({ page }, testInfo) => {
+  const state = await openSignIn(page, testInfo);
+  const modal = page.locator('#tokenModal');
+  await expect(modal).toBeVisible();
+  await expect(page.locator('#app')).toBeHidden();
+  await expect(page.locator('#loginRealmSystem')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#loginUsername')).toHaveValue('root');
+  await expect(page.locator('#loginPassword')).toBeFocused();
+  await expect(page.locator('#loginRealmNote')).toBeHidden();
+  await signInScreenshots(page, testInfo, 'signin-system');
+
+  await page.locator('#loginRealmToken').click();
+  await expect(page.locator('#tokenInput')).toBeFocused();
+  await expect(page.locator('#loginPassword')).toBeHidden();
+  await expect(page.locator('#loginNotice')).toBeHidden();
+  await page.locator('#loginRealmToken').focus();
+  await page.keyboard.press('ArrowLeft');
+  await expect(page.locator('#loginRealmSystem')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#loginRealmSystem')).toBeFocused();
+  await expect(page.locator('#loginPassword')).toBeVisible();
+
+  await page.locator('#loginPassword').fill('wrong');
+  await page.locator('#loginPassword').press('Enter');
+  const invalid = await page.evaluate(() => window.VeerApp.t('auth.error.invalid'));
+  await expect(page.locator('#loginError')).toHaveText(invalid);
+  await expect(page.locator('#loginPassword')).toHaveValue('');
+  expect(await contrastIssues(modal)).toEqual([]);
+
+  await page.locator('#loginPassword').fill('correct horse');
+  await page.locator('#tokenSubmit').click();
+  await expect(page.locator('#app')).toBeVisible();
+  await expect(modal).toBeHidden();
+  await expect(page.locator('#masterVersion')).toHaveText('01234567');
+  expect(state.logins.at(-1)).toEqual({ realm: 'system', username: 'root', password: 'correct horse' });
+  if (page.viewportSize().width < 860) await page.locator('#sidebarToggle').click();
+  await expect(page.locator('#sessionIdentityName')).toHaveText('root@system');
+  await expect(page.locator('#sessionIdentity')).toHaveAttribute('title', /root@system/);
+  await page.screenshot({ path: testInfo.outputPath('signed-in-sidebar.png') });
+  expect(await page.evaluate(() => Object.keys(localStorage).filter((key) => /token/i.test(key)))).toEqual([]);
+  allowUnauthorizedResponses(page);
+});
+
+test('token sign-in warns about plain HTTP and says why system accounts are unavailable', async ({ page }, testInfo) => {
+  const state = await openSignIn(page, testInfo, {
+    signedOut: signedOutView({
+      methods: {
+        realms: ['system', 'token'],
+        system: { enabled: true, available: false, reason: 'insecure_channel', default_user: 'root' },
+        token: { enabled: true, available: true }
+      },
+      transport: { secure: false, loopback: false }
+    })
+  });
+  await expect(page.locator('#tokenModal')).toBeVisible();
+  await expect(page.locator('#loginRealmSystem')).toBeDisabled();
+  await expect(page.locator('#loginRealmToken')).toHaveAttribute('aria-pressed', 'true');
+  const reason = await page.evaluate(() => window.VeerApp.t('auth.systemUnavailable.insecure_channel'));
+  await expect(page.locator('#loginRealmNote')).toHaveText(reason);
+  const plaintext = await page.evaluate(() => window.VeerApp.t('auth.plaintextWarning'));
+  await expect(page.locator('#loginNotice')).toHaveText(plaintext);
+  await expect(page.locator('#tokenInput')).toBeFocused();
+  await signInScreenshots(page, testInfo, 'signin-token-plain-http');
+
+  await page.locator('#tokenInput').fill('e2e-web-token');
+  await page.locator('#tokenInput').press('Enter');
+  await expect(page.locator('#app')).toBeVisible();
+  expect(state.logins).toEqual([{ realm: 'token', token: 'e2e-web-token' }]);
+  if (page.viewportSize().width < 860) await page.locator('#sidebarToggle').click();
+  await expect(page.locator('#sessionIdentityName')).toHaveText('token');
+});
+
+test('a token saved by the previous panel becomes a session and leaves the browser', async ({ page }, testInfo) => {
+  const state = await openSignIn(page, testInfo, { storage: { veer_token: 'legacy-e2e-token', forward_token: 'legacy-e2e-token' } });
+  await expect(page.locator('#app')).toBeVisible();
+  await expect(page.locator('#tokenModal')).toBeHidden();
+  expect(state.logins).toEqual([{ realm: 'token', token: 'legacy-e2e-token' }]);
+  expect(await page.evaluate(() => [localStorage.getItem('veer_token'), localStorage.getItem('forward_token')])).toEqual([null, null]);
+});
+
+test('signing out and an expired session return to the sign-in form', async ({ page }, testInfo) => {
+  const state = await openSignIn(page, testInfo);
+  await page.locator('#loginPassword').fill('correct horse');
+  await page.locator('#loginPassword').press('Enter');
+  await expect(page.locator('#app')).toBeVisible();
+
+  if (page.viewportSize().width < 860) await page.locator('#sidebarToggle').click();
+  await page.locator('#logoutBtn').click();
+  await expect(page.locator('#confirmModal')).toBeVisible();
+  await page.locator('#confirmSubmitBtn').click();
+  await expect(page.locator('#tokenModal')).toBeVisible();
+  await expect(page.locator('#app')).toBeHidden();
+  expect(state.logouts).toHaveLength(1);
+  expect(state.logouts[0]['x-veer-csrf']).toBe('e2e-csrf');
+  const signedOut = await page.evaluate(() => window.VeerApp.t('toast.loggedOut'));
+  await expect(page.locator('#loginStatus')).toHaveText(signedOut);
+
+  await page.locator('#loginPassword').fill('correct horse');
+  await page.locator('#loginPassword').press('Enter');
+  await expect(page.locator('#app')).toBeVisible();
+  await page.route('**/api/rules', (route) => route.fulfill({ status: 401, headers: { 'X-Veer-Auth-Reason': 'session_idle' }, body: 'unauthorized' }));
+  state.signedIn = null;
+  await page.evaluate(() => window.VeerApp.runAutoRefresh());
+  await expect(page.locator('#tokenModal')).toBeVisible();
+  const idle = await page.evaluate(() => window.VeerApp.t('auth.sessionEnded.session_idle'));
+  await expect(page.locator('#loginStatus')).toHaveText(idle);
+  await expect(page.locator('#loginPassword')).toBeFocused();
+  allowUnauthorizedResponses(page);
 });
