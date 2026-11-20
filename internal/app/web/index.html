@@ -30,24 +30,25 @@
             document.documentElement.style.colorScheme = resolved;
         })();
     </script>
-    <link rel="stylesheet" href="style.css?v=20261102-59">
+    <link rel="stylesheet" href="style.css?v=20261102-60">
 </head>
 <body>
     <div id="tokenModal" class="modal auth-modal" aria-hidden="true">
-        <form id="loginForm" class="modal-content auth-card" role="dialog" aria-modal="true" aria-labelledby="loginTitle" aria-describedby="loginDescription" novalidate>
+        <form id="loginForm" class="modal-content auth-card" role="dialog" aria-modal="true" aria-labelledby="loginTitle" aria-describedby="loginHost" novalidate>
             <div class="auth-brand">
                 <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M3 6h7l4 12h7 M19 18a2 2 0 1 0 4 0 2 2 0 1 0-4 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 <span data-i18n="app.title">Veer</span>
-                <span id="loginHost" class="auth-host mono"></span>
             </div>
-            <h2 id="loginTitle" data-i18n="auth.title">Sign in</h2>
-            <p id="loginDescription" class="auth-description" data-i18n="auth.description">Sign in with an administrator account of this host or with the access token.</p>
-            <p id="loginStatus" class="auth-message" role="status" hidden></p>
+            <div class="auth-heading">
+                <h2 id="loginTitle" data-i18n="auth.title">Sign in</h2>
+                <p id="loginHost" class="auth-host mono"></p>
+            </div>
+            <p id="loginStatus" class="auth-line" role="status" hidden></p>
             <div id="loginRealmSwitch" class="segmented-control auth-realm-switch" role="group" aria-label="Sign-in method" data-i18n-aria-label="auth.realmLabel">
                 <button type="button" id="loginRealmSystem" data-realm="system" aria-pressed="true" data-i18n="auth.realm.system">System account</button>
                 <button type="button" id="loginRealmToken" data-realm="token" aria-pressed="false" data-i18n="auth.realm.token">Access token</button>
             </div>
-            <p id="loginRealmNote" class="auth-message is-warn" hidden></p>
+            <p id="loginRealmNote" class="auth-line auth-realm-note" hidden></p>
             <div id="loginSystemFields" class="auth-fields">
                 <div class="form-group">
                     <label for="loginUsername" data-i18n="auth.username">User name</label>
@@ -62,13 +63,13 @@
             <div id="loginTokenFields" class="auth-fields" hidden>
                 <div class="form-group">
                     <label for="tokenInput" data-i18n="auth.tokenLabel">Access token</label>
-                    <input type="password" id="tokenInput" name="veer-web-token" class="mono" data-i18n-placeholder="auth.tokenPlaceholder" placeholder="Enter web_token" spellcheck="false" autocapitalize="off" autocomplete="new-password" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" disabled>
+                    <input type="password" id="tokenInput" name="veer-web-token" class="mono" spellcheck="false" autocapitalize="off" autocomplete="new-password" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" disabled>
                 </div>
                 <p class="field-hint" data-i18n="auth.tokenHint">The web_token in config.json.</p>
             </div>
-            <p id="loginNotice" class="auth-message is-warn" hidden></p>
             <p id="loginError" class="auth-message is-error" role="alert" hidden></p>
             <button type="submit" id="tokenSubmit" class="auth-submit" data-i18n="auth.signIn">Sign in</button>
+            <p id="loginNotice" class="auth-footnote" hidden></p>
         </form>
     </div>
 
@@ -112,8 +113,13 @@
 
                 <div class="header-actions">
                     <div id="sessionIdentity" class="session-identity" role="note" hidden>
-                        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z M4 21a8 8 0 0 1 16 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                        <span id="sessionIdentityName" class="mono"></span>
+                        <span id="sessionAvatar" class="session-avatar" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" width="14" height="14"><path d="M14.5 13.5a5 5 0 1 0-4-4L3 17v4h4v-2h2v-2h2Z M16.5 7.5h.01" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                        </span>
+                        <span class="session-text">
+                            <span id="sessionIdentityName" class="session-name"></span>
+                            <span id="sessionIdentityRealm" class="session-realm"></span>
+                        </span>
                     </div>
                     <label class="toolbar-field">
                         <span data-i18n="toolbar.language">Language</span>
@@ -132,7 +138,7 @@
                         </select>
                     </label>
 
-                    <button id="logoutBtn" class="ghost-btn" data-i18n="auth.logout" data-i18n-title="auth.logout">Logout</button>
+                    <button id="logoutBtn" type="button" class="ghost-btn" data-i18n-title="auth.logout" data-i18n-aria-label="auth.logout" title="Sign out" aria-label="Sign out"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M9 20H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h3 M16 16l4-4-4-4 M20 12H9"fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
                 </div>
             </div>
         </header>
@@ -1236,7 +1242,7 @@
     </div>
 
     <script defer src="js/core.js?v=20261102-4"></script>
-    <script defer src="js/i18n.js?v=20261102-58"></script>
+    <script defer src="js/i18n.js?v=20261102-59"></script>
     <script defer src="js/ui.js?v=20261102-3"></script>
     <script defer src="js/rules.js?v=20261102-3"></script>
     <script defer src="js/sites.js?v=20261102-2"></script>
@@ -1248,8 +1254,8 @@
     <script defer src="js/plugins.js?v=20261102-55"></script>
     <script defer src="js/plugin_manager.js?v=20261102-3"></script>
     <script defer src="js/stats.js?v=20261102-4"></script>
-    <script defer src="js/patchbay.js?v=20261102-56"></script>
-    <script defer src="js/auth.js?v=20261120-1"></script>
+    <script defer src="js/patchbay.js?v=20261102-57"></script>
+    <script defer src="js/auth.js?v=20261120-2"></script>
     <script defer src="js/init.js?v=20261102-4"></script>
 </body>
 </html>

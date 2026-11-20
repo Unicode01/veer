@@ -30,7 +30,9 @@
     error: $('loginError'),
     submit: $('tokenSubmit'),
     identity: $('sessionIdentity'),
+    identityAvatar: $('sessionAvatar'),
     identityName: $('sessionIdentityName'),
+    identityRealm: $('sessionIdentityRealm'),
     logout: $('logoutBtn')
   };
 
@@ -215,9 +217,14 @@
     el.realmSystem.disabled = !system.available;
     el.realmSystem.setAttribute('aria-pressed', String(realm === 'system'));
     el.realmToken.setAttribute('aria-pressed', String(realm === 'token'));
-    // Without token sign-in there is nothing to switch to.
-    el.switcher.hidden = !token.enabled;
-    setText(el.realmNote, system.available ? '' : app.t('auth.systemUnavailable.' + (system.reason || 'disabled')));
+    // The switch appears only when both methods are turned on. A method the
+    // config leaves off is not offered at all; one that is on but cannot be
+    // used from here stays visible, greyed out, with the reason under it.
+    el.switcher.hidden = !(token.enabled && system.enabled);
+    const unavailable = system.enabled && !system.available ? app.t('auth.systemUnavailable.' + (system.reason || 'insecure_channel')) : '';
+    setText(el.realmNote, unavailable);
+    if (unavailable) el.realmSystem.title = unavailable;
+    else el.realmSystem.removeAttribute('title');
     el.systemFields.hidden = realm !== 'system';
     el.tokenFields.hidden = realm !== 'token';
     [el.username, el.password].forEach((input) => { input.disabled = realm !== 'system'; });
@@ -225,7 +232,7 @@
     const transport = app.state.authTransport || {};
     const plaintext = realm === 'token' && transport.secure === false && !transport.loopback;
     setText(el.notice, plaintext ? app.t('auth.plaintextWarning') : '');
-    if (el.host) el.host.textContent = window.location.host || '';
+    if (el.host) setText(el.host, window.location.host || '');
   }
 
   app.selectLoginRealm = function selectLoginRealm(realm, options) {
@@ -408,12 +415,22 @@
     el.identity.hidden = !session;
     if (!session) {
       el.identityName.textContent = '';
+      if (el.identityRealm) el.identityRealm.textContent = '';
       el.identity.removeAttribute('title');
       return;
     }
     const identity = session.identity || {};
-    el.identityName.textContent = identity.name || '';
-    const realm = app.t(identity.realm === 'system' ? 'auth.realm.system' : 'auth.realm.token');
+    const system = identity.realm === 'system';
+    // A system account shows its user name and initial; the token has no
+    // user, so it shows the method instead.
+    const user = system ? (identity.user || String(identity.name || '').replace(/@system$/, '')) : '';
+    el.identityName.textContent = system ? user : app.t('auth.realm.token');
+    if (el.identityRealm) el.identityRealm.textContent = system ? app.t('auth.realm.system') : 'web_token';
+    if (el.identityAvatar) {
+      el.identityAvatar.dataset.realm = system ? 'system' : 'token';
+      el.identityAvatar.dataset.initial = system ? (Array.from(user)[0] || '?').toUpperCase() : '';
+    }
+    const realm = app.t(system ? 'auth.realm.system' : 'auth.realm.token');
     const parts = [app.t('auth.identityLabel') + ' ' + (identity.name || ''), realm];
     if (session.expiresAt && !Number.isNaN(session.expiresAt.getTime())) {
       parts.push(app.t('auth.sessionEnds', { time: session.expiresAt.toLocaleString(app.state.locale, { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' }) }));

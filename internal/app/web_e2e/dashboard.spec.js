@@ -1371,7 +1371,8 @@ test('sign-in form switches methods and signs in with a system account', async (
   await expect(page.locator('#masterVersion')).toHaveText('01234567');
   expect(state.logins.at(-1)).toEqual({ realm: 'system', username: 'root', password: 'correct horse' });
   if (page.viewportSize().width < 860) await page.locator('#sidebarToggle').click();
-  await expect(page.locator('#sessionIdentityName')).toHaveText('root@system');
+  await expect(page.locator('#sessionIdentityName')).toHaveText('root');
+  await expect(page.locator('#sessionAvatar')).toHaveAttribute('data-initial', 'R');
   await expect(page.locator('#sessionIdentity')).toHaveAttribute('title', /root@system/);
   await page.screenshot({ path: testInfo.outputPath('signed-in-sidebar.png') });
   expect(await page.evaluate(() => Object.keys(localStorage).filter((key) => /token/i.test(key)))).toEqual([]);
@@ -1404,7 +1405,41 @@ test('token sign-in warns about plain HTTP and says why system accounts are unav
   await expect(page.locator('#app')).toBeVisible();
   expect(state.logins).toEqual([{ realm: 'token', token: 'e2e-web-token' }]);
   if (page.viewportSize().width < 860) await page.locator('#sidebarToggle').click();
-  await expect(page.locator('#sessionIdentityName')).toHaveText('token');
+  const tokenName = await page.evaluate(() => window.VeerApp.t('auth.realm.token'));
+  await expect(page.locator('#sessionIdentityName')).toHaveText(tokenName);
+  await expect(page.locator('#sessionIdentityRealm')).toHaveText('web_token');
+});
+
+test('with only token sign-in turned on the form shows no method switch', async ({ page }, testInfo) => {
+  await openSignIn(page, testInfo, {
+    signedOut: signedOutView({
+      methods: {
+        realms: ['token'],
+        system: { enabled: false, available: false, reason: 'disabled', default_user: 'root' },
+        token: { enabled: true, available: true }
+      },
+      transport: { secure: false, loopback: false }
+    })
+  });
+  await expect(page.locator('#tokenModal')).toBeVisible();
+  await expect(page.locator('#loginRealmSwitch')).toBeHidden();
+  await expect(page.locator('#loginRealmNote')).toBeHidden();
+  await expect(page.locator('#loginTokenFields')).toBeVisible();
+  await expect(page.locator('#loginNotice')).toBeVisible();
+  await expect(page.locator('#tokenInput')).toBeFocused();
+  await signInScreenshots(page, testInfo, 'signin-token-only');
+
+  await page.locator('#tokenInput').fill('e2e-web-token');
+  await page.locator('#tokenInput').press('Enter');
+  await expect(page.locator('#app')).toBeVisible();
+  if (page.viewportSize().width < 860) await page.locator('#sidebarToggle').click();
+  await expect(page.locator('.sidebar-account')).toBeInViewport();
+  await expect(page.locator('#logoutBtn')).toBeInViewport();
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate((value) => window.VeerApp.setTheme(value), theme);
+    await page.locator('.sidebar-settings').screenshot({ path: testInfo.outputPath('sidebar-account-token-' + theme + '.png') });
+  }
+  await page.evaluate(() => window.VeerApp.setTheme('light'));
 });
 
 test('a token saved by the previous panel becomes a session and leaves the browser', async ({ page }, testInfo) => {

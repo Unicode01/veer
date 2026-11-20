@@ -9,7 +9,8 @@ const authSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'js', 'auth
 const elementIds = [
   'tokenModal', 'loginForm', 'loginHost', 'loginRealmSwitch', 'loginRealmSystem', 'loginRealmToken',
   'loginRealmNote', 'loginSystemFields', 'loginTokenFields', 'loginUsername', 'loginPassword', 'tokenInput',
-  'loginNotice', 'loginStatus', 'loginError', 'tokenSubmit', 'sessionIdentity', 'sessionIdentityName',
+  'loginNotice', 'loginStatus', 'loginError', 'tokenSubmit', 'sessionIdentity', 'sessionAvatar', 'sessionIdentityName',
+  'sessionIdentityRealm',
   'logoutBtn', 'app'
 ];
 
@@ -68,7 +69,6 @@ const dictionary = {
   'auth.tokenRejected': 'saved-token-rejected',
   'toast.loggedOut': 'signed-out',
   'auth.systemUnavailable.insecure_channel': 'needs-https',
-  'auth.systemUnavailable.disabled': 'system-off',
   'auth.plaintextWarning': 'plaintext',
   'auth.error.invalid': 'bad-password',
   'auth.error.invalidToken': 'bad-token',
@@ -174,7 +174,10 @@ test('a token saved by the old panel is exchanged for a session and deleted', as
   assert.equal(h.app.isAuthenticated(), true);
   assert.equal(h.app.state.session.csrf, 'csrf-123');
   assert.equal(h.elements.sessionIdentity.hidden, false);
-  assert.equal(h.elements.sessionIdentityName.textContent, 'token');
+  // The token has no user: the sidebar names the method instead.
+  assert.equal(h.elements.sessionIdentityName.textContent, 'Access token');
+  assert.equal(h.elements.sessionIdentityRealm.textContent, 'web_token');
+  assert.equal(h.elements.sessionAvatar.dataset.realm, 'token');
 });
 
 test('a rejected saved token is deleted and the sign-in form says why', async () => {
@@ -262,6 +265,29 @@ test('system accounts are greyed out with the reason when the connection is not 
   // The greyed-out option cannot be selected.
   await h.elements.loginRealmSystem.dispatch('click');
   assert.equal(h.app.state.loginRealm, 'token');
+  assert.equal(h.elements.loginRealmSwitch.hidden, false);
+  assert.equal(h.elements.loginRealmSystem.title, 'needs-https');
+});
+
+test('a method the config leaves off is not offered at all', async () => {
+  const h = createHarness({
+    respond: () => jsonResponse(200, sessionView({
+      methods: {
+        realms: ['token'],
+        system: { enabled: false, available: false, reason: 'disabled', default_user: 'root' },
+        token: { enabled: true, available: true }
+      },
+      transport: { secure: true, loopback: false }
+    }))
+  });
+  assert.equal(await h.app.restoreSession(), false);
+  assert.equal(h.app.state.loginRealm, 'token');
+  assert.equal(h.elements.loginRealmSwitch.hidden, true);
+  assert.equal(h.elements.loginRealmNote.hidden, true);
+  assert.equal(h.elements.loginNotice.hidden, true);
+  assert.equal(h.elements.loginTokenFields.hidden, false);
+  assert.equal(h.elements.loginHost.textContent, 'router.example:8889');
+  assert.equal(h.document.activeElement, h.elements.tokenInput);
 });
 
 test('signing in with a system account starts the dashboard', async () => {
@@ -297,7 +323,10 @@ test('signing in with a system account starts the dashboard', async () => {
   assert.equal(h.elements.tokenModal.classList.contains('active'), false);
   assert.equal(h.elements.loginPassword.value, '');
   assert.equal(h.storage.get('veer_login_realm'), 'system');
-  assert.equal(h.elements.sessionIdentityName.textContent, 'alice@system');
+  assert.equal(h.elements.sessionIdentityName.textContent, 'alice');
+  assert.equal(h.elements.sessionIdentityRealm.textContent, 'System account');
+  assert.equal(h.elements.sessionAvatar.dataset.realm, 'system');
+  assert.equal(h.elements.sessionAvatar.dataset.initial, 'A');
   assert.match(h.elements.sessionIdentity.title, /Signed in as alice@system · System account · ends /);
 });
 
