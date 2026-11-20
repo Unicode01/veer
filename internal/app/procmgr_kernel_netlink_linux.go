@@ -60,91 +60,178 @@ func (pm *ProcessManager) stopKernelNetlinkMonitor() {
 	}
 }
 
+// A burst of route or neighbour changes (a routing feed converging, a bridge
+// flushing its FDB) can outrun a subscription's socket buffer: the kernel then
+// fails the next receive with ENOBUFS, and the netlink library ends that
+// subscription. The buffer is sized for such bursts, and a subscription that
+// ends anyway is opened again.
+const (
+	kernelNetlinkReceiveBuffer  = 4 << 20
+	kernelNetlinkResubscribeMin = time.Second
+	kernelNetlinkResubscribeMax = 30 * time.Second
+)
+
+// kernelNetlinkSubscriptions opens the monitor's four subscriptions; nil
+// means unavailable. Tests replace it.
+type kernelNetlinkSubscriptions struct {
+	link  func(stop <-chan struct{}) chan netlink.LinkUpdate
+	addr  func(stop <-chan struct{}) chan netlink.AddrUpdate
+	neigh func(stop <-chan struct{}) chan netlink.NeighUpdate
+	route func(stop <-chan struct{}) chan netlink.RouteUpdate
+}
+
+var kernelNetlinkSubscribe = kernelNetlinkSubscriptions{
+	link: func(stop <-chan struct{}) chan netlink.LinkUpdate {
+		ch := make(chan netlink.LinkUpdate, 16)
+		if err := netlink.LinkSubscribeWithOptions(ch, stop, netlink.LinkSubscribeOptions{
+			ErrorCallback:          kernelNetlinkErrorCallback("link", stop),
+			ReceiveBufferSize:      kernelNetlinkReceiveBuffer,
+			ReceiveBufferForceSize: true,
+		}); err != nil {
+			log.Printf("kernel dataplane netlink: link monitor unavailable: %v", err)
+			return nil
+		}
+		return ch
+	},
+	addr: func(stop <-chan struct{}) chan netlink.AddrUpdate {
+		ch := make(chan netlink.AddrUpdate, 16)
+		if err := netlink.AddrSubscribeWithOptions(ch, stop, netlink.AddrSubscribeOptions{
+			ErrorCallback:          kernelNetlinkErrorCallback("address", stop),
+			ReceiveBufferSize:      kernelNetlinkReceiveBuffer,
+			ReceiveBufferForceSize: true,
+		}); err != nil {
+			log.Printf("kernel dataplane netlink: address monitor unavailable: %v", err)
+			return nil
+		}
+		return ch
+	},
+	neigh: func(stop <-chan struct{}) chan netlink.NeighUpdate {
+		ch := make(chan netlink.NeighUpdate, 32)
+		if err := netlink.NeighSubscribeWithOptions(ch, stop, netlink.NeighSubscribeOptions{
+			ErrorCallback:          kernelNetlinkErrorCallback("neighbor", stop),
+			ReceiveBufferSize:      kernelNetlinkReceiveBuffer,
+			ReceiveBufferForceSize: true,
+		}); err != nil {
+			log.Printf("kernel dataplane netlink: neighbor monitor unavailable: %v", err)
+			return nil
+		}
+		return ch
+	},
+	route: func(stop <-chan struct{}) chan netlink.RouteUpdate {
+		ch := make(chan netlink.RouteUpdate, 32)
+		if err := netlink.RouteSubscribeWithOptions(ch, stop, netlink.RouteSubscribeOptions{
+			ErrorCallback:          kernelNetlinkErrorCallback("route", stop),
+			ReceiveBufferSize:      kernelNetlinkReceiveBuffer,
+			ReceiveBufferForceSize: true,
+		}); err != nil {
+			log.Printf("kernel dataplane netlink: route monitor unavailable: %v", err)
+			return nil
+		}
+		return ch
+	},
+}
+
+func kernelNetlinkErrorCallback(kind string, stop <-chan struct{}) func(error) {
+	return func(err error) {
+		if err == nil {
+			return
+		}
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		log.Printf("kernel dataplane netlink: %s monitor error: %v", kind, err)
+	}
+}
+
+// runKernelNetlinkMonitor follows link, address, neighbour and route changes.
+// A subscription that ends is opened again with backoff, and once one is back
+// the dataplane and the managed networks are reconciled in full: changes made
+// while it was down were never seen.
 func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
-	linkUpdates := make(chan netlink.LinkUpdate, 16)
-	addrUpdates := make(chan netlink.AddrUpdate, 16)
-	neighUpdates := make(chan netlink.NeighUpdate, 32)
-	routeUpdates := make(chan netlink.RouteUpdate, 32)
+	subscribe := kernelNetlinkSubscribe
+	subscribeLink := func() chan netlink.LinkUpdate { return subscribe.link(stop) }
+	subscribeAddr := func() chan netlink.AddrUpdate { return subscribe.addr(stop) }
+	subscribeNeigh := func() chan netlink.NeighUpdate { return subscribe.neigh(stop) }
+	subscribeRoute := func() chan netlink.RouteUpdate { return subscribe.route(stop) }
 
-	if err := netlink.LinkSubscribeWithOptions(linkUpdates, stop, netlink.LinkSubscribeOptions{
-		ErrorCallback: func(err error) {
-			if err != nil {
-				select {
-				case <-stop:
-					return
-				default:
-				}
-				log.Printf("kernel dataplane netlink: link monitor error: %v", err)
-			}
-		},
-	}); err != nil {
-		log.Printf("kernel dataplane netlink: link monitor unavailable: %v", err)
-		linkUpdates = nil
-	}
-
-	if err := netlink.AddrSubscribeWithOptions(addrUpdates, stop, netlink.AddrSubscribeOptions{
-		ErrorCallback: func(err error) {
-			if err != nil {
-				select {
-				case <-stop:
-					return
-				default:
-				}
-				log.Printf("kernel dataplane netlink: address monitor error: %v", err)
-			}
-		},
-	}); err != nil {
-		log.Printf("kernel dataplane netlink: address monitor unavailable: %v", err)
-		addrUpdates = nil
-	}
-
-	if err := netlink.NeighSubscribeWithOptions(neighUpdates, stop, netlink.NeighSubscribeOptions{
-		ErrorCallback: func(err error) {
-			if err != nil {
-				select {
-				case <-stop:
-					return
-				default:
-				}
-				log.Printf("kernel dataplane netlink: neighbor monitor error: %v", err)
-			}
-		},
-	}); err != nil {
-		log.Printf("kernel dataplane netlink: neighbor monitor unavailable: %v", err)
-		neighUpdates = nil
-	}
-
-	if err := netlink.RouteSubscribeWithOptions(routeUpdates, stop, netlink.RouteSubscribeOptions{
-		ErrorCallback: func(err error) {
-			if err != nil {
-				select {
-				case <-stop:
-					return
-				default:
-				}
-				log.Printf("kernel dataplane netlink: route monitor error: %v", err)
-			}
-		},
-	}); err != nil {
-		log.Printf("kernel dataplane netlink: route monitor unavailable: %v", err)
-		routeUpdates = nil
-	}
-
-	allClosed := func() bool {
-		return linkUpdates == nil && addrUpdates == nil && neighUpdates == nil && routeUpdates == nil
-	}
-	if allClosed() {
+	linkUpdates := subscribeLink()
+	addrUpdates := subscribeAddr()
+	neighUpdates := subscribeNeigh()
+	routeUpdates := subscribeRoute()
+	if linkUpdates == nil && addrUpdates == nil && neighUpdates == nil && routeUpdates == nil {
 		return
+	}
+
+	// lost holds the subscriptions that ended and wait to be opened again;
+	// one that was unavailable from the start is not retried.
+	lost := make(map[string]bool, 4)
+	backoff := kernelNetlinkResubscribeMin
+	var retry <-chan time.Time
+	ended := func(kind string) bool {
+		select {
+		case <-stop:
+			return true
+		default:
+		}
+		log.Printf("kernel dataplane netlink: %s monitor ended; subscribing again", kind)
+		lost[kind] = true
+		if retry == nil {
+			retry = time.After(backoff)
+		}
+		return false
+	}
+	resubscribe := func() {
+		retry = nil
+		restored := false
+		if lost["link"] {
+			if linkUpdates = subscribeLink(); linkUpdates != nil {
+				delete(lost, "link")
+				restored = true
+			}
+		}
+		if lost["address"] {
+			if addrUpdates = subscribeAddr(); addrUpdates != nil {
+				delete(lost, "address")
+				restored = true
+			}
+		}
+		if lost["neighbor"] {
+			if neighUpdates = subscribeNeigh(); neighUpdates != nil {
+				delete(lost, "neighbor")
+				restored = true
+			}
+		}
+		if lost["route"] {
+			if routeUpdates = subscribeRoute(); routeUpdates != nil {
+				delete(lost, "route")
+				restored = true
+			}
+		}
+		if len(lost) > 0 {
+			backoff = min(2*backoff, kernelNetlinkResubscribeMax)
+			retry = time.After(backoff)
+		} else {
+			backoff = kernelNetlinkResubscribeMin
+		}
+		if restored {
+			log.Printf("kernel dataplane netlink: monitor subscribed again; reconciling what it missed")
+			pm.requestRedistributeWorkers(0)
+			pm.requestManagedNetworkRuntimeReloadWithSource(0, "netlink_resubscribe")
+		}
 	}
 
 	for {
 		select {
 		case <-stop:
 			return
+		case <-retry:
+			resubscribe()
 		case update, ok := <-linkUpdates:
 			if !ok {
 				linkUpdates = nil
-				if allClosed() {
+				if ended("link") {
 					return
 				}
 				continue
@@ -160,7 +247,7 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 		case update, ok := <-addrUpdates:
 			if !ok {
 				addrUpdates = nil
-				if allClosed() {
+				if ended("address") {
 					return
 				}
 				continue
@@ -173,7 +260,7 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 		case update, ok := <-neighUpdates:
 			if !ok {
 				neighUpdates = nil
-				if allClosed() {
+				if ended("neighbor") {
 					return
 				}
 				continue
@@ -190,7 +277,7 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 		case update, ok := <-routeUpdates:
 			if !ok {
 				routeUpdates = nil
-				if allClosed() {
+				if ended("route") {
 					return
 				}
 				continue
