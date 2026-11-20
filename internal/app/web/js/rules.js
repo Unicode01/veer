@@ -175,7 +175,8 @@
         badgeText = 'XDP';
       } else if (kernelEngine === 'tc') {
         badgeClass = 'badge-tc';
-        badgeText = 'TC';
+        // "TCX" once the runtime reports the TC engine on tcx links (stats.js), otherwise "TC".
+        badgeText = typeof app.kernelEngineLabel === 'function' ? app.kernelEngineLabel('tc') : 'TC';
       } else if (kernelEngine === 'mixed') {
         badgeClass = 'badge-kernel';
         badgeText = 'MIXED';
@@ -191,7 +192,10 @@
     const titleParts = [
       app.t('rule.engine.effectiveLabel') + ': ' + app.t('rule.engine.effective.' + effective)
     ];
-    if (effective === 'kernel' && kernelEngine) titleParts.push('Kernel Engine: ' + kernelEngine.toUpperCase());
+    if (effective === 'kernel' && kernelEngine) {
+      const engineLabel = typeof app.kernelEngineLabel === 'function' ? app.kernelEngineLabel(kernelEngine) : kernelEngine.toUpperCase();
+      titleParts.push(app.t('kernel.engine.name') + ': ' + engineLabel);
+    }
     if (runtimeReason) titleParts.push(runtimeReason);
 
     return {

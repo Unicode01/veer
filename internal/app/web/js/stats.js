@@ -225,10 +225,39 @@
     return kernelStatePill(true, 'kernel.flowCache.enabled', 'kernel.flowCache.disabled');
   }
 
-  function kernelEngineBadge(name) {
+  // The configured engine is "tc" whichever way its programs hang on a device; what the panel shows
+  // follows the runtime: "TCX" once the TC engine is attached through tcx links, "TC" for cls_bpf
+  // filters or before anything is attached. Config and API values keep the name "tc".
+  function kernelTCAttachmentAPI(runtime) {
+    const data = runtime || (app.state.kernelRuntime && app.state.kernelRuntime.data);
+    const engines = data && Array.isArray(data.engines) ? data.engines : [];
+    const tc = engines.find((engine) => engine && String(engine.name || '').trim().toLowerCase() === 'tc');
+    return tc ? String(tc.attachment_api || '').trim().toLowerCase() : '';
+  }
+
+  function kernelEngineLabel(name, runtime) {
+    const normalized = String(name || '').trim().toLowerCase();
+    if (!normalized) return '';
+    if (normalized === 'tc') return kernelTCAttachmentAPI(runtime) === 'tcx' ? 'TCX' : 'TC';
+    return normalized.toUpperCase();
+  }
+
+  function kernelEngineTitle(name, runtime) {
+    const normalized = String(name || '').trim().toLowerCase();
+    if (normalized !== 'tc') return '';
+    const api = kernelTCAttachmentAPI(runtime);
+    if (api === 'tcx') return app.t('kernel.engine.tcxTitle');
+    if (api === 'cls_bpf') return app.t('kernel.engine.clsBPFTitle');
+    return '';
+  }
+
+  app.kernelEngineLabel = function (name) { return kernelEngineLabel(name); };
+  app.kernelEngineTitle = function (name) { return kernelEngineTitle(name); };
+
+  function kernelEngineBadge(name, runtime) {
     const normalized = String(name || '').toLowerCase();
     const badgeClass = normalized === 'xdp' ? 'badge-xdp' : normalized === 'tc' ? 'badge-tc' : 'badge-kernel';
-    return app.createBadgeNode(badgeClass, normalized || app.t('common.dash'));
+    return app.createBadgeNode(badgeClass, kernelEngineLabel(normalized, runtime) || app.t('common.dash'), kernelEngineTitle(normalized, runtime));
   }
 
   function kernelDefaultEngineBadge(name) {
@@ -314,7 +343,7 @@
     });
 
     const subtext = active.map((engine) => {
-      const label = String(engine.name || app.t('common.dash')).toUpperCase();
+      const label = kernelEngineLabel(engine.name) || app.t('common.dash');
       return label + ' ' + app.t('kernel.pressure.' + kernelRuntimePressureLevel(engine));
     }).join('; ');
 
@@ -350,26 +379,6 @@
     const capacity = Number(detail && detail.capacity || 0);
     const percent = kernelRuntimeMapPercent(entries, capacity);
     return formatKernelRuntimePercent(percent) + ' · ' + String(entries) + ' / ' + String(capacity);
-  }
-
-  function kernelRuntimeTooltipBreakdownRow(label, value) {
-    return app.createNode('div', {
-      className: 'kernel-runtime-tooltip-breakdown-row',
-      children: [
-        app.createNode('span', {
-          className: 'kernel-runtime-tooltip-breakdown-label',
-          text: label
-        }),
-        app.createNode('span', {
-          className: 'kernel-runtime-tooltip-breakdown-value',
-          text: value
-        })
-      ]
-    });
-  }
-
-  function kernelRuntimeMapTooltipDetailRow(detail) {
-    return kernelRuntimeTooltipBreakdownRow(detail.label, kernelRuntimeMapTooltipDetailText(detail));
   }
 
   function kernelRuntimeMapCounterText(entries, capacity) {
@@ -583,73 +592,106 @@
     const details = (Array.isArray(item.details) ? item.details : []).filter((detail) => (detail.capacity || 0) > 0 || (detail.entries || 0) > 0);
     const infoRows = kernelRuntimeMapInfoRows(item, runtimeData);
     const display = kernelRuntimeMapDisplay(item);
-    const nodes = [
-      app.createNode('div', {
-        className: 'kernel-runtime-tooltip-header',
-        children: [
-          app.createNode('span', {
-            className: 'kernel-runtime-tooltip-title',
-            text: item.label
-          }),
-          app.createNode('span', {
-            className: 'kernel-runtime-tooltip-primary',
-            text: percentText
-          })
-        ]
+    return [
+      app.popoverHeader({
+        title: item.label,
+        meta: kernelRuntimeMapTooltipMetaText(display, badgeMetrics),
+        aside: app.createNode('span', { className: 'popover-figure mono', text: percentText })
       }),
-      app.createNode('span', {
-        className: 'kernel-runtime-tooltip-meta',
-        text: kernelRuntimeMapTooltipMetaText(display, badgeMetrics)
-      })
-    ];
-    if (details.length) {
-      nodes.push(app.createNode('div', {
-        className: 'kernel-runtime-tooltip-breakdown',
-        children: details.map((detail) => kernelRuntimeMapTooltipDetailRow(detail))
-      }));
+      details.length
+        ? app.popoverRows(details.map((detail) => ({ label: detail.label, value: kernelRuntimeMapTooltipDetailText(detail), mono: true })))
+        : null,
+      infoRows.length ? app.popoverRows(infoRows) : null
+    ].filter(Boolean);
+  }
+
+  // Small read-only details open on hover or focus and stay open after a click; the status panel
+  // (bindKernelRuntimePanel) opens on click only because it holds collapsible sections.
+  let kernelRuntimeTooltipLayer = null;
+  let kernelRuntimePanelLayer = null;
+
+  function kernelTooltipLayer() {
+    if (!kernelRuntimeTooltipLayer && typeof app.createFloatingLayer === 'function') {
+      kernelRuntimeTooltipLayer = app.createFloatingLayer({
+        id: 'kernelRuntimeFloatingTooltip',
+        className: 'kernel-runtime-floating-tooltip',
+        role: 'tooltip',
+        placement: { align: 'center', maxHeight: 420 }
+      });
     }
-    if (infoRows.length) {
-      nodes.push(app.createNode('div', {
-        className: 'kernel-runtime-tooltip-breakdown',
-        children: infoRows.map((detail) => kernelRuntimeTooltipBreakdownRow(detail.label, detail.value))
-      }));
+    return kernelRuntimeTooltipLayer;
+  }
+
+  function kernelPanelLayer() {
+    if (!kernelRuntimePanelLayer && typeof app.createFloatingLayer === 'function') {
+      kernelRuntimePanelLayer = app.createFloatingLayer({
+        id: 'kernelRuntimeStatusDetails',
+        className: 'is-wide kernel-runtime-status-popover',
+        role: 'dialog',
+        placement: { align: 'start', maxHeight: 560 }
+      });
     }
-    return nodes;
+    return kernelRuntimePanelLayer;
+  }
+
+  function hideKernelRuntimeTooltip() {
+    if (kernelRuntimeTooltipLayer) kernelRuntimeTooltipLayer.hide();
+    if (kernelRuntimePanelLayer) kernelRuntimePanelLayer.hide();
   }
 
   function bindKernelRuntimeTooltip(trigger, contentFactory) {
-    trigger.addEventListener('mouseenter', () => showKernelRuntimeTooltip(trigger, contentFactory(), false));
-    trigger.addEventListener('mouseleave', () => {
-      if (kernelRuntimeTooltipTrigger === trigger && !kernelRuntimeTooltipPinned) {
-        hideKernelRuntimeTooltip();
-      }
+    const show = (pinned) => {
+      const layer = kernelTooltipLayer();
+      if (layer) layer.show(trigger, contentFactory(), { pinned: pinned });
+    };
+    const hideIfPreview = () => {
+      const layer = kernelRuntimeTooltipLayer;
+      if (layer && layer.isOpenFor(trigger) && !layer.pinned) layer.hide();
+    };
+    const pinnedElsewhere = () => typeof app.floatingLayerPinned === 'function' && app.floatingLayerPinned();
+    trigger.addEventListener('mouseenter', () => {
+      if (pinnedElsewhere()) return;
+      show(false);
     });
-    trigger.addEventListener('focus', () => showKernelRuntimeTooltip(trigger, contentFactory(), false));
-    trigger.addEventListener('blur', () => {
-      if (kernelRuntimeTooltipTrigger === trigger && !kernelRuntimeTooltipPinned) {
-        hideKernelRuntimeTooltip();
-      }
+    trigger.addEventListener('mouseleave', hideIfPreview);
+    trigger.addEventListener('focus', () => {
+      const layer = kernelRuntimeTooltipLayer;
+      if ((layer && layer.isOpenFor(trigger)) || pinnedElsewhere()) return;
+      show(false);
     });
+    trigger.addEventListener('blur', hideIfPreview);
     trigger.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      if (kernelRuntimeTooltipTrigger === trigger && kernelRuntimeTooltipPinned) {
-        hideKernelRuntimeTooltip();
+      const layer = kernelRuntimeTooltipLayer;
+      if (layer && layer.isOpenFor(trigger) && layer.pinned) {
+        layer.hide();
         return;
       }
-      showKernelRuntimeTooltip(trigger, contentFactory(), true);
+      show(true);
+    });
+  }
+
+  function bindKernelRuntimePanel(trigger, contentFactory, label) {
+    trigger.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const layer = kernelPanelLayer();
+      if (!layer) return;
+      if (layer.isOpenFor(trigger)) {
+        layer.hide();
+        return;
+      }
+      layer.show(trigger, contentFactory(() => layer.hide({ restoreFocus: true })), { pinned: true, label: label });
     });
   }
 
   app.bindFloatingDetailTooltip = function bindFloatingDetailTooltip(trigger, contentFactory) {
     if (!trigger || typeof contentFactory !== 'function') return;
-    ensureKernelRuntimeTooltip();
     bindKernelRuntimeTooltip(trigger, contentFactory);
   };
 
   function kernelRuntimeMapsNode(engine, runtimeData) {
-    ensureKernelRuntimeTooltip();
-
     const items = [
       {
         kind: 'rules',
@@ -916,13 +958,21 @@
     return true;
   }
 
-  function kernelRuntimeNoteSpec(kind, text) {
+  // A runtime note keeps its dismissal key (scope + full text, as the API stores it) and carries its
+  // parts separately, so the list can show a title, a time and the message on their own lines.
+  function kernelRuntimeNoteSpec(kind, text, parts) {
     const message = String(text || '').trim();
     if (!message) return null;
     const scope = String(kind || 'note').trim() || 'note';
+    const display = parts && typeof parts === 'object' ? parts : {};
+    const title = String(display.title || '').trim();
     return {
       key: scope + '|' + message,
-      text: message
+      text: message,
+      title: title,
+      time: String(display.time || '').trim(),
+      detail: title ? String(display.detail || '').trim() : message,
+      tone: display.tone === 'info' ? 'info' : 'warn'
     };
   }
 
@@ -931,19 +981,36 @@
     const dismissed = ensureKernelRuntimeDismissedNotes();
     if (dismissed[spec.key]) return null;
 
-    const node = app.createNode('div', { className: 'kernel-runtime-note' });
-    node.appendChild(app.createNode('span', {
-      className: 'kernel-runtime-note-text',
-      text: spec.text
-    }));
+    const head = spec.title || spec.time
+      ? app.createNode('div', {
+          className: 'kernel-runtime-note-head',
+          children: [
+            spec.title ? app.createNode('strong', { className: 'kernel-runtime-note-title', text: spec.title }) : null,
+            spec.time ? app.createNode('span', { className: 'kernel-runtime-note-time mono', text: spec.time }) : null
+          ].filter(Boolean)
+        })
+      : null;
+    const node = app.createNode('li', {
+      className: 'kernel-runtime-note is-' + spec.tone,
+      children: [
+        app.createNode('span', { className: 'kernel-runtime-note-mark', attrs: { 'aria-hidden': 'true' } }),
+        app.createNode('div', {
+          className: 'kernel-runtime-note-body',
+          children: [
+            head,
+            spec.detail ? app.createNode('p', { className: 'kernel-runtime-note-text', text: spec.detail }) : null
+          ].filter(Boolean)
+        })
+      ]
+    });
 
     const closeButton = app.createNode('button', {
-      className: 'kernel-runtime-note-close',
-      text: app.t('common.close'),
+      className: 'popover-close kernel-runtime-note-close',
+      text: '×',
       attrs: {
         type: 'button',
-        title: app.t('common.close'),
-        'aria-label': app.t('common.close')
+        title: app.t('kernel.note.dismissTitle'),
+        'aria-label': app.t('kernel.note.dismiss', { title: spec.title || spec.detail })
       }
     });
     closeButton.addEventListener('click', async () => {
@@ -951,7 +1018,7 @@
       closeButton.disabled = true;
       try {
         await dismissKernelRuntimeNote(spec.key);
-        if (typeof hideKernelRuntimeTooltip === 'function') hideKernelRuntimeTooltip();
+        hideKernelRuntimeTooltip();
         if (typeof app.renderKernelRuntime === 'function') {
           app.renderKernelRuntime();
         }
@@ -959,7 +1026,7 @@
         closeButton.disabled = false;
         if (e.message !== 'unauthorized') {
           app.notify('error', app.t('errors.actionFailed', {
-            action: app.t('common.close'),
+            action: app.t('kernel.note.dismissTitle'),
             message: app.translateValidationMessage(e.message)
           }));
         }
@@ -977,7 +1044,7 @@
     if (node) container.appendChild(node);
   }
 
-  function kernelRuntimeSummaryNote(labelKey, timestamp, detail) {
+  function kernelRuntimeSummaryNote(labelKey, timestamp, detail, tone) {
     const text = typeof app.translateRuntimeReason === 'function'
       ? app.translateRuntimeReason(detail)
       : String(detail || '').trim();
@@ -988,7 +1055,12 @@
     if (clock) parts.push(clock);
     parts.push(text);
 
-    return kernelRuntimeNoteSpec(labelKey, parts.join(' · '));
+    return kernelRuntimeNoteSpec(labelKey, parts.join(' · '), {
+      title: app.t(labelKey),
+      time: clock,
+      detail: text,
+      tone: tone
+    });
   }
 
   function kernelRuntimeNetlinkRecoveryDetail(data) {
@@ -1114,7 +1186,10 @@
     else if (mode === 'mixed') detail = app.t('runtimeReason.xdpMixedMode');
     if (!detail) return null;
 
-    return kernelRuntimeNoteSpec('xdp_attachment_mode', app.t('kernel.note.xdpAttachmentMode') + ' · ' + detail);
+    return kernelRuntimeNoteSpec('xdp_attachment_mode', app.t('kernel.note.xdpAttachmentMode') + ' · ' + detail, {
+      title: app.t('kernel.note.xdpAttachmentMode'),
+      detail: detail
+    });
   }
 
   // A kernel upgrade leaves no module for the new release and the host quietly
@@ -1131,18 +1206,15 @@
       const parts = [app.t('kernel.note.helperModuleMissing', { release: helper.kernel_release })];
       parts.push(app.t('kernel.note.helperModuleOtherReleases', { releases: others.join(', ') }));
       if (helper.rebuild_command) parts.push(app.t('kernel.note.helperModuleRebuild', { command: helper.rebuild_command }));
-      return kernelRuntimeNoteSpec('kernel_helper_module', parts.join(' · '));
+      return kernelRuntimeNoteSpec('kernel_helper_module', parts.join(' · '), {
+        title: app.t('kernel.helper.title'),
+        detail: parts.join(' · ')
+      });
     }
     const reason = String(helper.reason || '').trim();
     if (!reason) return null;
-    return kernelRuntimeNoteSpec('kernel_helper_module', app.t('kernel.note.helperModuleUnavailable') + ' · ' + reason);
-  }
-
-  function kernelCapabilityStateText(check) {
-    if (!check || typeof check !== 'object') return app.t('common.unknown');
-    if (check.available) return app.t('kernel.available.yes');
-    const reason = String(check.reason || '').trim();
-    return app.t('common.unavailable') + (reason ? (': ' + reason) : '');
+    const text = app.t('kernel.note.helperModuleUnavailable') + ' · ' + reason;
+    return kernelRuntimeNoteSpec('kernel_helper_module', text, { title: app.t('kernel.helper.title'), detail: text });
   }
 
   // Native XDP is up to each device's driver, so the kernel reports it per
@@ -1160,48 +1232,25 @@
     return app.t('kernel.capability.xdpNativeCount', { count: count });
   }
 
-  function kernelDeviceNameList(devices) {
-    const names = devices.map((device) => String(device.name || '').trim()).filter(Boolean);
-    if (!names.length) return app.t('common.dash');
-    const limit = 8;
-    const shown = names.slice(0, limit).join(', ');
-    return names.length > limit
-      ? shown + ' … ' + app.t('kernel.capability.moreDevices', { count: names.length })
-      : shown;
+  function kernelDeviceNames(devices) {
+    return devices.map((device) => String(device.name || '').trim()).filter(Boolean);
   }
 
-  function kernelXDPNativeRows(report) {
-    if (!report || typeof report !== 'object') return [];
-    if (!report.available) {
-      const reason = String(report.reason || '').trim();
-      return [app.t('kernel.capability.xdpNative') + ': ' + app.t('common.unknown') + (reason ? (' · ' + reason) : '')];
-    }
-    const devices = kernelXDPNativeDevices(report);
-    const native = devices.filter((device) => device.native);
-    let targets = kernelDeviceNameList(devices.filter((device) => device.redirect_target));
-    if (native.some((device) => !device.redirect_target)) {
-      targets += ' · ' + app.t('kernel.capability.xdpRedirectTargetHint');
-    }
-    return [
-      app.t('kernel.capability.xdpNative') + ': ' + kernelDeviceNameList(native),
-      app.t('kernel.capability.xdpRedirectTarget') + ': ' + targets,
-      app.t('kernel.capability.xdpGenericOnly') + ': ' + kernelDeviceNameList(devices.filter((device) => !device.native))
-    ];
-  }
-
-  function kernelRuntimeCapabilitySummary(capabilities, xdpNative) {
+  // One line for the summary card: the TC dataplane under the name the engine is shown with,
+  // generic and native XDP, and how many netlink checks passed.
+  function kernelRuntimeCapabilitySummary(capabilities, xdpNative, runtime) {
     if (!capabilities || typeof capabilities !== 'object') return '';
     const parts = [];
+    const stateText = (check) => (check.available ? app.t('kernel.available.yes') : app.t('kernel.available.no'));
     [
-      ['TC', capabilities.tc],
-      ['TCX', capabilities.tcx_attach],
+      [kernelEngineLabel('tc', runtime), capabilities.tc],
       ['XDP generic', capabilities.xdp_generic]
     ].forEach(([label, check]) => {
       if (!check || typeof check !== 'object') return;
-      parts.push(label + '=' + (check.available ? app.t('kernel.available.yes') : app.t('common.unavailable')));
+      parts.push(label + ' ' + stateText(check));
     });
     const nativeSummary = kernelXDPNativeSummary(xdpNative);
-    if (nativeSummary) parts.push('XDP native=' + nativeSummary);
+    if (nativeSummary) parts.push('XDP native ' + nativeSummary);
     const netlink = capabilities.netlink || {};
     const netlinkChecks = [
       netlink.route_socket,
@@ -1214,50 +1263,164 @@
     ].filter((check) => check && typeof check === 'object');
     if (netlinkChecks.length) {
       const okCount = netlinkChecks.filter((check) => !!check.available).length;
-      parts.push('netlink=' + String(okCount) + '/' + String(netlinkChecks.length));
+      parts.push('netlink ' + String(okCount) + '/' + String(netlinkChecks.length));
     }
     return parts.join(' · ');
   }
 
-  function kernelRuntimeCapabilityDetails(capabilities, helper, xdpNative) {
-    if (!capabilities || typeof capabilities !== 'object') capabilities = {};
-    const rows = [];
-    if (helper && helper.name) {
-      const state = [helper.name, app.t(helper.loaded ? 'kernel.loaded.yes' : 'kernel.loaded.no'),
-        app.t(helper.compiled ? (helper.available ? 'kernel.helper.available' : 'kernel.helper.unavailable') : 'kernel.helper.notCompiled')];
-      if (helper.compiled && helper.reason) state.push(helper.reason);
-      rows.push(app.t('kernel.helper.title') + ': ' + state.join(' · '));
+  function kernelCheckRow(labelKey, check) {
+    if (!check || typeof check !== 'object') return null;
+    const ok = !!check.available;
+    const reason = String(check.reason || '').trim();
+    return {
+      label: app.t(labelKey),
+      value: ok ? app.t('kernel.available.yes') : app.t('kernel.available.no'),
+      state: ok ? 'ok' : 'bad',
+      hint: ok ? '' : reason
+    };
+  }
+
+  function kernelChecksSummary(rows) {
+    const checks = rows.filter((row) => row && (row.state === 'ok' || row.state === 'bad'));
+    if (!checks.length) return null;
+    const ok = checks.filter((row) => row.state === 'ok').length;
+    return {
+      text: app.t('kernel.status.checksAvailable', { ok: ok, total: checks.length }),
+      tone: ok === checks.length ? 'ok' : 'bad'
+    };
+  }
+
+  function kernelStatusGroup(id, titleKey, rows, options) {
+    const list = (rows || []).filter(Boolean);
+    if (!list.length) return null;
+    const opts = options || {};
+    const summary = Object.prototype.hasOwnProperty.call(opts, 'summary') ? opts.summary : kernelChecksSummary(list);
+    const failing = list.some((row) => row.state === 'bad');
+    return {
+      id: id,
+      title: app.t(titleKey),
+      rows: list,
+      summary: summary,
+      open: !!opts.open || failing
+    };
+  }
+
+  // Everything the status details show, grouped the way an operator reads it: what is wrong first,
+  // then the platform, the dataplane, per-device XDP, BPF features, netlink and the ip tool.
+  function kernelRuntimeStatusGroups(data) {
+    const runtime = data && typeof data === 'object' ? data : {};
+    const caps = runtime.kernel_capabilities && typeof runtime.kernel_capabilities === 'object' ? runtime.kernel_capabilities : {};
+    const helper = runtime.kernel_helper_module;
+    const groups = [];
+
+    const alerts = [];
+    const unavailableReason = String(runtime.available_reason || '').trim();
+    if (runtime.available === false && unavailableReason) {
+      alerts.push({ tone: 'bad', text: app.t('common.unavailable') + ': ' + unavailableReason });
     }
-    const osArch = [capabilities.os, capabilities.arch].filter(Boolean).join('/');
-    if (osArch || capabilities.kernel_release) {
-      rows.push(app.t('kernel.capability.platform') + ': ' + [osArch, capabilities.kernel_release].filter(Boolean).join(' '));
+    (Array.isArray(caps.warnings) ? caps.warnings : []).forEach((warning) => {
+      const text = String(warning || '').trim();
+      if (text) alerts.push({ tone: 'warn', text: text });
+    });
+    if (alerts.length) {
+      groups.push({
+        id: 'warnings',
+        title: app.t('kernel.status.group.warnings'),
+        alerts: alerts,
+        summary: { text: String(alerts.length), tone: 'warn' },
+        open: true
+      });
+    }
+
+    const platformRows = [];
+    const osArch = [caps.os, caps.arch].filter(Boolean).join('/');
+    if (osArch) platformRows.push({ label: app.t('kernel.capability.platform'), value: osArch, mono: true });
+    if (caps.kernel_release) platformRows.push({ label: app.t('kernel.status.kernelRelease'), value: String(caps.kernel_release), mono: true });
+    if (helper && typeof helper === 'object' && helper.name) {
+      const state = [
+        helper.name,
+        app.t(helper.loaded ? 'kernel.loaded.yes' : 'kernel.loaded.no'),
+        app.t(helper.compiled ? (helper.available ? 'kernel.helper.available' : 'kernel.helper.unavailable') : 'kernel.helper.notCompiled')
+      ];
+      let tone = 'unknown';
+      if (helper.compiled && helper.available) tone = 'ok';
+      else if (helper.compiled && (helper.loaded || helper.module_installed)) tone = 'bad';
+      platformRows.push({
+        label: app.t('kernel.helper.title'),
+        value: state.join(' · '),
+        state: tone,
+        hint: helper.compiled && helper.reason ? String(helper.reason) : ''
+      });
+    }
+    groups.push(kernelStatusGroup('platform', 'kernel.status.group.platform', platformRows, { open: true, summary: null }));
+
+    const attachAPI = kernelTCAttachmentAPI(runtime);
+    groups.push(kernelStatusGroup('dataplane', 'kernel.status.group.dataplane', [
+      attachAPI ? {
+        label: app.t('kernel.status.attachInUse'),
+        value: attachAPI === 'tcx' ? app.t('kernel.status.attachTCX') : attachAPI === 'cls_bpf' ? app.t('kernel.status.attachClsBPF') : attachAPI
+      } : null,
+      kernelCheckRow('kernel.capability.tc', caps.tc),
+      kernelCheckRow('kernel.capability.tcx', caps.tcx_attach),
+      kernelCheckRow('kernel.capability.tcAttach', caps.tc_attach),
+      kernelCheckRow('kernel.capability.xdpGeneric', caps.xdp_generic),
+      kernelCheckRow('kernel.capability.xdpGenericAttach', caps.xdp_generic_attach),
+      kernelCheckRow('kernel.capability.netfilter', caps.netfilter)
+    ], { open: true }));
+
+    const native = runtime.kernel_xdp_native;
+    if (native && typeof native === 'object') {
+      if (!native.available) {
+        const reason = String(native.reason || '').trim();
+        groups.push(kernelStatusGroup('xdpNative', 'kernel.status.group.xdpNative', [{
+          label: app.t('kernel.capability.xdpNative'),
+          value: app.t('common.unknown'),
+          state: 'unknown',
+          hint: reason
+        }], { open: true, summary: { text: app.t('common.unknown'), tone: '' } }));
+      } else {
+        const devices = kernelXDPNativeDevices(native);
+        const nativeDevices = devices.filter((device) => device.native);
+        groups.push(kernelStatusGroup('xdpNative', 'kernel.status.group.xdpNative', [
+          { label: app.t('kernel.capability.xdpNative'), devices: kernelDeviceNames(nativeDevices) },
+          {
+            label: app.t('kernel.capability.xdpRedirectTarget'),
+            devices: kernelDeviceNames(devices.filter((device) => device.redirect_target)),
+            hint: nativeDevices.some((device) => !device.redirect_target) ? app.t('kernel.capability.xdpRedirectTargetHint') : ''
+          },
+          { label: app.t('kernel.capability.xdpGenericOnly'), devices: kernelDeviceNames(devices.filter((device) => !device.native)) }
+        ], {
+          open: true,
+          summary: { text: app.t('kernel.status.nativeCount', { native: nativeDevices.length, total: devices.length }), tone: '' }
+        }));
+      }
+    }
+
+    const mapRows = [];
+    if (runtime.kernel_map_profile) {
+      mapRows.push({
+        label: app.t('kernel.summary.mapProfile'),
+        value: kernelRuntimeMapProfileLabel(runtime.kernel_map_profile),
+        hint: kernelRuntimeMapProfileDetail(runtime)
+      });
     }
     [
-      ['kernel.capability.tc', capabilities.tc],
-      ['kernel.capability.tcx', capabilities.tcx_attach],
-      ['kernel.capability.xdpGeneric', capabilities.xdp_generic],
-      ['kernel.capability.xdpGenericAttach', capabilities.xdp_generic_attach]
-    ].forEach(([labelKey, check]) => {
-      if (!check || typeof check !== 'object') return;
-      rows.push(app.t(labelKey) + ': ' + kernelCapabilityStateText(check));
-    });
-    kernelXDPNativeRows(xdpNative).forEach((row) => rows.push(row));
-    [
-      ['kernel.capability.bpfArray', capabilities.bpf_map_array],
-      ['kernel.capability.bpfHash', capabilities.bpf_map_hash],
-      ['kernel.capability.bpfLRUHash', capabilities.bpf_map_lru_hash],
-      ['kernel.capability.bpfPerCPUHash', capabilities.bpf_map_percpu_hash],
-      ['kernel.capability.bpfPerCPUArray', capabilities.bpf_map_percpu_array],
-      ['kernel.capability.bpfProgArray', capabilities.bpf_map_prog_array],
-      ['kernel.capability.bpfDevMapHash', capabilities.bpf_map_devmap_hash],
-      ['kernel.capability.bpfSchedCLS', capabilities.bpf_sched_cls],
-      ['kernel.capability.bpfXDP', capabilities.bpf_xdp]
-    ].forEach(([labelKey, check]) => {
-      if (!check || typeof check !== 'object') return;
-      rows.push(app.t(labelKey) + ': ' + kernelCapabilityStateText(check));
-    });
-    const netlink = capabilities.netlink || {};
-    [
+      ['kernel.capability.bpfArray', caps.bpf_map_array],
+      ['kernel.capability.bpfHash', caps.bpf_map_hash],
+      ['kernel.capability.bpfLRUHash', caps.bpf_map_lru_hash],
+      ['kernel.capability.bpfPerCPUHash', caps.bpf_map_percpu_hash],
+      ['kernel.capability.bpfPerCPUArray', caps.bpf_map_percpu_array],
+      ['kernel.capability.bpfProgArray', caps.bpf_map_prog_array],
+      ['kernel.capability.bpfDevMapHash', caps.bpf_map_devmap_hash],
+      ['kernel.capability.bpfRingBuf', caps.bpf_map_ringbuf],
+      ['kernel.capability.bpfSchedCLS', caps.bpf_sched_cls],
+      ['kernel.capability.bpfXDP', caps.bpf_xdp],
+      ['kernel.capability.bpfNetfilter', caps.bpf_netfilter]
+    ].forEach(([labelKey, check]) => mapRows.push(kernelCheckRow(labelKey, check)));
+    groups.push(kernelStatusGroup('maps', 'kernel.status.group.maps', mapRows));
+
+    const netlink = caps.netlink || {};
+    groups.push(kernelStatusGroup('netlink', 'kernel.status.group.netlink', [
       ['kernel.capability.netlinkRouteSocket', netlink.route_socket],
       ['kernel.capability.netlinkLinkList', netlink.link_list],
       ['kernel.capability.netlinkRouteList', netlink.route_list],
@@ -1265,92 +1428,213 @@
       ['kernel.capability.netlinkAddressSubscribe', netlink.address_subscribe],
       ['kernel.capability.netlinkNeighborSubscribe', netlink.neighbor_subscribe],
       ['kernel.capability.netlinkRouteSubscribe', netlink.route_subscribe]
-    ].forEach(([labelKey, check]) => {
-      if (!check || typeof check !== 'object') return;
-      rows.push(app.t(labelKey) + ': ' + kernelCapabilityStateText(check));
-    });
-    const ipRoute = capabilities.ip_route || {};
-    [
-      ['kernel.capability.ipCommand', ipRoute.command],
-      ['kernel.capability.ipRuleShow', ipRoute.rule_show],
-      ['kernel.capability.ipRouteShow', ipRoute.route_show]
-    ].forEach(([labelKey, check]) => {
-      if (!check || typeof check !== 'object') return;
-      rows.push(app.t(labelKey) + ': ' + kernelCapabilityStateText(check));
-    });
-    if (ipRoute.path) {
-      rows.push(app.t('kernel.capability.ipPath') + ': ' + String(ipRoute.path));
-    }
-    (Array.isArray(capabilities.warnings) ? capabilities.warnings : []).forEach((warning) => {
-      const text = String(warning || '').trim();
-      if (text) rows.push(app.t('kernel.capability.warning') + ': ' + text);
-    });
-    return rows;
+    ].map(([labelKey, check]) => kernelCheckRow(labelKey, check))));
+
+    const ipRoute = caps.ip_route || {};
+    groups.push(kernelStatusGroup('ipRoute', 'kernel.status.group.ipRoute', [
+      kernelCheckRow('kernel.capability.ipCommand', ipRoute.command),
+      kernelCheckRow('kernel.capability.ipRuleShow', ipRoute.rule_show),
+      kernelCheckRow('kernel.capability.ipRouteShow', ipRoute.route_show),
+      ipRoute.path ? { label: app.t('kernel.capability.ipPath'), value: String(ipRoute.path), mono: true } : null
+    ]));
+
+    return groups.filter(Boolean);
   }
 
-  function kernelRuntimeStatusDetailsNode(mapProfileDetail, capabilitySummary, capabilityDetails, availableReason) {
-    const detailRows = [];
-    const mapDetail = String(mapProfileDetail || '').trim();
-    const capabilityDetailRows = Array.isArray(capabilityDetails) ? capabilityDetails.filter(Boolean) : [];
-    const reason = String(availableReason || '').trim();
+  app.kernelRuntimeStatusGroups = kernelRuntimeStatusGroups;
 
-    if (mapDetail) {
-      detailRows.push(app.t('kernel.summary.mapProfile') + ': ' + mapDetail);
-    }
-    capabilityDetailRows.forEach((row) => detailRows.push(row));
-    if (reason) {
-      detailRows.push(app.t('common.unavailable') + ': ' + reason);
-    }
-    if (!detailRows.length) return null;
-    ensureKernelRuntimeTooltip();
+  function kernelDeviceChips(names) {
+    if (!names.length) return app.createNode('span', { className: 'popover-muted', text: app.t('common.dash') });
+    return app.createNode('span', {
+      className: 'popover-chips',
+      children: names.map((name) => app.createNode('span', { className: 'popover-chip mono', text: name }))
+    });
+  }
 
+  function kernelStatusGroupNode(group) {
+    const children = [];
+    if (group.alerts) {
+      children.push(app.createNode('ul', {
+        className: 'popover-list',
+        children: group.alerts.map((alert) => app.createNode('li', {
+          className: 'popover-list-item is-' + alert.tone,
+          children: [app.createNode('span', { className: 'popover-list-text', text: alert.text })]
+        }))
+      }));
+    }
+    if (group.rows) {
+      children.push(app.popoverRows(group.rows.map((row) => (
+        row.devices ? Object.assign({}, row, { node: kernelDeviceChips(row.devices) }) : row
+      ))));
+    }
+    return app.popoverSection({
+      className: 'kernel-status-group is-' + group.id,
+      title: group.title,
+      summary: group.summary ? group.summary.text : '',
+      tone: group.summary ? group.summary.tone : '',
+      open: group.open,
+      collapsible: group.id !== 'warnings',
+      children: children
+    });
+  }
+
+  function kernelRuntimeStatusDetailsNode(data) {
+    const groups = kernelRuntimeStatusGroups(data);
+    if (!groups.length) return null;
+    const warnings = groups.find((group) => group.id === 'warnings');
+    const warningCount = warnings ? warnings.alerts.length : 0;
     const button = app.createNode('button', {
-      className: 'kernel-runtime-detail-trigger',
-      text: app.t('kernel.engine.details'),
+      className: 'kernel-runtime-detail-trigger kernel-runtime-status-trigger' + (warningCount ? ' is-warning' : ''),
+      text: warningCount ? app.t('kernel.status.detailsWithWarnings', { count: warningCount }) : app.t('kernel.engine.details'),
       attrs: {
         type: 'button',
-        'aria-label': detailRows.join('\n'),
-        'aria-describedby': 'kernelRuntimeFloatingTooltip',
+        'aria-haspopup': 'dialog',
+        'aria-controls': 'kernelRuntimeStatusDetails',
         'aria-expanded': 'false'
       }
     });
-    bindKernelRuntimeTooltip(button, () => app.createNode('div', {
-      children: [
-        app.createNode('span', {
-          className: 'kernel-runtime-tooltip-title',
-          text: app.t('kernel.summary.status')
-        }),
-        capabilitySummary
-          ? app.createNode('span', {
-              className: 'kernel-runtime-tooltip-meta',
-              text: app.t('kernel.summary.capabilities') + ': ' + capabilitySummary
-            })
-          : null,
-        app.createNode('div', {
-          className: 'kernel-runtime-tooltip-breakdown',
-          children: detailRows.map((row) => {
-            const text = String(row || '');
-            const idx = text.indexOf(':');
-            const label = idx >= 0 ? text.slice(0, idx) : text;
-            const value = idx >= 0 ? text.slice(idx + 1).trim() : '';
-            return kernelRuntimeTooltipBreakdownRow(label, value || app.t('common.dash'));
-          })
-        })
-      ].filter(Boolean)
-    }));
+    bindKernelRuntimePanel(button, (close) => [
+      app.popoverHeader({ title: app.t('kernel.summary.status'), onClose: close }),
+      app.createNode('div', {
+        className: 'popover-sections',
+        children: kernelRuntimeStatusGroups(app.state.kernelRuntime && app.state.kernelRuntime.data || data).map(kernelStatusGroupNode)
+      })
+    ], app.t('kernel.summary.status'));
     return button;
   }
+
+  // Engine details as label | value rows; the reconcile badge shows the reconcile rows only.
+  function kernelRuntimeEngineDetailRows(engine) {
+    if (!engine) return [];
+    const rows = [];
+    const lower = (value) => String(value || '').trim().toLowerCase();
+    const name = lower(engine.name);
+    const mode = lower(engine.attachment_mode);
+    if (name === 'tc') {
+      const api = lower(engine.attachment_api);
+      if (api) {
+        rows.push({
+          label: app.t('kernel.engineDetail.attach'),
+          value: api === 'tcx' ? app.t('kernel.status.attachTCX') : api === 'cls_bpf' ? app.t('kernel.status.attachClsBPF') : api
+        });
+      }
+      if (mode) rows.push({ label: app.t('kernel.engineDetail.program'), value: mode, mono: true });
+    } else if (name === 'xdp') {
+      const xdpMode = mode === 'driver' ? 'runtimeReason.xdpDriverMode' : mode === 'generic' ? 'runtimeReason.xdpGenericMode' : mode === 'mixed' ? 'runtimeReason.xdpMixedMode' : '';
+      if (xdpMode) rows.push({ label: app.t('kernel.engineDetail.xdpMode'), value: app.t(xdpMode) });
+    }
+
+    const seen = [];
+    [engine.pressure_reason, engine.degraded_reason, engine.available_reason, engine.attachment_summary].forEach((item) => {
+      const text = typeof app.translateRuntimeReason === 'function'
+        ? app.translateRuntimeReason(item)
+        : String(item || '').trim();
+      if (!text || seen.indexOf(text) >= 0) return;
+      seen.push(text);
+      rows.push({ label: app.t('kernel.engineDetail.reason'), value: text, tone: engine.degraded ? 'warn' : '' });
+    });
+
+    const reconcile = [];
+    const duration = kernelRuntimeDurationLabel(engine.last_reconcile_ms);
+    if (duration) reconcile.push(duration);
+    if (engine.last_reconcile_at) reconcile.push(app.formatClock(engine.last_reconcile_at));
+    if (engine.last_reconcile_mode) reconcile.push(kernelRuntimeModeLabel(engine.last_reconcile_mode));
+    if (reconcile.length) rows.push({ label: app.t('kernel.engineDetail.reconcile'), value: reconcile.join(' · '), group: 'reconcile' });
+    if (
+      engine.last_reconcile_request_entries || engine.last_reconcile_prepared_entries || engine.last_reconcile_applied_entries ||
+      engine.last_reconcile_upserts || engine.last_reconcile_deletes || engine.last_reconcile_attaches ||
+      engine.last_reconcile_detaches || engine.last_reconcile_preserved || engine.last_reconcile_flow_purge_deleted
+    ) {
+      rows.push({
+        label: app.t('kernel.engineDetail.reconcileCounts'),
+        value: [
+          'req=' + String(engine.last_reconcile_request_entries || 0),
+          'prep=' + String(engine.last_reconcile_prepared_entries || 0),
+          'applied=' + String(engine.last_reconcile_applied_entries || 0),
+          'upsert=' + String(engine.last_reconcile_upserts || 0),
+          'delete=' + String(engine.last_reconcile_deletes || 0),
+          'attach=' + String(engine.last_reconcile_attaches || 0),
+          'detach=' + String(engine.last_reconcile_detaches || 0),
+          'preserve=' + String(engine.last_reconcile_preserved || 0),
+          'purge=' + String(engine.last_reconcile_flow_purge_deleted || 0)
+        ].join(' '),
+        mono: true,
+        group: 'reconcile'
+      });
+    }
+    const phases = [];
+    if (engine.last_reconcile_prepare_ms) phases.push('prepare=' + kernelRuntimeDurationLabel(engine.last_reconcile_prepare_ms));
+    if (engine.last_reconcile_attach_ms) phases.push('attach=' + kernelRuntimeDurationLabel(engine.last_reconcile_attach_ms));
+    if (engine.last_reconcile_flow_purge_ms) phases.push('purge=' + kernelRuntimeDurationLabel(engine.last_reconcile_flow_purge_ms));
+    if (phases.length) rows.push({ label: app.t('kernel.engineDetail.reconcilePhases'), value: phases.join(' '), mono: true, group: 'reconcile' });
+    if (engine.last_reconcile_error) {
+      rows.push({ label: app.t('kernel.engineDetail.reconcileError'), value: String(engine.last_reconcile_error), tone: 'bad', group: 'reconcile' });
+    }
+
+    if (engine.last_maintain_ms || engine.last_maintain_at) {
+      const maintain = [];
+      if (engine.last_maintain_ms) maintain.push(String(engine.last_maintain_ms) + 'ms');
+      if (engine.last_maintain_at) maintain.push(app.formatClock(engine.last_maintain_at));
+      if (engine.last_prune_budget || engine.last_prune_scanned || engine.last_prune_deleted) {
+        maintain.push('prune ' + String(engine.last_prune_scanned || 0) + '/' + String(engine.last_prune_deleted || 0) + '/' + String(engine.last_prune_budget || 0));
+      }
+      rows.push({ label: app.t('kernel.engineDetail.maintain'), value: maintain.join(' · '), mono: true });
+    }
+    if (engine.last_maintain_error) {
+      rows.push({ label: app.t('kernel.engineDetail.maintainError'), value: String(engine.last_maintain_error), tone: 'bad' });
+    }
+    if (engine.pressure_since) rows.push({ label: app.t('kernel.engineDetail.pressureSince'), value: app.formatClock(engine.pressure_since) });
+    if (engine.degraded_since) rows.push({ label: app.t('kernel.engineDetail.degradedSince'), value: app.formatClock(engine.degraded_since), tone: 'warn' });
+    if (engine.attachments_unhealthy_count) {
+      rows.push({
+        label: app.t('kernel.engineDetail.unhealthy'),
+        value: String(engine.attachments_unhealthy_count) + (engine.last_attachments_unhealthy_at ? ' · ' + app.formatClock(engine.last_attachments_unhealthy_at) : ''),
+        tone: 'warn'
+      });
+    }
+    if (engine.diagnostics || engine.diagnostics_verbose) {
+      rows.push({ label: app.t('kernel.engineDetail.diagnostics'), value: engine.diagnostics_verbose ? 'verbose' : 'on', mono: true });
+    }
+    const counters = [];
+    [
+      ['fib', engine.diag_fib_non_success],
+      ['drop', engine.diag_redirect_drop],
+      ['nat_fail', engine.diag_nat_reserve_fail],
+      ['recreate', engine.diag_reply_flow_recreated],
+      ['oversize', engine.diag_oversize_drop]
+    ].concat(engine.diagnostics_verbose ? [
+      ['neigh', engine.diag_redirect_neigh_used],
+      ['self_heal', engine.diag_nat_self_heal_insert],
+      ['flow_fail', engine.diag_flow_update_fail],
+      ['nat_update_fail', engine.diag_nat_update_fail],
+      ['rewrite_fail', engine.diag_rewrite_fail],
+      ['probe2', engine.diag_nat_probe_round2_used],
+      ['probe3', engine.diag_nat_probe_round3_used],
+      ['tcp_close_del', engine.diag_tcp_close_delete],
+      ['pmtu', engine.diag_pmtu_to_stack],
+      ['frag', engine.diag_fragment_forwarded],
+      ['flow_cache', engine.diag_flow_cache_hit]
+    ] : []).forEach(([label, value]) => {
+      if (value) counters.push(label + '=' + String(value));
+    });
+    if (counters.length) rows.push({ label: app.t('kernel.engineDetail.diagCounts'), value: counters.join(' '), mono: true });
+    if (engine.diag_snapshot_error) {
+      rows.push({ label: app.t('kernel.engineDetail.diagError'), value: String(engine.diag_snapshot_error), tone: 'bad' });
+    }
+    return rows;
+  }
+
+  app.kernelRuntimeEngineDetailRows = kernelRuntimeEngineDetailRows;
 
   function kernelRuntimeReconcileNode(engine) {
     if (!engine) return app.emptyCellNode('stat-muted');
 
     const modeText = kernelRuntimeModeLabel(engine.last_reconcile_mode);
-    const detail = kernelRuntimeReconcileDetail(engine);
+    const rows = kernelRuntimeEngineDetailRows(engine).filter((row) => row.group === 'reconcile');
     const badge = app.createNode('span', {
-      className: 'badge ' + (engine.last_reconcile_error ? 'badge-error' : 'badge-disabled') + (detail ? ' kernel-runtime-reconcile-badge' : ''),
+      className: 'badge ' + (engine.last_reconcile_error ? 'badge-error' : 'badge-disabled') + (rows.length ? ' kernel-runtime-reconcile-badge' : ''),
       text: modeText || app.t('common.dash'),
-      title: detail || '',
-      attrs: detail ? {
+      attrs: rows.length ? {
         tabindex: '0',
         role: 'button',
         'aria-describedby': 'kernelRuntimeFloatingTooltip',
@@ -1358,9 +1642,11 @@
       } : null
     });
 
-    if (detail) {
-      ensureKernelRuntimeTooltip();
-      bindKernelRuntimeTooltip(badge, () => detail);
+    if (rows.length) {
+      bindKernelRuntimeTooltip(badge, () => [
+        app.popoverHeader({ title: app.t('kernel.engine.reconcile'), meta: kernelEngineLabel(engine.name) }),
+        app.popoverRows(rows)
+      ]);
     }
 
     return badge;
@@ -1370,118 +1656,33 @@
     const degraded = (engines || []).filter((engine) => !!engine.degraded);
     if (!degraded.length) return '';
     return degraded.map((engine) => {
-      const label = String(engine.name || app.t('common.dash')).toUpperCase();
+      const label = kernelEngineLabel(engine.name) || app.t('common.dash');
       const detail = kernelRuntimeDetailText(engine) || app.t('kernel.summary.degradedValue', { engine: label });
       return label + ': ' + detail;
     }).join('; ');
   }
 
-  let kernelRuntimeTooltip = null;
-  let kernelRuntimeTooltipTrigger = null;
-  let kernelRuntimeTooltipPinned = false;
-
-  function ensureKernelRuntimeTooltip() {
-    if (kernelRuntimeTooltip) return kernelRuntimeTooltip;
-
-    kernelRuntimeTooltip = app.createNode('div', {
-      className: 'kernel-runtime-floating-tooltip',
-      attrs: {
-        id: 'kernelRuntimeFloatingTooltip',
-        role: 'tooltip',
-        hidden: true
-      }
-    });
-    document.body.appendChild(kernelRuntimeTooltip);
-
-    window.addEventListener('resize', hideKernelRuntimeTooltip);
-    document.addEventListener('scroll', hideKernelRuntimeTooltip, true);
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') hideKernelRuntimeTooltip();
-    });
-    document.addEventListener('click', (e) => {
-      if (!kernelRuntimeTooltipTrigger) return;
-      if (kernelRuntimeTooltipTrigger.contains(e.target)) return;
-      hideKernelRuntimeTooltip();
-    });
-    document.addEventListener('focusin', (e) => {
-      if (!kernelRuntimeTooltipTrigger) return;
-      if (kernelRuntimeTooltipTrigger.contains(e.target)) return;
-      hideKernelRuntimeTooltip();
-    });
-
-    return kernelRuntimeTooltip;
-  }
-
-  function positionKernelRuntimeTooltip() {
-    if (!kernelRuntimeTooltip || !kernelRuntimeTooltipTrigger || kernelRuntimeTooltip.hidden) return;
-
-    const margin = 12;
-    const offset = 8;
-    const triggerRect = kernelRuntimeTooltipTrigger.getBoundingClientRect();
-
-    kernelRuntimeTooltip.style.left = '0px';
-    kernelRuntimeTooltip.style.top = '0px';
-
-    const tipRect = kernelRuntimeTooltip.getBoundingClientRect();
-    let left = triggerRect.left + ((triggerRect.width - tipRect.width) / 2);
-    left = Math.min(Math.max(left, margin), Math.max(margin, window.innerWidth - tipRect.width - margin));
-
-    let top = triggerRect.bottom + offset;
-    if (top + tipRect.height > window.innerHeight - margin) {
-      const aboveTop = triggerRect.top - tipRect.height - offset;
-      top = aboveTop >= margin ? aboveTop : Math.max(margin, window.innerHeight - tipRect.height - margin);
-    }
-
-    kernelRuntimeTooltip.style.left = Math.round(left) + 'px';
-    kernelRuntimeTooltip.style.top = Math.round(top) + 'px';
-  }
-
-  function hideKernelRuntimeTooltip() {
-    if (kernelRuntimeTooltipTrigger) {
-      kernelRuntimeTooltipTrigger.setAttribute('aria-expanded', 'false');
-    }
-    kernelRuntimeTooltipTrigger = null;
-    kernelRuntimeTooltipPinned = false;
-
-    if (!kernelRuntimeTooltip) return;
-    kernelRuntimeTooltip.classList.remove('is-visible');
-    kernelRuntimeTooltip.hidden = true;
-    app.clearNode(kernelRuntimeTooltip);
-  }
-
-  function showKernelRuntimeTooltip(trigger, content, pinned) {
-    const tooltip = ensureKernelRuntimeTooltip();
-    if (kernelRuntimeTooltipTrigger && kernelRuntimeTooltipTrigger !== trigger) {
-      kernelRuntimeTooltipTrigger.setAttribute('aria-expanded', 'false');
-    }
-
-    kernelRuntimeTooltipTrigger = trigger;
-    kernelRuntimeTooltipPinned = !!pinned;
-    app.clearNode(tooltip);
-    app.appendNodeContent(tooltip, content);
-    tooltip.hidden = false;
-    tooltip.classList.add('is-visible');
-    trigger.setAttribute('aria-expanded', 'true');
-    positionKernelRuntimeTooltip();
-  }
-
-  function kernelRuntimeDetailNode(detail, degraded) {
-    const text = String(detail || '').trim();
-    if (!text) return app.emptyCellNode('stat-muted');
-    ensureKernelRuntimeTooltip();
+  function kernelRuntimeDetailNode(engine) {
+    const rows = kernelRuntimeEngineDetailRows(engine);
+    if (!rows.length) return app.emptyCellNode('stat-muted');
+    const warn = !!engine.degraded || !!engine.pressure_active;
+    const title = app.t('kernel.engineDetail.title', { engine: kernelEngineLabel(engine.name) || app.t('common.dash') });
 
     const button = app.createNode('button', {
-      className: 'kernel-runtime-detail-trigger' + (degraded ? ' is-warning' : ''),
-      text: app.t(degraded ? 'kernel.degraded.yes' : 'kernel.engine.details'),
+      className: 'kernel-runtime-detail-trigger' + (warn ? ' is-warning' : ''),
+      text: app.t(warn ? 'kernel.degraded.yes' : 'kernel.engine.details'),
       attrs: {
         type: 'button',
-        'aria-label': text,
+        'aria-label': title,
         'aria-describedby': 'kernelRuntimeFloatingTooltip',
         'aria-expanded': 'false'
       }
     });
 
-    bindKernelRuntimeTooltip(button, () => text);
+    bindKernelRuntimeTooltip(button, () => [
+      app.popoverHeader({ title: title, meta: kernelEngineTitle(engine.name), metaMono: false }),
+      app.popoverRows(rows)
+    ]);
 
     return button;
   }
@@ -1533,11 +1734,10 @@
     const engines = Array.isArray(data.engines) ? data.engines : [];
     const pressureSummary = kernelRuntimePressureSummary(engines);
     const configuredOrderNodes = configuredOrder.length
-      ? configuredOrder.map((name) => kernelEngineBadge(name))
+      ? configuredOrder.map((name) => kernelEngineBadge(name, data))
       : [app.emptyCellNode('stat-muted')];
-    const mapProfileDetail = kernelRuntimeMapProfileDetail(data);
-    const capabilitySummary = kernelRuntimeCapabilitySummary(data.kernel_capabilities, data.kernel_xdp_native);
-    const capabilityDetails = kernelRuntimeCapabilityDetails(data.kernel_capabilities, data.kernel_helper_module, data.kernel_xdp_native);
+    const capabilitySummary = kernelRuntimeCapabilitySummary(data.kernel_capabilities, data.kernel_xdp_native, data);
+    const statusDetails = kernelRuntimeStatusDetailsNode(data);
 
     const summaryFragment = document.createDocumentFragment();
     summaryFragment.appendChild(kernelRuntimeSummaryCard(
@@ -1549,29 +1749,25 @@
       [
         kernelRuntimeSummaryInline([
           app.createNode('span', {
-            text: app.t('kernel.summary.configuredOrder') + ':'
+            className: 'kernel-runtime-sub-label',
+            text: app.t('kernel.summary.configuredOrder')
           }),
-          configuredOrderNodes
+          app.createNode('span', { className: 'kernel-runtime-engine-order', children: configuredOrderNodes })
         ]),
-        kernelRuntimeSummaryInline([
-          data.kernel_map_profile
-            ? app.createNode('span', {
-                text: app.t('kernel.summary.mapProfile') + ': ' + kernelRuntimeMapProfileLabel(data.kernel_map_profile)
-              })
-            : null,
-          capabilitySummary
-            ? app.createNode('span', {
-                text: app.t('kernel.summary.capabilities') + ': ' + capabilitySummary
-              })
-            : null,
-          kernelRuntimeStatusDetailsNode(
-            mapProfileDetail,
-            capabilitySummary,
-            capabilityDetails,
-            !data.available ? data.available_reason : ''
-          )
-        ].filter(Boolean))
-      ]
+        data.kernel_map_profile
+          ? kernelRuntimeSummaryInline([
+              app.createNode('span', { className: 'kernel-runtime-sub-label', text: app.t('kernel.summary.mapProfile') }),
+              app.createNode('span', { text: kernelRuntimeMapProfileLabel(data.kernel_map_profile) })
+            ])
+          : null,
+        capabilitySummary
+          ? kernelRuntimeSummaryInline([
+              app.createNode('span', { className: 'kernel-runtime-sub-label', text: app.t('kernel.summary.capabilities') }),
+              app.createNode('span', { className: 'kernel-runtime-capabilities', text: capabilitySummary })
+            ])
+          : null,
+        statusDetails ? kernelRuntimeSummaryInline([statusDetails]) : null
+      ].filter(Boolean)
     ));
     summaryFragment.appendChild(kernelRuntimeSummaryCard(
       'kernel.summary.activeKernel',
@@ -1690,47 +1886,50 @@
     ));
     el.kernelRuntimeSummary.appendChild(summaryFragment);
 
+    // Notes form one list under the cards: each has a tone mark, a title and time, the message and
+    // its own dismiss button, so several of them stay aligned instead of stacking as boxes.
     const activeKernelRuntimeNotes = {};
-    appendKernelRuntimeNote(
-      el.kernelRuntimeSummary,
-      kernelRuntimeNoteSpec('transient_fallback_summary', data.transient_fallback_summary),
-      activeKernelRuntimeNotes
-    );
-    const lastRetryNote = kernelRuntimeSummaryNote('kernel.note.lastRetry', data.last_kernel_retry_at, data.last_kernel_retry_reason);
-    appendKernelRuntimeNote(el.kernelRuntimeSummary, lastRetryNote, activeKernelRuntimeNotes);
-    const lastIncrementalRetryNote = kernelRuntimeSummaryNote('kernel.note.lastIncrementalRetry', data.last_kernel_incremental_retry_at, data.last_kernel_incremental_retry_result);
-    appendKernelRuntimeNote(el.kernelRuntimeSummary, lastIncrementalRetryNote, activeKernelRuntimeNotes);
-    const pendingNetlinkRecoveryNote = kernelRuntimeSummaryNote(
-      'kernel.note.pendingNetlinkRecovery',
-      data.kernel_netlink_recover_requested_at,
-      kernelRuntimeNetlinkRecoveryDetail(data)
-    );
-    appendKernelRuntimeNote(el.kernelRuntimeSummary, pendingNetlinkRecoveryNote, activeKernelRuntimeNotes);
-    const attachmentIssueNote = kernelRuntimeSummaryNote('kernel.note.attachmentIssue', '', data.last_kernel_attachment_issue);
-    appendKernelRuntimeNote(el.kernelRuntimeSummary, attachmentIssueNote, activeKernelRuntimeNotes);
-    const attachmentHealErrorNote = kernelRuntimeSummaryNote(
-      'kernel.note.lastAttachmentHealError',
-      data.last_kernel_attachment_heal_at,
-      data.last_kernel_attachment_heal_error
-    );
-    appendKernelRuntimeNote(el.kernelRuntimeSummary, attachmentHealErrorNote, activeKernelRuntimeNotes);
-    const attachmentHealNote = kernelRuntimeSummaryNote(
-      'kernel.note.lastAttachmentHeal',
-      data.last_kernel_attachment_heal_at,
-      data.last_kernel_attachment_heal_summary
-    );
-    appendKernelRuntimeNote(el.kernelRuntimeSummary, attachmentHealNote, activeKernelRuntimeNotes);
-    const degradedSummary = kernelRuntimeDegradedSummaryText(engines);
-    appendKernelRuntimeNote(
-      el.kernelRuntimeSummary,
-      degradedSummary
-        ? kernelRuntimeNoteSpec('degraded_summary', app.t('kernel.summary.degraded') + ': ' + degradedSummary)
-        : null,
-      activeKernelRuntimeNotes
-    );
-    const xdpAttachmentModeNote = kernelRuntimeXDPAttachmentModeNote(engines);
-    appendKernelRuntimeNote(el.kernelRuntimeSummary, xdpAttachmentModeNote, activeKernelRuntimeNotes);
-    appendKernelRuntimeNote(el.kernelRuntimeSummary, kernelRuntimeHelperModuleNote(data.kernel_helper_module), activeKernelRuntimeNotes);
+    const notes = app.createNode('ul', {
+      className: 'kernel-runtime-notes',
+      attrs: { 'aria-label': app.t('kernel.note.listLabel') }
+    });
+    [
+      kernelRuntimeNoteSpec('transient_fallback_summary', data.transient_fallback_summary, {
+        title: app.t('kernel.note.transientFallback'),
+        detail: data.transient_fallback_summary
+      }),
+      kernelRuntimeSummaryNote('kernel.note.lastRetry', data.last_kernel_retry_at, data.last_kernel_retry_reason),
+      kernelRuntimeSummaryNote('kernel.note.lastIncrementalRetry', data.last_kernel_incremental_retry_at, data.last_kernel_incremental_retry_result),
+      kernelRuntimeSummaryNote(
+        'kernel.note.pendingNetlinkRecovery',
+        data.kernel_netlink_recover_requested_at,
+        kernelRuntimeNetlinkRecoveryDetail(data)
+      ),
+      kernelRuntimeSummaryNote('kernel.note.attachmentIssue', '', data.last_kernel_attachment_issue),
+      kernelRuntimeSummaryNote(
+        'kernel.note.lastAttachmentHealError',
+        data.last_kernel_attachment_heal_at,
+        data.last_kernel_attachment_heal_error
+      ),
+      kernelRuntimeSummaryNote(
+        'kernel.note.lastAttachmentHeal',
+        data.last_kernel_attachment_heal_at,
+        data.last_kernel_attachment_heal_summary,
+        'info'
+      ),
+      (() => {
+        const degradedSummary = kernelRuntimeDegradedSummaryText(engines);
+        return degradedSummary
+          ? kernelRuntimeNoteSpec('degraded_summary', app.t('kernel.summary.degraded') + ': ' + degradedSummary, {
+              title: app.t('kernel.summary.degraded'),
+              detail: degradedSummary
+            })
+          : null;
+      })(),
+      kernelRuntimeXDPAttachmentModeNote(engines),
+      kernelRuntimeHelperModuleNote(data.kernel_helper_module)
+    ].forEach((spec) => appendKernelRuntimeNote(notes, spec, activeKernelRuntimeNotes));
+    if (notes.childNodes.length) el.kernelRuntimeSummary.appendChild(notes);
     pruneKernelRuntimeDismissedNotes(activeKernelRuntimeNotes);
 
     if (!engines.length) {
@@ -1746,7 +1945,7 @@
     engines.forEach((engine) => {
       const tr = document.createElement('tr');
       const pressureLevel = kernelRuntimePressureLevel(engine);
-      tr.appendChild(app.createCell(kernelEngineBadge(engine.name), 'stat-mono'));
+      tr.appendChild(app.createCell(kernelEngineBadge(engine.name, data), 'stat-mono'));
       tr.appendChild(app.createCell(kernelStatePill(!!engine.available, 'kernel.available.yes', 'kernel.available.no')));
       tr.appendChild(app.createCell(kernelRuntimePressureBadge(pressureLevel, engine.pressure_reason || '')));
       tr.appendChild(app.createCell(kernelStatePill(!!engine.loaded, 'kernel.loaded.yes', 'kernel.loaded.no')));
@@ -1757,7 +1956,7 @@
       tr.appendChild(app.createCell(kernelRuntimeReconcileNode(engine)));
       tr.appendChild(app.createCell(kernelStatePill(!!engine.traffic_stats, 'kernel.traffic.enabled', 'kernel.traffic.disabled')));
       tr.appendChild(app.createCell(
-        kernelRuntimeDetailNode(kernelRuntimeDetailText(engine), !!engine.degraded || !!engine.pressure_active),
+        kernelRuntimeDetailNode(engine),
         'kernel-runtime-detail-cell'
       ));
       fragment.appendChild(tr);

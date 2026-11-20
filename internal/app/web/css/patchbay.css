@@ -266,32 +266,6 @@
 .plugin-manager-dialog :is(select, input:not([type='checkbox']):not([type='radio'])) { height: var(--h-ctl) !important; min-height: var(--h-ctl) !important; }
 .plugin-manager-body :is(.mini-btn, .ghost-btn, .btn-cancel) { height: var(--h-ctl); min-height: var(--h-ctl); padding: 0 12px; }
 
-/* Popovers (plugin details, runtime breakdowns): quiet header actions, hairline sections, and
-   label | value rows that read left to right in the UI font. */
-.kernel-runtime-floating-tooltip, .kernel-runtime-floating-tooltip.plugin-detail-popover { padding: 14px 16px; border-color: var(--line-strong); box-shadow: var(--shadow-pop); }
-.kernel-runtime-floating-tooltip.plugin-detail-popover { max-height: min(440px, calc(100vh - 24px)); }
-.plugin-detail-header { gap: 12px; padding-bottom: 12px; border-bottom-color: var(--line); }
-.kernel-runtime-tooltip-title { color: var(--ink); font-size: var(--fs-md); font-weight: 600; }
-.kernel-runtime-tooltip-meta { color: var(--ink-3); font-family: var(--font-mono); font-size: var(--fs-xs); }
-.plugin-detail-header-actions { gap: 2px; }
-.plugin-detail-header-actions .badge { display: inline-flex; align-items: center; gap: 6px; min-height: 0; margin-right: 6px; padding: 0; border: 0; background: transparent; font-size: var(--fs-sm); font-weight: 500; }
-.plugin-detail-header-actions .badge::before { content: ''; width: 6px; height: 6px; border-radius: var(--r-pill); background: currentColor; }
-.plugin-detail-header-actions .plugin-stability-badge { min-height: 0; margin-right: 6px; padding: 0; border: 0; background: transparent; font-size: var(--fs-sm); }
-.plugin-detail-header-actions .plugin-stability-badge.is-stable { display: none; }
-.plugin-detail-close, .plugin-detail-close.plugin-detail-manage { min-height: 26px; padding: 0 8px; border: 0; border-radius: var(--r-md); background: transparent; color: var(--ink-2); font-size: var(--fs-sm); font-weight: 500; }
-.plugin-detail-close:hover, .plugin-detail-close:focus-visible { border: 0; background: var(--accent-soft); color: var(--ink); }
-.plugin-detail-sections { gap: 0; margin-top: 0; }
-.plugin-detail-section { gap: 0; border-bottom: 1px solid var(--line); }
-.plugin-detail-section:last-child { border-bottom: 0; }
-.plugin-detail-section-title { justify-content: flex-start; min-height: 38px; padding: 0; color: var(--ink-2); font-size: var(--fs-xs); font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
-.plugin-detail-section-title::before, .plugin-detail-section[open] .plugin-detail-section-title::before { content: ''; width: 6px; height: 6px; margin: 0 10px 0 2px; border: 0; border-right: 1.5px solid var(--ink-3); border-bottom: 1.5px solid var(--ink-3); border-radius: 0; transform: rotate(-45deg); transition: transform .15s var(--ease); }
-.plugin-detail-section[open] .plugin-detail-section-title::before { transform: rotate(45deg); }
-.plugin-detail-section-count { padding: 0; border: 0; background: transparent; color: var(--ink-3); font-family: var(--font-mono); font-weight: 400; letter-spacing: 0; }
-.plugin-detail-breakdown { gap: 6px; margin-top: 0; padding: 0 0 12px; border-top: 0; }
-.kernel-runtime-tooltip-breakdown-row { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 12px; }
-.kernel-runtime-tooltip-breakdown-label { color: var(--ink-2); font-family: var(--font-ui); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.kernel-runtime-tooltip-breakdown-value { color: var(--ink); font-family: var(--font-ui); text-align: left; word-break: normal; }
-
 /* Diagnostics summary: hairline-separated cells like the KPI strip, status as a dot and a word. */
 .kernel-runtime-summary { gap: 0; margin: 0 0 20px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); align-items: stretch; }
 .kernel-runtime-card { gap: 6px; padding: 16px 20px; border: 0; border-left: 1px solid var(--line); border-radius: 0; background: transparent; box-shadow: none; }
@@ -302,6 +276,15 @@
 .kernel-runtime-card :is(.stat-pill, .badge) { display: inline-flex; align-items: center; gap: 6px; min-width: 0; min-height: 0; padding: 0; border: 0; background: transparent; font-size: var(--fs-sm); font-weight: 500; }
 .kernel-runtime-card :is(.stat-pill, .badge)::before { content: ''; width: 6px; height: 6px; border-radius: var(--r-pill); background: currentColor; }
 .kernel-runtime-card .kernel-runtime-inline { gap: 12px; }
+.kernel-runtime-sub-label { color: var(--ink-2); }
+.kernel-runtime-sub-label + * { color: var(--ink); }
+/* Label and value on one line; a long value (the capability summary) wraps under itself, not under the label. */
+.kernel-runtime-sub > .kernel-runtime-inline:has(> .kernel-runtime-sub-label) { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: baseline; gap: 2px 10px; }
+.kernel-runtime-engine-order { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.kernel-runtime-sub > .kernel-runtime-inline:has(> .kernel-runtime-status-trigger) { margin-top: 4px; }
+@media (max-width: 479px) {
+    .kernel-runtime-sub > .kernel-runtime-inline:has(> .kernel-runtime-sub-label) { grid-template-columns: minmax(0, 1fr); gap: 0; }
+}
 @media (max-width: 1079px) {
     .kernel-runtime-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .kernel-runtime-card:nth-child(3) { padding-left: 0; border-left: 0; }
@@ -312,7 +295,6 @@
     .kernel-runtime-card { padding-left: 0; border-left: 0; }
     .kernel-runtime-card + .kernel-runtime-card { border-top: 1px solid var(--line); }
 }
-.plugin-detail-value { font-weight: 400; }
 @media (max-width: 679px) {
     .kpi-detail { display: none; }
 }

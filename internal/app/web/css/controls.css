@@ -200,12 +200,6 @@
     position: fixed;
     left: 0;
     top: 0;
-    min-width: 120px;
-    padding: 6px 0;
-    background: var(--surface-solid);
-    border: 1px solid var(--border);
-    border-radius: var(--r-md);
-    box-shadow: var(--shadow-soft);
     z-index: var(--z-popover);
     overflow-y: auto;
     overscroll-behavior: contain;
@@ -214,72 +208,6 @@
 .action-dropdown.open .action-dropdown-menu {
     display: flex;
     flex-direction: column;
-}
-
-.action-dropdown-menu button {
-    display: block;
-    width: 100%;
-    padding: 8px 14px;
-    text-align: left;
-    border: none;
-    border-radius: 0;
-    background: transparent;
-    cursor: pointer;
-    font-size: var(--fs-sm);
-    font-weight: 600;
-    white-space: nowrap;
-    line-height: 1.4;
-    transition: none;
-}
-
-.action-dropdown-menu button:hover {
-    background: var(--surface-muted);
-}
-
-.action-dropdown-menu button:disabled {
-    cursor: not-allowed;
-    opacity: 0.6;
-}
-
-.action-dropdown-menu .btn-delete:hover,
-.action-dropdown-menu .btn-delete-egress-nat:hover,
-.action-dropdown-menu .btn-delete-ipv6-assignment:hover,
-.action-dropdown-menu .btn-delete-managed-network:hover,
-.action-dropdown-menu .btn-delete-managed-network-reservation:hover {
-    background: var(--danger-bg);
-}
-
-.action-dropdown-menu .btn-edit:hover,
-.action-dropdown-menu .btn-edit-site:hover,
-.action-dropdown-menu .btn-edit-range:hover,
-.action-dropdown-menu .btn-edit-egress-nat:hover,
-.action-dropdown-menu .btn-edit-ipv6-assignment:hover,
-.action-dropdown-menu .btn-edit-managed-network:hover,
-.action-dropdown-menu .btn-edit-managed-network-reservation:hover,
-.action-dropdown-menu .btn-edit-managed-network-reservation-candidate:hover,
-.action-dropdown-menu .btn-fill-managed-network-reservation-candidate:hover {
-    background: var(--info-bg);
-}
-
-.action-dropdown-menu .btn-clone:hover,
-.action-dropdown-menu .btn-clone-site:hover,
-.action-dropdown-menu .btn-clone-range:hover,
-.action-dropdown-menu .btn-create-managed-network-reservation-candidate:hover {
-    background: var(--success-bg);
-}
-
-.action-dropdown-menu .btn-enable:hover,
-.action-dropdown-menu .btn-egress-enable:hover,
-.action-dropdown-menu .btn-enable-ipv6-assignment:hover,
-.action-dropdown-menu .btn-enable-managed-network:hover {
-    background: var(--success-bg);
-}
-
-.action-dropdown-menu .btn-disable:hover,
-.action-dropdown-menu .btn-egress-disable:hover,
-.action-dropdown-menu .btn-disable-ipv6-assignment:hover,
-.action-dropdown-menu .btn-disable-managed-network:hover {
-    background: var(--warning-bg);
 }
 
 .multi-select {
@@ -300,12 +228,6 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    padding: 8px;
-    background: var(--surface-solid);
-    border: 1px solid var(--border);
-    border-radius: var(--r-lg);
-    box-shadow: var(--shadow-soft);
-    z-index: 50;
 }
 
 .multi-select-menu[hidden] {
@@ -495,10 +417,6 @@ kbd { font-size: var(--fs-xs); font-weight: 400; }
 .modal-content { border-radius: var(--r-lg); box-shadow: var(--shadow-pop); }
 .confirm-dialog h2 { font-size: var(--fs-xl); font-weight: 500; }
 .confirm-dialog button { border-radius: var(--r-md); }
-.toast-stack { right: auto; left: 50%; bottom: 24px; transform: translateX(-50%); max-width: min(480px, calc(100vw - 32px)); }
-.toast { background: var(--ink); color: var(--on-accent); border-color: var(--ink); border-radius: var(--r-md); box-shadow: var(--shadow-pop); font-size: var(--fs-md); }
-.toast-error { border-left: 4px solid var(--danger); }
-.toast-success { border-left: 4px solid var(--live); }
 .command-overlay { position: fixed; inset: 0; z-index: var(--z-command); display: flex; align-items: flex-start; justify-content: center; padding: min(14vh, 100px) 16px 24px; background: var(--overlay); }
 .command-panel { width: min(560px, 100%); border: 1px solid var(--line-strong); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--shadow-pop); overflow: hidden; }
 #commandSearch { display: block; width: 100%; height: 56px; padding: 16px; color: var(--ink); background: transparent; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; font: 400 var(--fs-base) var(--font-ui); outline-offset: -3px; }

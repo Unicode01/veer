@@ -861,7 +861,7 @@
     {
       const opt = document.createElement('option');
       opt.value = '';
-      opt.textContent = 'Unspecified';
+      opt.textContent = typeof app.t === 'function' ? app.t('common.unspecified') : 'Unspecified';
       sel.appendChild(opt);
     }
     app.tags.forEach((tag) => {

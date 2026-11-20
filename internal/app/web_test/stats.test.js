@@ -435,29 +435,35 @@ test('renderKernelRuntime shows whether the configured flow cache is in effect',
   }
 });
 
+// The status details as "label: value" lines (hints appended), the way the popover reads.
+function statusDetailLines(app, groupID) {
+  return app.kernelRuntimeStatusGroups(app.state.kernelRuntime.data)
+    .filter((group) => !groupID || group.id === groupID)
+    .flatMap((group) => (group.rows || []).map((row) => {
+      const value = row.devices ? row.devices.join(', ') : row.value;
+      return row.label + ': ' + value + (row.hint ? ' · ' + row.hint : '');
+    }));
+}
+
 test('kernel status details distinguish helper build support, loading and usable capabilities', () => {
   for (const state of [
-    {compiled:false,loaded:false,available:false,want:'kernel.helper.notCompiled'},
-    {compiled:false,loaded:true,available:false,want:'kernel.helper.notCompiled'},
-    {compiled:true,loaded:true,available:false,want:'kernel.helper.unavailable',reason:'ABI mismatch'},
-    {compiled:true,loaded:true,available:true,want:'kernel.helper.available'}
+    {compiled:false,loaded:false,available:false,want:'kernel.helper.notCompiled',tone:'unknown'},
+    {compiled:false,loaded:true,available:false,want:'kernel.helper.notCompiled',tone:'unknown'},
+    {compiled:true,loaded:true,available:false,want:'kernel.helper.unavailable',reason:'ABI mismatch',tone:'bad'},
+    {compiled:true,loaded:true,available:true,want:'kernel.helper.available',tone:'ok'}
   ]) {
     const {app}=createHarness();
     app.state.kernelRuntime.data=Object.assign(baseRuntimeData(), {
       kernel_helper_module:{name:'veer_kfuncs',...state}, engines:[runtimeEngine()]
     });
     app.renderKernelRuntime();
-    const labels=[];
-    function visit(node) {
-      if(node.attributes?.['aria-label'])labels.push(node.attributes['aria-label']);
-      (node.childNodes||[]).forEach(visit);
-    }
-    visit(app.el.kernelRuntimeSummary);
-    const detail=labels.find(value=>value.includes('veer_kfuncs'));
-    assert.ok(detail,'helper status must be visible in the summary details');
-    assert.ok(detail.includes(state.loaded?'Loaded':'Not loaded'));
-    assert.ok(detail.includes(state.want));
-    if(state.reason)assert.ok(detail.includes(state.reason));
+    const group=app.kernelRuntimeStatusGroups(app.state.kernelRuntime.data).find((item)=>item.id==='platform');
+    const row=group && group.rows.find((item)=>item.value.includes('veer_kfuncs'));
+    assert.ok(row,'helper status must be in the platform group');
+    assert.ok(row.value.includes(state.loaded?'Loaded':'Not loaded'));
+    assert.ok(row.value.includes(state.want));
+    assert.equal(row.state,state.tone);
+    if(state.reason)assert.equal(row.hint,state.reason);
   }
 });
 
@@ -536,7 +542,7 @@ test('renderKernelRuntime renders degraded note when an engine is degraded', () 
 
   const notes = collectKernelRuntimeNotes(app.el.kernelRuntimeSummary);
   const noteTexts = notes.map((note) => collectText(note));
-  assert.ok(noteTexts.some((text) => text.includes('Kernel Engine Degraded: TC:')));
+  assert.ok(noteTexts.some((text) => text.includes('Kernel Engine Degraded') && text.includes('TC: ')), noteTexts.join('\n'));
 });
 
 function kernelRuntimeAriaLabels(node) {
@@ -546,6 +552,14 @@ function kernelRuntimeAriaLabels(node) {
     (current.childNodes || []).forEach(visit);
   })(node);
   return labels;
+}
+
+// The harness appends `children` twice (makeNode and createNode), so nodes are deduplicated.
+function collectNodes(node, predicate, out = []) {
+  if (!node) return out;
+  if (predicate(node) && !out.includes(node)) out.push(node);
+  (node.childNodes || []).forEach((child) => collectNodes(child, predicate, out));
+  return out;
 }
 
 test('kernel status details show TCX support and each device\'s native XDP support', () => {
@@ -564,17 +578,22 @@ test('kernel status details show TCX support and each device\'s native XDP suppo
         { name: 'vmbr0', type: 'bridge', native: false, redirect_target: false }
       ]
     },
-    engines: [runtimeEngine()]
+    engines: [runtimeEngine({ attachment_api: 'tcx' })]
   });
   app.renderKernelRuntime();
 
-  const detail = kernelRuntimeAriaLabels(app.el.kernelRuntimeSummary).find((value) => value.includes('kernel.capability.tcx'));
-  assert.ok(detail, 'TCX support must be in the status details');
-  const rows = detail.split('\n');
-  assert.ok(rows.includes('kernel.capability.tcx: Available'), detail);
-  assert.ok(rows.includes('kernel.capability.xdpNative: enp6s0f0, tap100i0'), detail);
-  assert.ok(rows.includes('kernel.capability.xdpRedirectTarget: tap100i0 · kernel.capability.xdpRedirectTargetHint'), detail);
-  assert.ok(rows.includes('kernel.capability.xdpGenericOnly: vmbr0'), detail);
+  const dataplane = statusDetailLines(app, 'dataplane');
+  assert.ok(dataplane.includes('kernel.status.attachInUse: kernel.status.attachTCX'), dataplane.join('\n'));
+  assert.ok(dataplane.includes('kernel.capability.tcx: Available'), dataplane.join('\n'));
+  const native = statusDetailLines(app, 'xdpNative');
+  assert.ok(native.includes('kernel.capability.xdpNative: enp6s0f0, tap100i0'), native.join('\n'));
+  assert.ok(native.includes('kernel.capability.xdpRedirectTarget: tap100i0 · kernel.capability.xdpRedirectTargetHint'), native.join('\n'));
+  assert.ok(native.includes('kernel.capability.xdpGenericOnly: vmbr0'), native.join('\n'));
+  // The details trigger is a short button that opens the panel, not a dump of every row.
+  const trigger = collectNodes(app.el.kernelRuntimeSummary, (node) => String(node.className || '').includes('kernel-runtime-status-trigger'))[0];
+  assert.ok(trigger, 'status card must offer the details panel');
+  assert.equal(trigger.attributes['aria-haspopup'], 'dialog');
+  assert.equal(trigger.attributes['aria-label'], undefined);
 });
 
 test('kernel status details call native XDP unknown on a kernel without per-device features', () => {
@@ -586,14 +605,16 @@ test('kernel status details call native XDP unknown on a kernel without per-devi
   });
   app.renderKernelRuntime();
 
-  const detail = kernelRuntimeAriaLabels(app.el.kernelRuntimeSummary).find((value) => value.includes('kernel.capability.xdpNative'));
-  assert.ok(detail);
-  const rows = detail.split('\n');
-  assert.ok(rows.includes('kernel.capability.xdpNative: common.unknown · needs Linux 6.3 or later'), detail);
-  assert.ok(!rows.some((row) => row.startsWith('kernel.capability.xdpGenericOnly')), detail);
+  const native = statusDetailLines(app, 'xdpNative');
+  assert.deepEqual([...native], ['kernel.capability.xdpNative: common.unknown · needs Linux 6.3 or later']);
+  const dataplane = app.kernelRuntimeStatusGroups(app.state.kernelRuntime.data).find((group) => group.id === 'dataplane');
+  const tcx = dataplane.rows.find((row) => row.label === 'kernel.capability.tcx');
+  assert.equal(tcx.state, 'bad');
+  assert.equal(tcx.hint, 'TCX attach unavailable');
+  assert.equal(dataplane.open, true);
 });
 
-test('kernel status details shorten a long device list', () => {
+test('kernel status details list every native device instead of cutting the list short', () => {
   const { app } = createHarness();
   const devices = Array.from({ length: 11 }, (_, index) => ({ name: 'tap' + String(100 + index) + 'i0', native: true, redirect_target: true }));
   app.state.kernelRuntime.data = Object.assign(baseRuntimeData(), {
@@ -603,23 +624,101 @@ test('kernel status details shorten a long device list', () => {
   });
   app.renderKernelRuntime();
 
-  const detail = kernelRuntimeAriaLabels(app.el.kernelRuntimeSummary).find((value) => value.includes('kernel.capability.xdpNative'));
-  const row = detail.split('\n').find((value) => value.startsWith('kernel.capability.xdpNative:'));
-  assert.ok(row.includes('tap107i0 … kernel.capability.moreDevices'), row);
-  assert.ok(!row.includes('tap108i0'), row);
+  const group = app.kernelRuntimeStatusGroups(app.state.kernelRuntime.data).find((item) => item.id === 'xdpNative');
+  assert.equal(group.rows[0].devices.length, 11);
+  assert.ok(group.rows[0].devices.includes('tap110i0'));
+});
+
+test('kernel status details put warnings first and group the checks', () => {
+  const { app } = createHarness();
+  const ok = { available: true };
+  app.state.kernelRuntime.data = Object.assign(baseRuntimeData(), {
+    available: false,
+    available_reason: 'no kernel engine',
+    kernel_capabilities: {
+      os: 'linux', arch: 'amd64', kernel_release: '7.0.14-29-pve',
+      tc: ok, bpf_map_array: ok, bpf_map_hash: { available: false, reason: 'EPERM' },
+      netlink: { route_socket: ok, link_list: ok },
+      ip_route: { command: ok, path: '/usr/sbin/ip' },
+      warnings: ['netlink subscriptions are incomplete', 'ip route command support is incomplete']
+    },
+    engines: [runtimeEngine()]
+  });
+  app.renderKernelRuntime();
+
+  const groups = app.kernelRuntimeStatusGroups(app.state.kernelRuntime.data);
+  assert.deepEqual([...groups.map((group) => group.id)], ['warnings', 'platform', 'dataplane', 'maps', 'netlink', 'ipRoute']);
+  assert.deepEqual([...groups[0].alerts.map((alert) => alert.tone)], ['bad', 'warn', 'warn']);
+  const maps = groups.find((group) => group.id === 'maps');
+  assert.equal(maps.open, true, 'a group with a failed check opens by itself');
+  assert.equal(maps.summary.tone, 'bad');
+  const netlink = groups.find((group) => group.id === 'netlink');
+  assert.equal(netlink.open, false, 'a group whose checks all pass stays folded');
+  assert.equal(netlink.summary.tone, 'ok');
+  const trigger = collectNodes(app.el.kernelRuntimeSummary, (node) => String(node.className || '').includes('kernel-runtime-status-trigger'))[0];
+  assert.ok(String(trigger.className).includes('is-warning'));
 });
 
 test('engine details name the TC attach API and the XDP attach mode', () => {
   const { app } = createHarness();
+  const tc = runtimeEngine({ attachment_api: 'tcx', attachment_mode: 'dispatch_v4' });
+  const xdp = runtimeEngine({ name: 'xdp', attachment_mode: 'driver' });
+  const tcRows = app.kernelRuntimeEngineDetailRows(tc).map((row) => row.label + ': ' + row.value);
+  assert.ok(tcRows.includes('kernel.engineDetail.attach: kernel.status.attachTCX'), tcRows.join('\n'));
+  assert.ok(tcRows.includes('kernel.engineDetail.program: dispatch_v4'), tcRows.join('\n'));
+  const xdpRows = app.kernelRuntimeEngineDetailRows(xdp).map((row) => row.label + ': ' + row.value);
+  assert.ok(xdpRows.includes('kernel.engineDetail.xdpMode: runtimeReason.xdpDriverMode'), xdpRows.join('\n'));
+});
+
+test('a TC engine attached through tcx is shown as TCX everywhere', () => {
+  const { app } = createHarness();
   app.state.kernelRuntime.data = Object.assign(baseRuntimeData(), {
-    engines: [
-      runtimeEngine({ attachment_api: 'tcx', attachment_mode: 'dispatch_v4' }),
-      runtimeEngine({ name: 'xdp', attachment_mode: 'driver' })
-    ]
+    configured_order: ['tc', 'xdp'],
+    kernel_capabilities: { tc: { available: true }, tcx_attach: { available: true }, xdp_generic: { available: true } },
+    engines: [runtimeEngine({ attachment_api: 'tcx', pressure_active: true, pressure_level: 'hold' }), runtimeEngine({ name: 'xdp' })]
   });
   app.renderKernelRuntime();
 
-  const labels = kernelRuntimeAriaLabels(app.el.kernelRuntimeBody);
-  assert.ok(labels.some((value) => value.includes('attach=tcx') && value.includes('program=dispatch_v4')), labels.join('\n'));
-  assert.ok(labels.some((value) => value.includes('runtimeReason.xdpDriverMode')), labels.join('\n'));
+  const summary = collectText(app.el.kernelRuntimeSummary);
+  assert.ok(summary.includes('TCX Available'), summary);
+  assert.ok(!/\bTC Available\b/.test(summary), summary);
+  assert.ok(summary.includes('TCX kernel.pressure.hold'), summary);
+  const badges = collectNodes(app.el.kernelRuntimeSummary, (node) => /\bbadge-(tc|xdp)\b/.test(String(node.className || ''))).map((node) => node.textContent);
+  assert.deepEqual(badges, ['TCX', 'XDP']);
+  const rowBadges = collectNodes(app.el.kernelRuntimeBody, (node) => /\bbadge-(tc|xdp)\b/.test(String(node.className || ''))).map((node) => node.textContent);
+  assert.deepEqual(rowBadges, ['TCX', 'XDP']);
+  assert.equal(app.kernelEngineLabel('tc'), 'TCX');
+
+  app.state.kernelRuntime.data.engines[0].attachment_api = 'cls_bpf';
+  assert.equal(app.kernelEngineLabel('tc'), 'TC');
+  app.state.kernelRuntime.data.engines[0].attachment_api = '';
+  assert.equal(app.kernelEngineLabel('tc'), 'TC');
+});
+
+test('runtime notes render as one list with a title, a time and their own dismiss button', () => {
+  const { app } = createHarness();
+  app.state.kernelRuntime.data = Object.assign(baseRuntimeData(), {
+    last_kernel_retry_at: '15:29:02',
+    last_kernel_retry_reason: 'tc attach vmbr2 port tap108i0: interface not found',
+    last_kernel_incremental_retry_at: '15:31:12',
+    last_kernel_incremental_retry_result: 'recovered 1 rule owner',
+    engines: [runtimeEngine()]
+  });
+  app.renderKernelRuntime();
+
+  const lists = collectNodes(app.el.kernelRuntimeSummary, (node) => String(node.className || '').split(/\s+/).includes('kernel-runtime-notes'));
+  assert.equal(lists.length, 1);
+  const notes = collectKernelRuntimeNotes(lists[0]);
+  assert.equal(notes.length, 2);
+  notes.forEach((note) => {
+    assert.equal(note.tagName, 'LI');
+    const close = collectNodes(note, (node) => String(node.className || '').includes('kernel-runtime-note-close'))[0];
+    assert.ok(close && /kernel\.note\.dismiss/.test(close.attributes['aria-label']));
+  });
+  assert.ok(collectText(notes[0]).includes('15:29:02'));
+  assert.ok(collectText(notes[0]).includes('interface not found'));
+  // The dismissal key is unchanged, so notes dismissed before this layout stay dismissed.
+  app.state.kernelRuntimeDismissedNotes = { 'kernel.note.lastRetry|kernel.note.lastRetry · 15:29:02 · tc attach vmbr2 port tap108i0: interface not found': true };
+  app.renderKernelRuntime();
+  assert.equal(collectKernelRuntimeNotes(app.el.kernelRuntimeSummary).length, 1);
 });

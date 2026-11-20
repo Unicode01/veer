@@ -75,9 +75,7 @@
     return parts.filter(Boolean).join(' | ');
   }
 
-  let pluginDetailPopover = null;
-  let pluginDetailPopoverTrigger = null;
-  let pluginDetailPopoverPinned = false;
+  let pluginDetailLayer = null;
 
   function textOrDash(value) {
     const text = String(value == null ? '' : value).trim();
@@ -286,42 +284,13 @@
     }).join('\n\n');
   }
 
-  function pluginDetailRowNode(row) {
-    return app.createNode('div', {
-      className: 'kernel-runtime-tooltip-breakdown-row plugin-detail-row',
-      children: [
-        app.createNode('span', {
-          className: 'kernel-runtime-tooltip-breakdown-label',
-          text: row.label
-        }),
-        app.createNode('span', {
-          className: 'kernel-runtime-tooltip-breakdown-value plugin-detail-value',
-          text: row.value
-        })
-      ]
-    });
-  }
-
   function pluginDetailSectionNode(section, index) {
-    return app.createNode('details', {
+    return app.popoverSection({
       className: 'plugin-detail-section',
-      attrs: index === 0 ? { open: true } : null,
-      children: [
-        app.createNode('summary', {
-          className: 'plugin-detail-section-title',
-          children: [
-            app.createNode('span', { text: section.title }),
-            app.createNode('span', {
-              className: 'plugin-detail-section-count',
-              text: String(section.rows.length)
-            })
-          ]
-        }),
-        app.createNode('div', {
-          className: 'kernel-runtime-tooltip-breakdown plugin-detail-breakdown',
-          children: section.rows.map(pluginDetailRowNode)
-        })
-      ]
+      title: section.title,
+      summary: String(section.rows.length),
+      open: index === 0,
+      children: app.popoverRows(section.rows.map((row) => ({ label: row.label, value: row.value })), { className: 'plugin-detail-breakdown' })
     });
   }
 
@@ -330,7 +299,7 @@
     const info = pluginStatusInfo(item);
     const manageButton = !item.builtin && item.id && item.id !== 'veer_core'
       ? app.createNode('button', {
-          className: 'plugin-detail-close plugin-detail-manage',
+          className: 'popover-action plugin-detail-manage',
           text: app.t('plugins.manager.action'),
           attrs: { type: 'button' }
         })
@@ -343,15 +312,6 @@
         }
       });
     }
-    const closeButton = app.createNode('button', {
-      className: 'plugin-detail-close',
-      text: app.t('plugins.detail.close'),
-      attrs: { type: 'button' }
-    });
-    if (closeButton && typeof closeButton.addEventListener === 'function') {
-      closeButton.addEventListener('click', hidePluginPopover);
-    }
-
     const meta = [
       item.id,
       item.kind,
@@ -359,103 +319,41 @@
     ].filter(Boolean).join(' / ');
     const sections = pluginDetailsSections(item);
     return [
-      app.createNode('div', {
-        className: 'kernel-runtime-tooltip-header plugin-detail-header',
-        children: [
-          app.createNode('div', {
-            children: [
-              app.createNode('span', {
-                className: 'kernel-runtime-tooltip-title',
-                text: item.name || item.id || app.t('plugins.details')
-              }),
-              app.createNode('span', {
-                className: 'kernel-runtime-tooltip-meta',
-                text: meta || app.t('common.dash')
-              })
-            ]
-          }),
-          app.createNode('div', {
-            className: 'plugin-detail-header-actions',
-            children: [
-              pluginStabilityBadgeNode(item),
-              app.createStatusBadgeNode(info, ''),
-              manageButton,
-              closeButton
-            ].filter(Boolean)
-          })
-        ]
+      app.popoverHeader({
+        className: 'plugin-detail-header',
+        title: item.name || item.id || app.t('plugins.details'),
+        meta: meta || app.t('common.dash'),
+        aside: [pluginStabilityBadgeNode(item), app.createStatusBadgeNode(info, '')].filter(Boolean),
+        actions: manageButton,
+        closeClassName: 'plugin-detail-close',
+        onClose: () => hidePluginPopover({ restoreFocus: true })
       }),
       sections.length
         ? app.createNode('div', {
-            className: 'plugin-detail-sections',
+            className: 'popover-sections plugin-detail-sections',
             children: sections.map(pluginDetailSectionNode)
           })
-        : app.createNode('div', {
-            className: 'kernel-runtime-tooltip-meta',
+        : app.createNode('p', {
+            className: 'popover-empty',
             text: app.t('plugins.detail.empty')
           })
     ];
   }
 
-  function ensurePluginPopover() {
-    if (pluginDetailPopover) return pluginDetailPopover;
-    pluginDetailPopover = app.createNode('div', {
-      className: 'kernel-runtime-floating-tooltip plugin-detail-popover',
-      attrs: {
+  function pluginPopoverLayer() {
+    if (!pluginDetailLayer) {
+      pluginDetailLayer = app.createFloatingLayer({
         id: 'pluginRuntimeTooltip',
+        className: 'is-wide plugin-detail-popover',
         role: 'dialog',
-        hidden: true
-      }
-    });
-    document.body.appendChild(pluginDetailPopover);
-    return pluginDetailPopover;
+        placement: { align: 'start', maxHeight: 440 }
+      });
+    }
+    return pluginDetailLayer;
   }
 
-  function positionPluginPopover() {
-    if (!pluginDetailPopover || !pluginDetailPopoverTrigger || pluginDetailPopover.hidden) return;
-    if (!pluginDetailPopoverTrigger.isConnected && typeof pluginDetailPopoverTrigger.isConnected === 'boolean') {
-      hidePluginPopover();
-      return;
-    }
-
-    const margin = 12;
-    const offset = 8;
-    const viewportWidth = document.documentElement.clientWidth || window.innerWidth || 0;
-    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-    const triggerRect = pluginDetailPopoverTrigger.getBoundingClientRect();
-    const spaceBelow = Math.max(0, viewportHeight - triggerRect.bottom - offset - margin);
-    const spaceAbove = Math.max(0, triggerRect.top - offset - margin);
-    const preferBelow = spaceBelow >= 220 || spaceBelow >= spaceAbove;
-    const maxHeight = Math.max(180, Math.min(360, viewportHeight - margin * 2, preferBelow ? spaceBelow : spaceAbove));
-
-    pluginDetailPopover.style.maxHeight = Math.round(maxHeight) + 'px';
-    pluginDetailPopover.style.left = '0px';
-    pluginDetailPopover.style.top = '0px';
-
-    const tipRect = pluginDetailPopover.getBoundingClientRect();
-    let left = triggerRect.left;
-    if (left + tipRect.width > viewportWidth - margin) left = viewportWidth - tipRect.width - margin;
-    left = Math.max(margin, left);
-
-    let top = preferBelow ? triggerRect.bottom + offset : triggerRect.top - tipRect.height - offset;
-    if (top < margin) top = margin;
-    if (top + tipRect.height > viewportHeight - margin) top = Math.max(margin, viewportHeight - tipRect.height - margin);
-
-    pluginDetailPopover.style.left = Math.round(left) + 'px';
-    pluginDetailPopover.style.top = Math.round(top) + 'px';
-  }
-
-  function hidePluginPopover() {
-    if (pluginDetailPopoverTrigger) {
-      pluginDetailPopoverTrigger.setAttribute('aria-expanded', 'false');
-    }
-    pluginDetailPopoverTrigger = null;
-    pluginDetailPopoverPinned = false;
-
-    if (!pluginDetailPopover) return;
-    pluginDetailPopover.classList.remove('is-visible');
-    pluginDetailPopover.hidden = true;
-    app.clearNode(pluginDetailPopover);
+  function hidePluginPopover(options) {
+    if (pluginDetailLayer) pluginDetailLayer.hide(options && options.restoreFocus ? { restoreFocus: true } : null);
   }
 
   function showPluginPopover(trigger, pinned) {
@@ -463,23 +361,14 @@
     const pluginID = trigger.dataset ? String(trigger.dataset.pluginId || '') : '';
     const plugin = (app.state.plugins.data || []).find((item) => item && item.id === pluginID);
     if (!plugin) return;
-    const popover = ensurePluginPopover();
-    if (pluginDetailPopoverTrigger && pluginDetailPopoverTrigger !== trigger) {
-      pluginDetailPopoverTrigger.setAttribute('aria-expanded', 'false');
-    }
-
-    pluginDetailPopoverTrigger = trigger;
-    pluginDetailPopoverPinned = !!pinned;
-    app.clearNode(popover);
-    app.appendNodeContent(popover, pluginDetailContent(plugin));
-    popover.hidden = false;
-    popover.classList.add('is-visible');
-    trigger.setAttribute('aria-expanded', 'true');
-    positionPluginPopover();
+    pluginPopoverLayer().show(trigger, pluginDetailContent(plugin), {
+      pinned: pinned,
+      label: plugin.name || plugin.id || app.t('plugins.details')
+    });
   }
 
   function togglePluginPopover(trigger) {
-    if (pluginDetailPopoverTrigger === trigger && pluginDetailPopoverPinned) {
+    if (pluginDetailLayer && pluginDetailLayer.isOpenFor(trigger) && pluginDetailLayer.pinned) {
       hidePluginPopover();
       return;
     }
@@ -674,9 +563,9 @@
       title: values.length ? values.join(', ') : app.t('plugins.link.unbound'),
       detailTitle: text,
       detailRows: [
-        detailRow('Interfaces', values.length ? values.join(', ') : app.t('plugins.link.unbound')),
-        detailRow('Pipeline', pipelineInterface),
-        detailRow('Attach', attach),
+        detailRow(app.t('plugins.field.interfaces'), values.length ? values.join(', ') : app.t('plugins.link.unbound')),
+        detailRow(app.t('plugins.field.pipeline'), pipelineInterface),
+        detailRow(app.t('plugins.field.attach'), attach),
         detailRow(app.t('plugins.link.direction'), direction)
       ].filter(Boolean)
     };
@@ -708,28 +597,28 @@
       error: !!attachment.error,
       detailTitle: [item.pluginID, attachment.hook_id].filter(Boolean).join('.') || label,
       detailRows: [
-        detailRow('Plugin', item.pluginName || item.pluginID),
-        detailRow('Hook', attachment.hook_id),
-        detailRow('Engine', attachment.engine ? String(attachment.engine).toUpperCase() : ''),
-        detailRow('Family', netfilter ? attachment.family : ''),
-        detailRow('Netfilter Hook', netfilter ? attachment.netfilter_hook : ''),
-        detailRow('Phase', netfilter ? attachment.phase : ''),
-        detailRow('Namespace', netfilter ? attachment.namespace : ''),
-        detailRow('Attach', netfilter ? '' : attachment.attach),
-        detailRow('Stage', netfilter ? '' : attachment.stage),
-        detailRow('Mode', attachment.mode),
-        detailRow('Interfaces', !netfilter && interfaces.length ? interfaces.join(', ') : ''),
-        detailRow('Pipeline', netfilter ? '' : attachment.interface),
-        detailRow('Program', attachment.program),
-        detailRow('Status', attachment.status),
-        detailRow('Priority', typeof attachment.priority === 'number' ? String(attachment.priority) : ''),
-        detailRow('Kernel attachment', netfilter ? attachment.filter_handle : ''),
-        detailRow('Before', Array.isArray(attachment.before) && attachment.before.length ? attachment.before.join(', ') : ''),
-        detailRow('After', Array.isArray(attachment.after) && attachment.after.length ? attachment.after.join(', ') : ''),
-        detailRow('Resolved order', typeof attachment.order === 'number' ? String(attachment.order) : ''),
-        detailRow('Packet metadata', pluginPacketMetadataDetail(attachment.packet_metadata)),
-        detailRow('Slot', slot > 0 ? String(slot) : ''),
-        detailRow('Context', Array.isArray(attachment.context) && attachment.context.length ? attachment.context.join(', ') : ''),
+        detailRow(app.t('plugins.field.plugin'), item.pluginName || item.pluginID),
+        detailRow(app.t('plugins.field.hook'), attachment.hook_id),
+        detailRow(app.t('plugins.field.engine'), attachment.engine ? String(attachment.engine).toUpperCase() : ''),
+        detailRow(app.t('plugins.field.family'), netfilter ? attachment.family : ''),
+        detailRow(app.t('plugins.field.netfilterHook'), netfilter ? attachment.netfilter_hook : ''),
+        detailRow(app.t('plugins.field.phase'), netfilter ? attachment.phase : ''),
+        detailRow(app.t('plugins.field.namespace'), netfilter ? attachment.namespace : ''),
+        detailRow(app.t('plugins.field.attach'), netfilter ? '' : attachment.attach),
+        detailRow(app.t('plugins.field.stage'), netfilter ? '' : attachment.stage),
+        detailRow(app.t('plugins.field.mode'), attachment.mode),
+        detailRow(app.t('plugins.field.interfaces'), !netfilter && interfaces.length ? interfaces.join(', ') : ''),
+        detailRow(app.t('plugins.field.pipeline'), netfilter ? '' : attachment.interface),
+        detailRow(app.t('plugins.field.program'), attachment.program),
+        detailRow(app.t('plugins.field.status'), attachment.status),
+        detailRow(app.t('plugins.field.priority'), typeof attachment.priority === 'number' ? String(attachment.priority) : ''),
+        detailRow(app.t('plugins.field.kernelAttachment'), netfilter ? attachment.filter_handle : ''),
+        detailRow(app.t('plugins.field.before'), Array.isArray(attachment.before) && attachment.before.length ? attachment.before.join(', ') : ''),
+        detailRow(app.t('plugins.field.after'), Array.isArray(attachment.after) && attachment.after.length ? attachment.after.join(', ') : ''),
+        detailRow(app.t('plugins.field.resolvedOrder'), typeof attachment.order === 'number' ? String(attachment.order) : ''),
+        detailRow(app.t('plugins.field.packetMetadata'), pluginPacketMetadataDetail(attachment.packet_metadata)),
+        detailRow(app.t('plugins.field.slot'), slot > 0 ? String(slot) : ''),
+        detailRow(app.t('plugins.field.context'), Array.isArray(attachment.context) && attachment.context.length ? attachment.context.join(', ') : ''),
         detailRow(app.t('plugins.error'), attachment.error)
       ].filter(Boolean)
     };
@@ -748,7 +637,7 @@
       detailRows: [
         detailRow(app.t('plugins.link.role'), direction === 'reply' ? app.t('plugins.link.replyCoreCompact') : app.t('plugins.link.coreCompact')),
         detailRow(app.t('plugins.link.direction'), direction),
-        detailRow('Priority', String(corePriority))
+        detailRow(app.t('plugins.field.priority'), String(corePriority))
       ].filter(Boolean)
     };
   }
@@ -927,19 +816,19 @@
       current: plugin && plugin.id === currentPluginID,
       detailTitle: [plugin && plugin.id, hook && hook.id].filter(Boolean).join('.') || label,
       detailRows: [
-        detailRow('Plugin', plugin && (plugin.name || plugin.id)),
-        detailRow('Hook', hook && hook.id),
-        detailRow('Engine', hook && hook.engine ? String(hook.engine).toUpperCase() : ''),
-        detailRow('Attach', hook && hook.attach),
-        detailRow('Stage', hook && hook.stage),
-        detailRow('Mode', hook && hook.mode),
-        detailRow('Interfaces', hook && Array.isArray(hook.interfaces) && hook.interfaces.length ? hook.interfaces.join(', ') : app.t('plugins.link.unbound')),
-        detailRow('Program', hook && hook.program),
-        detailRow('Priority', typeof (hook && hook.priority) === 'number' ? String(hook.priority) : ''),
-        detailRow('Before', hook && Array.isArray(hook.before) && hook.before.length ? hook.before.join(', ') : ''),
-        detailRow('After', hook && Array.isArray(hook.after) && hook.after.length ? hook.after.join(', ') : ''),
-        detailRow('Packet metadata', pluginPacketMetadataDetail(hook && hook.packet_metadata)),
-        detailRow('Context', hook && Array.isArray(hook.context) && hook.context.length ? hook.context.join(', ') : '')
+        detailRow(app.t('plugins.field.plugin'), plugin && (plugin.name || plugin.id)),
+        detailRow(app.t('plugins.field.hook'), hook && hook.id),
+        detailRow(app.t('plugins.field.engine'), hook && hook.engine ? String(hook.engine).toUpperCase() : ''),
+        detailRow(app.t('plugins.field.attach'), hook && hook.attach),
+        detailRow(app.t('plugins.field.stage'), hook && hook.stage),
+        detailRow(app.t('plugins.field.mode'), hook && hook.mode),
+        detailRow(app.t('plugins.field.interfaces'), hook && Array.isArray(hook.interfaces) && hook.interfaces.length ? hook.interfaces.join(', ') : app.t('plugins.link.unbound')),
+        detailRow(app.t('plugins.field.program'), hook && hook.program),
+        detailRow(app.t('plugins.field.priority'), typeof (hook && hook.priority) === 'number' ? String(hook.priority) : ''),
+        detailRow(app.t('plugins.field.before'), hook && Array.isArray(hook.before) && hook.before.length ? hook.before.join(', ') : ''),
+        detailRow(app.t('plugins.field.after'), hook && Array.isArray(hook.after) && hook.after.length ? hook.after.join(', ') : ''),
+        detailRow(app.t('plugins.field.packetMetadata'), pluginPacketMetadataDetail(hook && hook.packet_metadata)),
+        detailRow(app.t('plugins.field.context'), hook && Array.isArray(hook.context) && hook.context.length ? hook.context.join(', ') : '')
       ].filter(Boolean)
     };
   }
@@ -1081,78 +970,42 @@
 
   function pluginLinkSegmentDetailContent(row, segment, index) {
     const item = segment && typeof segment === 'object' ? segment : { text: String(segment || '') };
-    const closeButton = app.createNode('button', {
-      className: 'plugin-detail-close',
-      text: app.t('plugins.detail.close'),
-      attrs: { type: 'button' }
-    });
-    if (closeButton && typeof closeButton.addEventListener === 'function') {
-      closeButton.addEventListener('click', hidePluginPopover);
-    }
     const sections = pluginLinkSegmentDetailSections(row, item, index);
     return [
-      app.createNode('div', {
-        className: 'kernel-runtime-tooltip-header plugin-detail-header',
-        children: [
-          app.createNode('div', {
-            children: [
-              app.createNode('span', {
-                className: 'kernel-runtime-tooltip-title',
-                text: item.detailTitle || item.text || app.t('plugins.link.node')
-              }),
-              app.createNode('span', {
-                className: 'kernel-runtime-tooltip-meta',
-                text: [row && row.kind, row && row.label].filter(Boolean).join(' / ') || app.t('common.dash')
-              })
-            ]
-          }),
-          app.createNode('div', {
-            className: 'plugin-detail-header-actions',
-            children: [
-              app.createNode('span', {
-                className: 'plugin-meta-badge is-ok',
-                text: app.t('plugins.link.step', { index: (index || 0) + 1 })
-              }),
-              closeButton
-            ]
-          })
-        ]
+      app.popoverHeader({
+        className: 'plugin-detail-header',
+        title: item.detailTitle || item.text || app.t('plugins.link.node'),
+        meta: [row && row.kind, row && row.label].filter(Boolean).join(' / ') || app.t('common.dash'),
+        aside: app.createNode('span', {
+          className: 'plugin-meta-badge is-ok',
+          text: app.t('plugins.link.step', { index: (index || 0) + 1 })
+        }),
+        closeClassName: 'plugin-detail-close',
+        onClose: () => hidePluginPopover({ restoreFocus: true })
       }),
       sections.length
         ? app.createNode('div', {
-            className: 'plugin-detail-sections',
+            className: 'popover-sections plugin-detail-sections',
             children: sections.map(pluginDetailSectionNode)
           })
-        : app.createNode('div', {
-            className: 'kernel-runtime-tooltip-meta',
+        : app.createNode('p', {
+            className: 'popover-empty',
             text: app.t('plugins.detail.empty')
           })
     ];
   }
 
-  function showPluginLinkPopover(trigger, row, segment, index, pinned) {
-    if (!trigger || !row) return;
-    const popover = ensurePluginPopover();
-    if (pluginDetailPopoverTrigger && pluginDetailPopoverTrigger !== trigger) {
-      pluginDetailPopoverTrigger.setAttribute('aria-expanded', 'false');
-    }
-
-    pluginDetailPopoverTrigger = trigger;
-    pluginDetailPopoverPinned = !!pinned;
-    app.clearNode(popover);
-    app.appendNodeContent(popover, pluginLinkSegmentDetailContent(row, segment, index));
-    popover.hidden = false;
-    popover.classList.add('is-visible');
-    trigger.setAttribute('aria-expanded', 'true');
-    positionPluginPopover();
-  }
-
   function togglePluginLinkPopover(trigger, row, segment, index) {
-    if (pluginDetailPopoverTrigger === trigger && pluginDetailPopoverPinned) {
+    if (!trigger || !row) return;
+    const layer = pluginPopoverLayer();
+    if (layer.isOpenFor(trigger) && layer.pinned) {
       hidePluginPopover();
       return;
     }
-    showPluginLinkPopover(trigger, row, segment, index, true);
+    layer.show(trigger, pluginLinkSegmentDetailContent(row, segment, index), {
+      pinned: true,
+      label: (segment && (segment.detailTitle || segment.text)) || app.t('plugins.link.node')
+    });
   }
 
   function createPluginVirtualLinkCard(page) {
@@ -4058,27 +3911,15 @@ div:has(> .veer-table) { max-width: 100%; overflow-x: auto; }
         e.preventDefault();
         e.stopPropagation();
         togglePluginPopover(trigger);
-        return;
       }
-      if (pluginDetailPopover && pluginDetailPopover.contains(e.target)) return;
-      hidePluginPopover();
     });
     document.addEventListener('change', (e) => {
       const checkbox = e.target.closest && e.target.closest('.plugin-update-checkbox[data-plugin-id]');
       if (!checkbox) return;
       app.togglePluginUpdateSelection(checkbox.dataset.pluginId, checkbox.checked);
     });
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') hidePluginPopover();
-    });
-    document.addEventListener('scroll', () => {
-      if (pluginDetailPopoverTrigger) positionPluginPopover();
-    }, true);
   }
   if (window && typeof window.addEventListener === 'function') {
-    window.addEventListener('resize', () => {
-      if (pluginDetailPopoverTrigger) positionPluginPopover();
-    });
     window.addEventListener('message', handlePluginFrameMessage);
   }
 })();

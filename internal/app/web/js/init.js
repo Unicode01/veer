@@ -91,7 +91,7 @@
     if (app.state.activeDropdown) return true;
     if (app.el.egressNATProtocolMenu && !app.el.egressNATProtocolMenu.hidden) return true;
     if (typeof document.querySelector === 'function' &&
-      document.querySelector('.kernel-runtime-floating-tooltip.is-visible:not([hidden])')) {
+      document.querySelector('.popover.is-visible:not([hidden])')) {
       return true;
     }
     if (app.el.confirmModal && app.el.confirmModal.classList && typeof app.el.confirmModal.classList.contains === 'function' &&

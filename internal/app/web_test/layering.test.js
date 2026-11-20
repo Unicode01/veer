@@ -10,6 +10,8 @@ test('modal and overlay layers keep confirmations above plugin management', () =
   const tokens = fs.readFileSync(path.join(webRoot, 'css', 'tokens.css'), 'utf8');
   const tables = fs.readFileSync(path.join(webRoot, 'css', 'tables.css'), 'utf8');
   const controls = fs.readFileSync(path.join(webRoot, 'css', 'controls.css'), 'utf8');
+  const overlays = fs.readFileSync(path.join(webRoot, 'css', 'overlays.css'), 'utf8');
+  const style = fs.readFileSync(path.join(webRoot, 'style.css'), 'utf8');
   const index = fs.readFileSync(path.join(webRoot, 'index.html'), 'utf8');
   const layer = (name) => {
     const match = tokens.match(new RegExp('--' + name + ':\\s*(\\d+)'));
@@ -33,8 +35,13 @@ test('modal and overlay layers keep confirmations above plugin management', () =
   assert.match(layout, /\.confirm-modal\s*\{[^}]*z-index:\s*var\(--z-confirm-modal\)/s);
   assert.match(layout, /\.auth-modal\s*\{[^}]*z-index:\s*var\(--z-auth-modal\)/s);
   assert.match(tables, /\.plugin-manager-modal\s*\{[^}]*z-index:\s*var\(--z-plugin-manager\)/s);
-  assert.match(tables, /\.kernel-runtime-floating-tooltip\s*\{[^}]*z-index:\s*var\(--z-popover\)/s);
+  assert.match(overlays, /\.popover\s*\{[^}]*z-index:\s*var\(--z-popover\)/s);
+  assert.match(overlays, /\.toast-stack\s*\{[^}]*z-index:\s*var\(--z-toast\)/s);
+  assert.match(overlays, /\.multi-select-menu\s*\{[^}]*z-index:\s*var\(--z-popover\)/s);
   assert.match(controls, /\.action-dropdown-menu\s*\{[^}]*z-index:\s*var\(--z-popover\)/s);
+  // Overlay styles load after the component sheets they restyle and before the Patchbay layer.
+  const order = ['controls.css', 'overlays.css', 'patchbay.css'].map((name) => style.indexOf('/css/' + name));
+  assert.ok(order.every((value) => value >= 0) && order[0] < order[1] && order[1] < order[2], style);
   assert.match(index, /id="tokenModal" class="modal auth-modal"/);
 });
 

@@ -372,80 +372,6 @@ section h2 {
     border-color: var(--warning-text);
 }
 
-.kernel-runtime-floating-tooltip.overview-sync-popover {
-    width: min(400px, calc(100vw - 24px));
-    max-width: min(400px, calc(100vw - 24px));
-    max-height: min(320px, calc(100vh - 24px));
-    padding: 10px;
-    border-radius: var(--r-md);
-    pointer-events: auto;
-    overflow-x: hidden;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-}
-
-.overview-sync-popover-header,
-.overview-sync-popover-actions {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-}
-
-.overview-sync-popover-header {
-    padding-bottom: 8px;
-    border-bottom: 1px solid var(--border);
-}
-
-.overview-sync-popover-title {
-    display: block;
-    color: var(--text);
-    font-size: var(--fs-md);
-    font-weight: 600;
-}
-
-.overview-sync-popover-hint {
-    display: block;
-    margin-top: 2px;
-    color: var(--text-muted);
-    font-size: var(--fs-xs);
-    line-height: 1.4;
-}
-
-.overview-sync-failure-list {
-    display: grid;
-    gap: 7px;
-    margin: 9px 0;
-}
-
-.overview-sync-failure {
-    display: grid;
-    gap: 2px;
-    padding: 7px 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--r-md);
-    background: var(--surface-muted);
-}
-
-.overview-sync-failure-path {
-    color: var(--text);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-}
-
-.overview-sync-failure-message {
-    color: var(--warning-text);
-    font-size: var(--fs-xs);
-    line-height: 1.45;
-}
-
-.overview-sync-popover-actions {
-    padding-top: 8px;
-    border-top: 1px solid var(--border);
-    justify-content: flex-end;
-}
-
 .overview-grid {
     display: grid;
     grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -471,60 +397,6 @@ section h2 {
     font-size: var(--fs-xl);
     font-weight: 600;
     letter-spacing: 0;
-}
-
-.toast-stack {
-    position: fixed;
-    top: 18px;
-    right: 18px;
-    z-index: var(--z-toast);
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    pointer-events: none;
-}
-
-.toast {
-    min-width: 220px;
-    max-width: min(360px, calc(100vw - 32px));
-    padding: 12px 14px;
-    border-radius: var(--r-md);
-    border: 1px solid var(--border);
-    background: var(--surface-solid);
-    color: var(--text);
-    box-shadow: var(--shadow-soft);
-    transform: translateY(-6px);
-    opacity: 0;
-    transition: transform 0.18s ease, opacity 0.18s ease;
-}
-
-.toast.is-visible {
-    transform: translateY(0);
-    opacity: 1;
-}
-
-.toast-success {
-    border-color: var(--success-border);
-    background: var(--success-bg);
-    color: var(--success-text);
-}
-
-.toast-error {
-    border-color: var(--danger-border);
-    background: var(--danger-bg);
-    color: var(--danger-text);
-}
-
-.toast-warning {
-    border-color: var(--warning-border);
-    background: var(--warning-bg);
-    color: var(--warning-text);
-}
-
-.toast-info {
-    border-color: var(--info-border);
-    background: var(--info-bg);
-    color: var(--info-text);
 }
 
 .confirm-dialog {
@@ -627,17 +499,6 @@ section h2 {
         width: 100%;
         justify-content: center;
     }
-
-    .toast-stack {
-        top: auto;
-        bottom: 16px;
-        left: 16px;
-        right: 16px;
-    }
-
-    .toast {
-        max-width: none;
-    }
 }
 
 /* Patchbay application frame */
@@ -685,12 +546,9 @@ strong, b { font-weight: 600; }
 .sidebar-tool:hover, .sidebar-tool[aria-expanded='true'] { background: var(--surface-2); color: var(--ink); }
 .locale-tool { font-family: var(--font-mono); }
 .sidebar-settings #logoutBtn { margin-left: auto; }
-.theme-menu { position: absolute; bottom: calc(100% + 8px); left: 0; width: 180px; padding: 5px; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--surface); box-shadow: var(--shadow-pop); }
-.theme-menu button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 10px; border: 0; background: transparent; color: var(--ink-2); text-align: left; font-size: var(--fs-sm); cursor: pointer; }
+.theme-menu { position: absolute; bottom: calc(100% + 8px); left: 0; width: 180px; }
 .theme-menu button::after { content: ''; margin-left: auto; width: 5px; height: 9px; border: solid transparent; border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
-.theme-menu button[aria-checked='true'] { color: var(--ink); }
 .theme-menu button[aria-checked='true']::after { border-color: currentColor; }
-.theme-menu button:hover, .theme-menu button:focus-visible { background: var(--accent-soft); color: var(--ink); outline-offset: -2px; }
 .workspace { margin-left: 240px; min-width: 0; }
 .topbar { position: sticky; top: 0; z-index: var(--z-header); display: flex; align-items: center; gap: 16px; height: 56px; padding: 0 24px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); }
 .breadcrumb { display: flex; align-items: center; gap: 12px; min-width: 0; font-size: var(--fs-sm); color: var(--ink-2); }
@@ -754,7 +612,8 @@ strong, b { font-weight: 600; }
     .kpi:nth-child(3) { padding-left: 0; }
 }
 @media (max-width: 679px) {
-    .topbar-actions .overview-sync-status { max-width: 112px; overflow: hidden; white-space: nowrap; }
+    .topbar-actions .overview-sync-status { display: block; max-width: 40vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 26px; }
+    .topbar-actions .overview-sync-status::before { display: inline-block; vertical-align: middle; margin-top: -2px; }
     .topbar #refreshNowBtn { font-size: 0; width: 28px; padding: 0; }
     .topbar #refreshNowBtn::before { content: '↻'; font-size: var(--fs-lg); }
     .command-trigger kbd { font-size: 0; }

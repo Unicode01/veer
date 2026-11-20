@@ -200,19 +200,271 @@
   app.notify = function notify(type, message, timeout) {
     if (!app.el.toastStack || !message) return;
 
+    const tone = type || 'info';
     const toast = document.createElement('div');
-    toast.className = 'toast toast-' + (type || 'info');
-    toast.setAttribute('role', 'status');
+    toast.className = 'toast toast-' + tone;
+    // Errors interrupt (role=alert); everything else is announced politely by the stack.
+    toast.setAttribute('role', tone === 'error' ? 'alert' : 'status');
     toast.textContent = message;
     app.el.toastStack.appendChild(toast);
 
     requestAnimationFrame(() => toast.classList.add('is-visible'));
 
-    const lifespan = timeout || 2800;
+    // DESIGN §5.9: toasts stay five seconds; errors and warnings stay longer so they can be read.
+    const lifespan = timeout || (tone === 'error' || tone === 'warning' ? 8000 : 5000);
     window.setTimeout(() => {
       toast.classList.remove('is-visible');
       window.setTimeout(() => toast.remove(), 180);
     }, lifespan);
+  };
+
+  // Every floating layer (detail popovers, sync failures, row menus) is placed the same way: below
+  // its trigger when the content fits there, otherwise on the roomier side, clamped to the viewport,
+  // and capped in height so a long layer scrolls inside itself instead of running off screen.
+  app.placeFloating = function placeFloating(panel, anchor, options) {
+    if (!panel || !anchor || typeof anchor.getBoundingClientRect !== 'function') return;
+    const opts = Object.assign({ align: 'start', offset: 8, margin: 12, maxHeight: 0 }, options || {});
+    const root = document.documentElement || {};
+    const viewportWidth = root.clientWidth || window.innerWidth || 0;
+    const viewportHeight = window.innerHeight || root.clientHeight || 0;
+    const rect = anchor.getBoundingClientRect();
+
+    panel.style.maxHeight = '';
+    panel.style.left = '0px';
+    panel.style.top = '0px';
+    const natural = panel.getBoundingClientRect().height;
+    const cap = Math.max(120, Math.min(opts.maxHeight > 0 ? opts.maxHeight : Infinity, viewportHeight - opts.margin * 2));
+    const below = viewportHeight - rect.bottom - opts.offset - opts.margin;
+    const above = rect.top - opts.offset - opts.margin;
+    const wanted = Math.min(natural, cap);
+    const placeBelow = below >= wanted || below >= above;
+    const room = Math.max(placeBelow ? below : above, Math.min(cap, 160));
+    const height = Math.min(wanted, room);
+    panel.style.maxHeight = Math.floor(Math.min(cap, room)) + 'px';
+
+    const width = panel.getBoundingClientRect().width;
+    let left = rect.left;
+    if (opts.align === 'end') left = rect.right - width;
+    else if (opts.align === 'center') left = rect.left + (rect.width - width) / 2;
+    left = Math.min(Math.max(left, opts.margin), Math.max(opts.margin, viewportWidth - width - opts.margin));
+    let top = placeBelow ? rect.bottom + opts.offset : rect.top - height - opts.offset;
+    top = Math.min(Math.max(top, opts.margin), Math.max(opts.margin, viewportHeight - height - opts.margin));
+
+    panel.style.left = Math.round(left) + 'px';
+    panel.style.top = Math.round(top) + 'px';
+  };
+
+  // Floating layers close the same way: Escape (focus returns to the trigger), a press outside, or
+  // focus moving elsewhere. They follow their trigger on scroll and resize and close once it is gone.
+  const floatingLayers = [];
+  let floatingListenersBound = false;
+
+  function openFloatingLayers() {
+    return floatingLayers.filter((layer) => layer.isOpen());
+  }
+
+  function floatingLayerHolds(layer, target) {
+    if (!target) return false;
+    if (layer.el && typeof layer.el.contains === 'function' && layer.el.contains(target)) return true;
+    return !!(layer.trigger && typeof layer.trigger.contains === 'function' && layer.trigger.contains(target));
+  }
+
+  function bindFloatingListeners() {
+    if (floatingListenersBound || typeof document.addEventListener !== 'function') return;
+    floatingListenersBound = true;
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      const open = openFloatingLayers();
+      if (!open.length) return;
+      event.stopPropagation();
+      open.forEach((layer) => layer.hide({
+        restoreFocus: layer.pinned || floatingLayerHolds(layer, document.activeElement)
+      }));
+    }, true);
+    document.addEventListener('pointerdown', (event) => {
+      openFloatingLayers().forEach((layer) => {
+        if (!floatingLayerHolds(layer, event.target)) layer.hide();
+      });
+    }, true);
+    document.addEventListener('focusin', (event) => {
+      openFloatingLayers().forEach((layer) => {
+        if (!floatingLayerHolds(layer, event.target)) layer.hide();
+      });
+    });
+    document.addEventListener('scroll', (event) => {
+      openFloatingLayers().forEach((layer) => {
+        if (layer.el.contains(event.target)) return;
+        layer.position();
+      });
+    }, true);
+    window.addEventListener('resize', () => openFloatingLayers().forEach((layer) => layer.position()));
+  }
+
+  // True while a layer the user opened on purpose (a click) is showing; hover previews wait.
+  app.floatingLayerPinned = function floatingLayerPinned() {
+    return openFloatingLayers().some((layer) => layer.pinned);
+  };
+
+  app.createFloatingLayer = function createFloatingLayer(options) {
+    const opts = Object.assign({ id: '', className: '', role: 'dialog', label: '', placement: null }, options || {});
+    const layer = {
+      el: null,
+      trigger: null,
+      pinned: false,
+      ensure() {
+        if (layer.el) return layer.el;
+        layer.el = app.createNode('div', {
+          className: ['popover', opts.className].filter(Boolean).join(' '),
+          attrs: Object.assign({ role: opts.role, hidden: true }, opts.id ? { id: opts.id } : null)
+        });
+        if (opts.label) layer.el.setAttribute('aria-label', opts.label);
+        document.body.appendChild(layer.el);
+        bindFloatingListeners();
+        return layer.el;
+      },
+      isOpen() {
+        return !!layer.el && !layer.el.hidden;
+      },
+      isOpenFor(trigger) {
+        return layer.isOpen() && layer.trigger === trigger;
+      },
+      show(trigger, content, showOptions) {
+        const showOpts = showOptions || {};
+        const el = layer.ensure();
+        floatingLayers.forEach((other) => {
+          if (other !== layer && other.isOpen()) other.hide();
+        });
+        if (layer.trigger && layer.trigger !== trigger) layer.trigger.setAttribute('aria-expanded', 'false');
+        layer.trigger = trigger || null;
+        layer.pinned = !!showOpts.pinned;
+        el.classList.toggle('is-pinned', layer.pinned);
+        if (showOpts.label) el.setAttribute('aria-label', showOpts.label);
+        app.clearNode(el);
+        app.appendNodeContent(el, content);
+        el.hidden = false;
+        el.classList.add('is-visible');
+        if (trigger) trigger.setAttribute('aria-expanded', 'true');
+        layer.position();
+      },
+      hide(hideOptions) {
+        const hideOpts = hideOptions || {};
+        const trigger = layer.trigger;
+        if (trigger) trigger.setAttribute('aria-expanded', 'false');
+        layer.trigger = null;
+        layer.pinned = false;
+        if (layer.el) {
+          layer.el.classList.remove('is-visible', 'is-pinned');
+          layer.el.hidden = true;
+          app.clearNode(layer.el);
+        }
+        if (hideOpts.restoreFocus && trigger && trigger.isConnected !== false && !trigger.disabled && typeof trigger.focus === 'function') {
+          trigger.focus();
+        }
+        if (typeof opts.onHide === 'function') opts.onHide();
+      },
+      position() {
+        if (!layer.isOpen()) return;
+        const trigger = layer.trigger;
+        if (!trigger) return;
+        if (trigger.isConnected === false) {
+          layer.hide();
+          return;
+        }
+        const rect = trigger.getBoundingClientRect();
+        const viewportHeight = window.innerHeight || (document.documentElement || {}).clientHeight || 0;
+        if (rect.width === 0 && rect.height === 0) {
+          layer.hide();
+          return;
+        }
+        // A layer never hangs on without its anchor: once the trigger leaves the viewport it closes.
+        if (rect.bottom < 0 || rect.top > viewportHeight) {
+          layer.hide();
+          return;
+        }
+        app.placeFloating(layer.el, trigger, opts.placement);
+      }
+    };
+    floatingLayers.push(layer);
+    return layer;
+  };
+
+  // Popover content blocks shared by every detail layer: a header (title, mono meta, close), titled
+  // sections and label | value rows whose labels wrap instead of being cut off.
+  app.popoverHeader = function popoverHeader(options) {
+    const opts = options || {};
+    const close = typeof opts.onClose === 'function'
+      ? app.createNode('button', {
+          className: ['popover-close'].concat(opts.closeClassName || []).join(' '),
+          text: '×',
+          attrs: { type: 'button', 'aria-label': app.t('common.close'), title: app.t('common.close') }
+        })
+      : null;
+    if (close) {
+      close.addEventListener('click', (event) => {
+        event.stopPropagation();
+        opts.onClose(event);
+      });
+    }
+    return app.createNode('div', {
+      className: ['popover-header'].concat(opts.className || []).join(' '),
+      children: [
+        app.createNode('div', {
+          className: 'popover-heading',
+          children: [
+            app.createNode('span', { className: 'popover-title', text: opts.title || '' }),
+            opts.meta ? app.createNode('span', { className: 'popover-meta' + (opts.metaMono === false ? '' : ' mono'), text: opts.meta }) : null
+          ].filter(Boolean)
+        }),
+        opts.aside || opts.actions || close
+          ? app.createNode('div', {
+              className: 'popover-header-actions',
+              children: [].concat(opts.aside || [], opts.actions || [], close || []).filter(Boolean)
+            })
+          : null
+      ].filter(Boolean)
+    });
+  };
+
+  app.popoverState = function popoverState(state, text) {
+    const tone = state === 'ok' || state === 'bad' || state === 'warn' ? state : 'unknown';
+    return app.createNode('span', { className: 'popover-state is-' + tone, text: text });
+  };
+
+  app.popoverRows = function popoverRows(rows, options) {
+    const opts = options || {};
+    const list = app.createNode('dl', { className: ['popover-rows'].concat(opts.className || []).join(' ') });
+    (rows || []).filter(Boolean).forEach((row) => {
+      const value = row.state
+        ? app.popoverState(row.state, row.value)
+        : row.node || app.createNode('span', { text: row.value == null || row.value === '' ? app.t('common.dash') : String(row.value) });
+      list.appendChild(app.createNode('dt', { className: row.wide ? 'is-wide' : '', text: row.label }));
+      list.appendChild(app.createNode('dd', {
+        className: [row.mono ? 'mono' : '', row.wide ? 'is-wide' : '', row.tone ? 'is-' + row.tone : ''].filter(Boolean).join(' '),
+        children: [value, row.hint ? app.createNode('span', { className: 'popover-hint', text: row.hint }) : null].filter(Boolean)
+      }));
+    });
+    return list;
+  };
+
+  // A titled block; collapsible sections use <details> and show a short summary beside the title.
+  app.popoverSection = function popoverSection(options) {
+    const opts = options || {};
+    const titleChildren = [
+      app.createNode('span', { className: 'popover-section-label', text: opts.title || '' }),
+      opts.summary ? app.createNode('span', { className: 'popover-section-summary' + (opts.tone ? ' is-' + opts.tone : ''), text: opts.summary }) : null
+    ].filter(Boolean);
+    const body = app.createNode('div', { className: 'popover-section-body', children: [].concat(opts.children || []).filter(Boolean) });
+    if (opts.collapsible === false) {
+      return app.createNode('div', {
+        className: ['popover-section'].concat(opts.className || []).join(' '),
+        children: [app.createNode('div', { className: 'popover-section-title', children: titleChildren }), body]
+      });
+    }
+    return app.createNode('details', {
+      className: ['popover-section'].concat(opts.className || []).join(' '),
+      attrs: opts.open ? { open: true } : null,
+      children: [app.createNode('summary', { className: 'popover-section-title', children: titleChildren }), body]
+    });
   };
 
   app.positionDropdown = function positionDropdown(dropdown) {
@@ -222,30 +474,8 @@
     const menu = dropdown.querySelector('.action-dropdown-menu');
     if (!trigger || !menu) return;
 
-    const triggerRect = trigger.getBoundingClientRect();
-    const viewportWidth = document.documentElement.clientWidth || window.innerWidth || 0;
-    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-    const gutter = 8;
-    const offset = 6;
-
-    menu.style.minWidth = Math.max(120, Math.ceil(triggerRect.width)) + 'px';
-    menu.style.maxHeight = Math.max(120, viewportHeight - gutter * 2) + 'px';
-
-    const menuRect = menu.getBoundingClientRect();
-    let left = triggerRect.right - menuRect.width;
-    let top = triggerRect.bottom + offset;
-
-    if (left + menuRect.width > viewportWidth - gutter) left = viewportWidth - gutter - menuRect.width;
-    if (left < gutter) left = gutter;
-
-    if (top + menuRect.height > viewportHeight - gutter) {
-      const aboveTop = triggerRect.top - menuRect.height - offset;
-      if (aboveTop >= gutter) top = aboveTop;
-      else top = Math.max(gutter, viewportHeight - gutter - menuRect.height);
-    }
-
-    menu.style.left = Math.round(left) + 'px';
-    menu.style.top = Math.round(top) + 'px';
+    menu.style.minWidth = Math.max(160, Math.ceil(trigger.getBoundingClientRect().width)) + 'px';
+    app.placeFloating(menu, trigger, { align: 'end', offset: 6, margin: 8 });
   };
 
   app.scheduleDropdownPosition = function scheduleDropdownPosition() {
@@ -682,65 +912,23 @@
     });
   }
 
-  let syncFailurePopover = null;
+  let syncFailureLayer = null;
 
-  function ensureSyncFailurePopover() {
-    if (syncFailurePopover) return syncFailurePopover;
-    syncFailurePopover = app.createNode('div', {
-      className: 'kernel-runtime-floating-tooltip overview-sync-popover',
-      attrs: {
+  function syncFailurePopoverLayer() {
+    if (!syncFailureLayer) {
+      syncFailureLayer = app.createFloatingLayer({
         id: 'overviewSyncPopover',
+        className: 'overview-sync-popover',
         role: 'dialog',
-        'aria-label': app.t('overview.syncFailuresTitle'),
-        hidden: true
-      }
-    });
-    document.body.appendChild(syncFailurePopover);
-    return syncFailurePopover;
-  }
-
-  function positionSyncFailurePopover() {
-    if (!syncFailurePopover || syncFailurePopover.hidden || !app.el.lastSyncLabel) return;
-
-    const margin = 12;
-    const offset = 8;
-    const viewportWidth = document.documentElement.clientWidth || window.innerWidth || 0;
-    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-    const triggerRect = app.el.lastSyncLabel.getBoundingClientRect();
-    const spaceBelow = Math.max(0, viewportHeight - triggerRect.bottom - offset - margin);
-    const spaceAbove = Math.max(0, triggerRect.top - offset - margin);
-    const preferBelow = spaceBelow >= 180 || spaceBelow >= spaceAbove;
-    const availableHeight = preferBelow ? spaceBelow : spaceAbove;
-
-    const viewportMaxHeight = Math.max(80, viewportHeight - margin * 2);
-    syncFailurePopover.style.maxHeight = Math.min(320, viewportMaxHeight, Math.max(120, availableHeight)) + 'px';
-    syncFailurePopover.style.left = '0px';
-    syncFailurePopover.style.top = '0px';
-
-    const popoverRect = syncFailurePopover.getBoundingClientRect();
-    let left = triggerRect.right - popoverRect.width;
-    left = Math.min(Math.max(left, margin), Math.max(margin, viewportWidth - popoverRect.width - margin));
-
-    let top = preferBelow ? triggerRect.bottom + offset : triggerRect.top - popoverRect.height - offset;
-    if (top < margin) top = margin;
-    if (top + popoverRect.height > viewportHeight - margin) {
-      top = Math.max(margin, viewportHeight - popoverRect.height - margin);
+        placement: { align: 'end', maxHeight: 360 }
+      });
     }
-
-    syncFailurePopover.style.left = Math.round(left) + 'px';
-    syncFailurePopover.style.top = Math.round(top) + 'px';
+    return syncFailureLayer;
   }
 
   function hideSyncFailurePopover(options) {
-    const opts = options || {};
     if (app.el.lastSyncLabel) app.el.lastSyncLabel.setAttribute('aria-expanded', 'false');
-    if (!syncFailurePopover) return;
-    syncFailurePopover.classList.remove('is-visible');
-    syncFailurePopover.hidden = true;
-    app.clearNode(syncFailurePopover);
-    if (opts.restoreFocus && app.el.lastSyncLabel && !app.el.lastSyncLabel.disabled) {
-      app.el.lastSyncLabel.focus();
-    }
+    if (syncFailureLayer) syncFailureLayer.hide(options);
   }
 
   function renderSyncFailurePopover() {
@@ -750,18 +938,8 @@
       return;
     }
 
-    const popover = ensureSyncFailurePopover();
     const retrying = app.state.syncFailureRetrying === true;
     const retryableFailures = retryableRequestFailures(failures);
-    const closeButton = app.createNode('button', {
-      className: 'mini-btn',
-      text: app.t('common.close'),
-      attrs: { type: 'button' }
-    });
-    closeButton.addEventListener('click', (event) => {
-      event.stopPropagation();
-      hideSyncFailurePopover({ restoreFocus: true });
-    });
 
     const retryButton = retryableFailures.length
       ? app.createNode('button', {
@@ -778,60 +956,41 @@
       });
     }
 
-    app.clearNode(popover);
-    app.appendNodeContent(popover, [
-      app.createNode('div', {
+    const layer = syncFailurePopoverLayer();
+    layer.show(app.el.lastSyncLabel, [
+      app.popoverHeader({
         className: 'overview-sync-popover-header',
-        children: [
-          app.createNode('div', {
-            children: [
-              app.createNode('span', {
-                className: 'overview-sync-popover-title',
-                text: app.t('overview.syncFailed', { count: failures.length })
-              }),
-              app.createNode('span', {
-                className: 'overview-sync-popover-hint',
-                text: app.t(retryableFailures.length ? 'overview.syncFailuresHint' : 'overview.syncFailuresManualHint')
-              })
-            ]
-          }),
-          closeButton
-        ]
+        title: app.t('overview.syncFailed', { count: failures.length }),
+        meta: app.t(retryableFailures.length ? 'overview.syncFailuresHint' : 'overview.syncFailuresManualHint'),
+        metaMono: false,
+        onClose: () => hideSyncFailurePopover({ restoreFocus: true })
       }),
-      app.createNode('div', {
-        className: 'overview-sync-failure-list',
-        attrs: { role: 'list' },
-        children: failures.map((failure) => app.createNode('div', {
-          className: 'overview-sync-failure',
-          attrs: { role: 'listitem' },
+      app.createNode('ul', {
+        className: 'popover-list overview-sync-failure-list',
+        children: failures.map((failure) => app.createNode('li', {
+          className: 'popover-list-item is-warn overview-sync-failure',
           children: [
             app.createNode('span', {
-              className: 'overview-sync-failure-path',
+              className: 'popover-list-title mono overview-sync-failure-path',
               text: failure.path || app.t('common.unknown')
             }),
             app.createNode('span', {
-              className: 'overview-sync-failure-message',
+              className: 'popover-list-text overview-sync-failure-message',
               text: failure.message || app.t('common.unknown')
             })
           ]
         }))
       }),
       retryableFailures.length ? app.createNode('div', {
-        className: 'overview-sync-popover-actions',
+        className: 'popover-actions overview-sync-popover-actions',
         children: [retryButton]
       }) : null
-    ].filter(Boolean));
-
-    popover.setAttribute('aria-label', app.t('overview.syncFailuresTitle'));
-    popover.hidden = false;
-    popover.classList.add('is-visible');
-    app.el.lastSyncLabel.setAttribute('aria-expanded', 'true');
-    positionSyncFailurePopover();
+    ].filter(Boolean), { pinned: true, label: app.t('overview.syncFailuresTitle') });
   }
 
   app.toggleSyncFailurePopover = function toggleSyncFailurePopover() {
     if (!app.el.lastSyncLabel || app.el.lastSyncLabel.disabled) return;
-    if (syncFailurePopover && !syncFailurePopover.hidden) {
+    if (syncFailureLayer && syncFailureLayer.isOpen()) {
       hideSyncFailurePopover();
       return;
     }
@@ -878,24 +1037,6 @@
       }
     });
   }
-
-  window.addEventListener('resize', positionSyncFailurePopover);
-  document.addEventListener('scroll', positionSyncFailurePopover, true);
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') hideSyncFailurePopover();
-  });
-  document.addEventListener('click', (event) => {
-    if (!syncFailurePopover || syncFailurePopover.hidden) return;
-    if (app.el.lastSyncLabel && app.el.lastSyncLabel.contains(event.target)) return;
-    if (syncFailurePopover.contains(event.target)) return;
-    hideSyncFailurePopover();
-  });
-  document.addEventListener('focusin', (event) => {
-    if (!syncFailurePopover || syncFailurePopover.hidden) return;
-    if (app.el.lastSyncLabel && app.el.lastSyncLabel.contains(event.target)) return;
-    if (syncFailurePopover.contains(event.target)) return;
-    hideSyncFailurePopover();
-  });
 
   function isMissingPluginResourceRecord(method, path, error) {
     if (String(method || '').toUpperCase() !== 'GET' || Number(error && error.status) !== 404) return false;
@@ -998,7 +1139,7 @@
         app.el.lastSyncLabel.removeAttribute('aria-label');
         hideSyncFailurePopover();
       }
-      if (!busy && failures.length && syncFailurePopover && !syncFailurePopover.hidden && !app.state.syncFailureRetrying) {
+      if (!busy && failures.length && syncFailureLayer && syncFailureLayer.isOpen() && !app.state.syncFailureRetrying) {
         renderSyncFailurePopover();
       }
     }

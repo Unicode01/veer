@@ -737,54 +737,25 @@
     return lines.filter(Boolean);
   }
 
-  function createManagedNetworkRuntimeReloadTooltipRow(label, value) {
-    return app.createNode('div', {
-      className: 'kernel-runtime-tooltip-breakdown-row',
-      children: [
-        app.createNode('span', {
-          className: 'kernel-runtime-tooltip-breakdown-label',
-          text: label
-        }),
-        app.createNode('span', {
-          className: 'kernel-runtime-tooltip-breakdown-value',
-          text: value
-        })
-      ]
-    });
-  }
-
   function createManagedNetworkRuntimeReloadTooltipContent(status) {
-    if (typeof app.createNode !== 'function') {
+    if (typeof app.createNode !== 'function' || typeof app.popoverRows !== 'function') {
       return managedNetworkRuntimeReloadTooltipLines(status).join('\n');
     }
     const item = status && typeof status === 'object' ? status : {};
     const badge = managedNetworkRuntimeReloadBadgeInfo(item);
     const rows = managedNetworkRuntimeReloadTooltipLines(item).slice(1).map((line) => {
       const colon = line.indexOf(': ');
-      if (colon <= 0) {
-        return createManagedNetworkRuntimeReloadTooltipRow(app.t('managedNetwork.runtimeReload.tooltip.note'), line);
-      }
-      return createManagedNetworkRuntimeReloadTooltipRow(line.slice(0, colon), line.slice(colon + 2));
+      if (colon <= 0) return { label: app.t('managedNetwork.runtimeReload.tooltip.note'), value: line };
+      return { label: line.slice(0, colon), value: line.slice(colon + 2) };
     });
     return [
-      app.createNode('div', {
-        className: 'kernel-runtime-tooltip-header',
-        children: [
-          app.createNode('div', {
-            className: 'kernel-runtime-tooltip-title',
-            text: app.t('managedNetwork.runtimeReload.tooltip.title')
-          }),
-          app.createNode('div', {
-            className: 'kernel-runtime-tooltip-primary',
-            text: badge.detail
-          })
-        ]
+      app.popoverHeader({
+        title: app.t('managedNetwork.runtimeReload.tooltip.title'),
+        meta: badge.detail,
+        metaMono: false
       }),
-      rows.length ? app.createNode('div', {
-        className: 'kernel-runtime-tooltip-breakdown',
-        children: rows
-      }) : null
-    ];
+      rows.length ? app.popoverRows(rows) : null
+    ].filter(Boolean);
   }
 
   app.renderManagedNetworkRuntimeStatusButton = function renderManagedNetworkRuntimeStatusButton() {

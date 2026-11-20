@@ -1,0 +1,327 @@
+/* Floating layers: one look for popovers, menus, toasts and runtime notes (DESIGN.md §4.3, §5.9).
+   Surface, 1px --line-strong border, --r-lg (menus --r-md), --shadow-pop; nothing else floats with a shadow. */
+
+/* Popover: detail panels and hover details. Pinned layers take pointer input and scroll inside
+   themselves; hover previews let the pointer through so they never trap it. */
+.popover {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: var(--z-popover);
+    box-sizing: border-box;
+    width: max-content;
+    min-width: min(240px, calc(100vw - 24px));
+    max-width: min(380px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    padding: 14px 16px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-lg);
+    background: var(--surface);
+    box-shadow: var(--shadow-pop);
+    color: var(--ink-2);
+    font-size: var(--fs-sm);
+    line-height: 1.5;
+    text-align: left;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(4px);
+    transition: opacity .12s var(--ease), transform .12s var(--ease), visibility .12s;
+}
+.popover.is-visible { opacity: 1; visibility: visible; transform: none; }
+.popover[role='tooltip']:not(.is-pinned) { pointer-events: none; }
+.popover.is-wide { width: min(440px, calc(100vw - 24px)); max-width: min(440px, calc(100vw - 24px)); }
+
+.popover-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.popover-header:last-child { padding-bottom: 0; border-bottom: 0; }
+.popover-heading { display: grid; gap: 2px; min-width: 0; }
+.popover-title { color: var(--ink); font-size: var(--fs-md); font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
+.popover-meta { color: var(--ink-2); font-size: var(--fs-xs); line-height: 1.5; }
+.popover-meta.mono { font-family: var(--font-mono); }
+.popover-header-actions { display: flex; flex: none; align-items: center; gap: 4px; margin: -4px -8px -4px 0; }
+.popover-header-actions .badge { display: inline-flex; align-items: center; gap: 6px; min-height: 0; margin-right: 6px; padding: 0; border: 0; background: transparent; font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; }
+.popover-header-actions .badge::before { content: ''; width: 6px; height: 6px; flex: none; border-radius: var(--r-pill); background: currentColor; }
+.popover-header-actions .plugin-stability-badge.is-stable { display: none; }
+.popover-figure { color: var(--ink); font-size: var(--fs-md); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; padding: 4px 8px 0 0; }
+
+/* Ghost icon button: closes a popover, dismisses a note. */
+.popover-close {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    min-height: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--r-md);
+    background: transparent;
+    color: var(--ink-2);
+    font: 400 18px/1 var(--font-ui);
+    cursor: pointer;
+}
+.popover-close:hover, .popover-close:focus-visible { background: var(--accent-soft); color: var(--ink); }
+.popover-close:disabled { cursor: progress; }
+.popover-action {
+    min-height: 28px;
+    padding: 0 10px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-md);
+    background: var(--surface);
+    color: var(--ink);
+    font-size: var(--fs-sm);
+    font-weight: 500;
+    white-space: nowrap;
+    cursor: pointer;
+}
+.popover-action:hover, .popover-action:focus-visible { background: var(--surface-2); }
+
+/* Sections: 11px uppercase titles with a short summary, hairlines between them. */
+.popover-sections { display: grid; }
+.popover-section { border-bottom: 1px solid var(--line); }
+.popover-section:last-child { border-bottom: 0; }
+.popover-section-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 38px;
+    padding: 0;
+    color: var(--ink-2);
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    list-style: none;
+}
+summary.popover-section-title { cursor: pointer; border-radius: var(--r-sm); }
+summary.popover-section-title::-webkit-details-marker { display: none; }
+summary.popover-section-title::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    flex: none;
+    margin: 0 4px 0 2px;
+    border-right: 1.5px solid var(--ink-3);
+    border-bottom: 1.5px solid var(--ink-3);
+    transform: rotate(-45deg);
+    transition: transform .15s var(--ease);
+}
+details[open] > summary.popover-section-title::before { transform: rotate(45deg); }
+.popover-section-label { min-width: 0; }
+.popover-section-summary { margin-left: auto; color: var(--ink-2); font-family: var(--font-mono); font-weight: 400; letter-spacing: 0; text-transform: none; white-space: nowrap; }
+.popover-section-summary.is-ok { color: var(--live); }
+.popover-section-summary.is-bad { color: var(--danger); }
+.popover-section-summary.is-warn { color: var(--warn); }
+.popover-section-body { padding: 0 0 12px; }
+.popover-header + .popover-sections > .popover-section:first-child > .popover-section-title { margin-top: 2px; }
+
+/* Label | value rows. The label column is as wide as its longest label up to 45% and wraps
+   beyond that; nothing is cut off with an ellipsis. */
+.popover-rows { display: grid; grid-template-columns: fit-content(45%) minmax(0, 1fr); gap: 6px 16px; margin: 0; padding: 0; }
+.popover-header + .popover-rows, .popover-rows + .popover-rows { margin-top: 12px; }
+.popover-rows + .popover-rows { padding-top: 12px; border-top: 1px solid var(--line); }
+.popover-rows dt { min-width: 0; color: var(--ink-2); font-weight: 400; overflow-wrap: break-word; }
+.popover-rows dd { display: grid; gap: 2px; min-width: 0; margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+.popover-rows dd.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.popover-rows dd.is-bad { color: var(--danger); }
+.popover-rows dd.is-warn { color: var(--warn); }
+.popover-hint { color: var(--ink-2); font-family: var(--font-ui); font-size: var(--fs-xs); line-height: 1.45; }
+.popover-muted { color: var(--ink-3); }
+.popover-empty { margin: 12px 0 0; color: var(--ink-2); }
+
+/* State: dot + word, never colour alone (DESIGN §5.3). */
+.popover-state { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; }
+.popover-state::before { content: ''; width: 6px; height: 6px; flex: none; border-radius: var(--r-pill); background: currentColor; }
+.popover-state.is-ok { color: var(--live); }
+.popover-state.is-bad { color: var(--danger); }
+.popover-state.is-warn { color: var(--warn); }
+.popover-state.is-unknown { color: var(--ink-2); }
+.popover-state.is-unknown::before { background: var(--off); }
+
+/* Device names and other short identifiers wrap as small mono tags. */
+.popover-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.popover-chip { padding: 0 6px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-2); color: var(--ink); font-size: var(--fs-xs); line-height: 18px; white-space: nowrap; }
+
+/* Alert list inside a popover (warnings, failed requests): a tone mark beside each message. */
+.popover-list { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+.popover-header + .popover-list { margin-top: 4px; }
+.popover-list-item { position: relative; display: grid; gap: 2px; padding: 8px 0 8px 16px; border-bottom: 1px solid var(--line); }
+.popover-list-item:last-child { border-bottom: 0; }
+.popover-list-item::before { content: ''; position: absolute; left: 2px; top: calc(8px + .75em - 3px); width: 6px; height: 6px; border-radius: var(--r-pill); background: var(--warn); }
+.popover-list-item.is-bad::before { background: var(--danger); }
+.popover-list-title { color: var(--ink); font-size: var(--fs-xs); font-weight: 500; }
+.popover-list-text { color: var(--ink); }
+.popover-list-item .popover-list-title + .popover-list-text { color: var(--ink-2); }
+.popover-actions { display: flex; justify-content: flex-end; gap: 8px; margin: 4px -16px -14px; padding: 10px 16px; border-top: 1px solid var(--line); background: var(--surface); position: sticky; bottom: -14px; }
+.popover-actions button { min-height: 28px; padding: 0 12px; }
+
+@media (max-width: 479px) {
+    .popover { padding: 12px 14px; }
+    .popover-actions { margin: 4px -14px -12px; padding: 10px 14px; bottom: -12px; }
+    .popover-rows { gap: 4px 12px; }
+}
+
+/* Floating menus: row actions, theme and multi-select share the same item rhythm.
+   Items stay neutral; only destructive ones turn red. */
+.action-dropdown-menu, .theme-menu, .multi-select-menu {
+    padding: 4px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-md);
+    background: var(--surface);
+    box-shadow: var(--shadow-pop);
+}
+.action-dropdown-menu { min-width: 160px; }
+.multi-select-menu { z-index: var(--z-popover); gap: 0; }
+.action-dropdown-menu button, .theme-menu button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 32px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: var(--r-sm);
+    background: transparent;
+    color: var(--ink);
+    font-size: var(--fs-md);
+    font-weight: 400;
+    line-height: 1.3;
+    text-align: left;
+    white-space: nowrap;
+    cursor: pointer;
+}
+.action-dropdown-menu button:hover, .action-dropdown-menu button:focus-visible,
+.theme-menu button:hover, .theme-menu button:focus-visible { background: var(--accent-soft); color: var(--ink); outline-offset: -2px; }
+.action-dropdown-menu button:disabled { cursor: not-allowed; opacity: .45; background: transparent; }
+.action-dropdown-menu :is(.btn-delete, .btn-delete-site, .btn-delete-range, .btn-delete-egress-nat, .btn-delete-ipv6-assignment, .btn-delete-managed-network, .btn-delete-managed-network-reservation),
+.patchbay .action-dropdown-menu :is(.btn-delete, .btn-delete-site, .btn-delete-range, .btn-delete-egress-nat, .btn-delete-ipv6-assignment, .btn-delete-managed-network, .btn-delete-managed-network-reservation) { color: var(--danger); }
+.action-dropdown-menu :is(.btn-delete, .btn-delete-site, .btn-delete-range, .btn-delete-egress-nat, .btn-delete-ipv6-assignment, .btn-delete-managed-network, .btn-delete-managed-network-reservation):hover { background: var(--danger-bg); color: var(--danger); }
+.theme-menu button { color: var(--ink-2); }
+.theme-menu button[aria-checked='true'] { color: var(--ink); font-weight: 500; }
+
+/* Toasts: ink surface at the bottom centre (DESIGN §5.9); a tone bar tells error, warning and
+   success apart without relying on colour alone (the message says it too). */
+.toast-stack {
+    position: fixed;
+    top: auto;
+    right: auto;
+    bottom: 24px;
+    left: 50%;
+    z-index: var(--z-toast);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    width: min(420px, calc(100vw - 32px));
+    transform: translateX(-50%);
+    pointer-events: none;
+}
+.toast {
+    box-sizing: border-box;
+    width: 100%;
+    padding: 10px 14px;
+    border: 0;
+    border-left: 3px solid transparent;
+    border-radius: var(--r-md);
+    background: var(--ink);
+    color: var(--on-accent);
+    box-shadow: var(--shadow-pop);
+    font-size: var(--fs-md);
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+    /* Toasts hold no controls: clicks reach whatever they cover. */
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(6px);
+    transition: transform .18s var(--ease), opacity .18s var(--ease);
+}
+.toast.is-visible { opacity: 1; transform: none; }
+.toast-error { border-left-color: var(--danger); }
+.toast-warning { border-left-color: var(--warn); }
+.toast-success { border-left-color: var(--live); }
+.toast-info { border-left-color: var(--off); }
+@media (max-width: 679px) {
+    .toast-stack { right: 16px; bottom: 16px; left: 16px; width: auto; transform: none; }
+}
+
+/* Runtime notes on the diagnostics summary: one bordered list, a row per note with a tone mark,
+   title and time, the message, and a dismiss icon. Several notes stay aligned instead of stacking
+   as separate coloured boxes. */
+.kernel-runtime-notes {
+    grid-column: 1 / -1;
+    display: grid;
+    margin: 0 0 16px;
+    padding: 0;
+    list-style: none;
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    background: var(--surface);
+}
+.kernel-runtime-note {
+    display: grid;
+    grid-template-columns: 6px minmax(0, 1fr) 28px;
+    align-items: start;
+    gap: 12px;
+    margin: 0;
+    padding: 10px 8px 10px 14px;
+    border: 0;
+    border-top: 1px solid var(--line);
+    border-radius: 0;
+    background: transparent;
+    color: var(--ink);
+    font-size: var(--fs-sm);
+    line-height: 1.5;
+}
+.kernel-runtime-note:first-child { border-top: 0; }
+.kernel-runtime-note-mark { width: 6px; height: 6px; margin-top: calc(.75em - 3px); border-radius: var(--r-pill); background: var(--warn); }
+.kernel-runtime-note.is-info .kernel-runtime-note-mark { background: var(--off); }
+.kernel-runtime-note-body { display: grid; gap: 2px; min-width: 0; padding-top: 1px; }
+.kernel-runtime-note-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.kernel-runtime-note-title { color: var(--ink); font-weight: 600; }
+.kernel-runtime-note-time { color: var(--ink-2); font-size: var(--fs-xs); }
+.kernel-runtime-note-text { margin: 0; color: var(--ink-2); overflow-wrap: anywhere; }
+.kernel-runtime-note .kernel-runtime-note-close { margin: -4px 0; }
+
+/* Detail triggers: quiet underlined text, like the plugin "details" link; warnings carry a dot. */
+.kernel-runtime-detail-trigger:not(.managed-network-runtime-status) {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--r-sm);
+    background: transparent;
+    color: var(--ink-2);
+    font-size: var(--fs-sm);
+    font-weight: 400;
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+    white-space: nowrap;
+    cursor: pointer;
+}
+.kernel-runtime-detail-trigger:not(.managed-network-runtime-status):hover,
+.kernel-runtime-detail-trigger:not(.managed-network-runtime-status)[aria-expanded='true'] { color: var(--ink); text-decoration-color: currentColor; background: transparent; }
+.kernel-runtime-detail-trigger.is-warning:not(.managed-network-runtime-status) { color: var(--warn); text-decoration-color: currentColor; }
+.kernel-runtime-detail-trigger.is-warning:not(.managed-network-runtime-status)::before { content: ''; width: 6px; height: 6px; flex: none; border-radius: var(--r-pill); background: currentColor; }
+
+/* Confirmation dialog: title, consequence, then actions on the right. Cancel is a ghost button and
+   the confirm button is the only solid one (red when it destroys something), DESIGN §5.2 / §5.9. */
+.confirm-dialog { width: min(100%, 440px); padding: 24px; text-align: left; }
+.confirm-dialog h2 { margin: 0 0 8px; color: var(--ink); font-size: var(--fs-xl); font-weight: 500; line-height: 1.3; }
+.confirm-dialog p { margin: 0; color: var(--ink-2); font-size: var(--fs-base); line-height: 1.6; overflow-wrap: anywhere; }
+.confirm-dialog .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; }
+.confirm-dialog .confirm-actions button { width: auto; min-width: 88px; height: var(--h-ctl); min-height: var(--h-ctl); padding: 0 14px; border-radius: var(--r-md); font-size: var(--fs-md); font-weight: 500; }
+.confirm-dialog .confirm-actions .btn-cancel { border: 1px solid transparent; background: transparent; color: var(--ink-2); }
+.confirm-dialog .confirm-actions .btn-cancel:hover { background: var(--accent-soft); color: var(--ink); }
+@media (max-width: 479px) {
+    .confirm-dialog { padding: 20px; }
+    .confirm-dialog .confirm-actions { flex-direction: column-reverse; }
+    .confirm-dialog .confirm-actions button { width: 100%; }
+}
