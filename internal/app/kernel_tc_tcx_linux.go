@@ -6,16 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math"
 	"os"
 	"path/filepath"
-	"sync"
 
 	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/link"
 	"github.com/vishvananda/netlink"
-	"golang.org/x/sys/unix"
 )
 
 // On Linux 6.6 and later the core TC programs can run from the device's tcx
@@ -27,32 +23,11 @@ import (
 // TC_ACT_STOLEN; a plugin that took a packet over returns a redirect without
 // a target device (veer_tc_consumed), which both attach APIs treat alike.
 
-var kernelTCXSupported = sync.OnceValue(func() bool {
-	prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{
-		Type:    ebpf.SchedCLS,
-		License: "GPL",
-		Instructions: asm.Instructions{
-			asm.Mov.Imm(asm.R0, -1),
-			asm.Return(),
-		},
-	})
-	if err != nil {
-		return false
-	}
-	defer prog.Close()
-	// No device has this index. A kernel with tcx accepts the attach type and
-	// then fails to find the device.
-	l, err := link.AttachTCX(link.TCXOptions{
-		Interface: math.MaxInt32,
-		Program:   prog,
-		Attach:    ebpf.AttachTCXIngress,
-	})
-	if err == nil {
-		_ = l.Close()
-		return false
-	}
-	return errors.Is(err, unix.ENODEV)
-})
+// kernelTCXSupported reports whether the kernel has tcx; the capability
+// probe runs once per process.
+var kernelTCXSupported = func() bool {
+	return detectKernelRuntimeCapabilities().TCXAttach.Available
+}
 
 // kernelTCXSlot holds the link of one core program position. The attachment
 // lists of consecutive reconciles share the slot while they keep the

@@ -538,3 +538,88 @@ test('renderKernelRuntime renders degraded note when an engine is degraded', () 
   const noteTexts = notes.map((note) => collectText(note));
   assert.ok(noteTexts.some((text) => text.includes('Kernel Engine Degraded: TC:')));
 });
+
+function kernelRuntimeAriaLabels(node) {
+  const labels = [];
+  (function visit(current) {
+    if (current.attributes?.['aria-label']) labels.push(current.attributes['aria-label']);
+    (current.childNodes || []).forEach(visit);
+  })(node);
+  return labels;
+}
+
+test('kernel status details show TCX support and each device\'s native XDP support', () => {
+  const { app } = createHarness();
+  app.state.kernelRuntime.data = Object.assign(baseRuntimeData(), {
+    kernel_capabilities: {
+      tc: { available: true },
+      tcx_attach: { available: true },
+      xdp_generic: { available: true }
+    },
+    kernel_xdp_native: {
+      available: true,
+      devices: [
+        { name: 'enp6s0f0', type: 'device', native: true, redirect_target: false },
+        { name: 'tap100i0', type: 'tuntap', native: true, redirect_target: true },
+        { name: 'vmbr0', type: 'bridge', native: false, redirect_target: false }
+      ]
+    },
+    engines: [runtimeEngine()]
+  });
+  app.renderKernelRuntime();
+
+  const detail = kernelRuntimeAriaLabels(app.el.kernelRuntimeSummary).find((value) => value.includes('kernel.capability.tcx'));
+  assert.ok(detail, 'TCX support must be in the status details');
+  const rows = detail.split('\n');
+  assert.ok(rows.includes('kernel.capability.tcx: Available'), detail);
+  assert.ok(rows.includes('kernel.capability.xdpNative: enp6s0f0, tap100i0'), detail);
+  assert.ok(rows.includes('kernel.capability.xdpRedirectTarget: tap100i0 · kernel.capability.xdpRedirectTargetHint'), detail);
+  assert.ok(rows.includes('kernel.capability.xdpGenericOnly: vmbr0'), detail);
+});
+
+test('kernel status details call native XDP unknown on a kernel without per-device features', () => {
+  const { app } = createHarness();
+  app.state.kernelRuntime.data = Object.assign(baseRuntimeData(), {
+    kernel_capabilities: { tc: { available: true }, tcx_attach: { available: false, reason: 'TCX attach unavailable' } },
+    kernel_xdp_native: { available: false, reason: 'needs Linux 6.3 or later' },
+    engines: [runtimeEngine()]
+  });
+  app.renderKernelRuntime();
+
+  const detail = kernelRuntimeAriaLabels(app.el.kernelRuntimeSummary).find((value) => value.includes('kernel.capability.xdpNative'));
+  assert.ok(detail);
+  const rows = detail.split('\n');
+  assert.ok(rows.includes('kernel.capability.xdpNative: common.unknown · needs Linux 6.3 or later'), detail);
+  assert.ok(!rows.some((row) => row.startsWith('kernel.capability.xdpGenericOnly')), detail);
+});
+
+test('kernel status details shorten a long device list', () => {
+  const { app } = createHarness();
+  const devices = Array.from({ length: 11 }, (_, index) => ({ name: 'tap' + String(100 + index) + 'i0', native: true, redirect_target: true }));
+  app.state.kernelRuntime.data = Object.assign(baseRuntimeData(), {
+    kernel_capabilities: { tc: { available: true } },
+    kernel_xdp_native: { available: true, devices: devices },
+    engines: [runtimeEngine()]
+  });
+  app.renderKernelRuntime();
+
+  const detail = kernelRuntimeAriaLabels(app.el.kernelRuntimeSummary).find((value) => value.includes('kernel.capability.xdpNative'));
+  const row = detail.split('\n').find((value) => value.startsWith('kernel.capability.xdpNative:'));
+  assert.ok(row.includes('tap107i0 … kernel.capability.moreDevices'), row);
+  assert.ok(!row.includes('tap108i0'), row);
+});
+
+test('engine details name the TC attach API and the XDP attach mode', () => {
+  const { app } = createHarness();
+  app.state.kernelRuntime.data = Object.assign(baseRuntimeData(), {
+    engines: [
+      runtimeEngine({ attachment_api: 'tcx', attachment_mode: 'dispatch_v4' }),
+      runtimeEngine({ name: 'xdp', attachment_mode: 'driver' })
+    ]
+  });
+  app.renderKernelRuntime();
+
+  const labels = kernelRuntimeAriaLabels(app.el.kernelRuntimeBody);
+  assert.ok(labels.some((value) => value.includes('attach=tcx') && value.includes('program=dispatch_v4')), labels.join('\n'));
+  assert.ok(labels.some((value) => value.includes('runtimeReason.xdpDriverMode')), labels.join('\n'));
+});

@@ -257,7 +257,7 @@ func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 
 func (rt *xdpKernelRuleRuntime) ensureAvailabilityInitialized() {
 	rt.availableOnce.Do(func() {
-		if reason := xdpKernelRuntimeCapabilityUnavailableReason(); reason != "" {
+		if reason := xdpKernelRuntimeCapabilityUnavailableReason(rt.allowGenericAttach); reason != "" {
 			rt.available = false
 			rt.availableReason = reason
 			log.Printf("xdp dataplane unavailable: %s", rt.availableReason)

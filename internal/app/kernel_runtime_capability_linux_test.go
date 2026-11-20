@@ -62,3 +62,32 @@ func setKernelRuntimeCapabilitiesForTest(t *testing.T, caps kernelcap.KernelCapa
 		detectKernelRuntimeCapabilities = old
 	}
 }
+
+func TestXDPKernelRuntimeDriverOnlyIgnoresTheGenericAttachProbe(t *testing.T) {
+	ok := kernelcap.CapabilityCheck{Available: true}
+	probe := kernelcap.CapabilityCheck{Reason: "XDP generic attach unavailable: operation not permitted"}
+	restore := setKernelRuntimeCapabilitiesForTest(t, kernelcap.KernelCapabilities{
+		BPFMapArray:       ok,
+		BPFMapHash:        ok,
+		BPFMapPerCPUHash:  ok,
+		BPFMapPerCPUArray: ok,
+		BPFMapProgArray:   ok,
+		BPFMapDevMapHash:  ok,
+		BPFXDP:            ok,
+		XDPGenericAttach:  probe,
+		XDPGeneric:        kernelcap.CapabilityCheck{Reason: "XDP generic dataplane unavailable: " + probe.Reason},
+		Netlink: kernelcap.NetlinkCapabilities{
+			RouteSocket: ok,
+			LinkList:    ok,
+			RouteList:   ok,
+		},
+	})
+	defer restore()
+
+	if reason := xdpKernelRuntimeCapabilityUnavailableReason(false); reason != "" {
+		t.Fatalf("driver-only XDP unavailable: %q, want available", reason)
+	}
+	if reason := xdpKernelRuntimeCapabilityUnavailableReason(true); !strings.Contains(reason, "operation not permitted") {
+		t.Fatalf("XDP with generic mode = %q, want the attach probe's reason", reason)
+	}
+}

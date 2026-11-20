@@ -49,3 +49,29 @@ func TestKernelCapabilityWarningsSummarizeCriticalFailures(t *testing.T) {
 		}
 	}
 }
+
+func TestXDPDriverDataplaneIgnoresTheGenericAttachProbe(t *testing.T) {
+	ok := CapabilityCheck{Available: true}
+	caps := KernelCapabilities{
+		BPFMapArray:       ok,
+		BPFMapHash:        ok,
+		BPFMapPerCPUHash:  ok,
+		BPFMapPerCPUArray: ok,
+		BPFMapProgArray:   ok,
+		BPFMapDevMapHash:  ok,
+		BPFXDP:            ok,
+		XDPGenericAttach:  CapabilityCheck{Reason: "XDP generic attach unavailable: operation not permitted"},
+		Netlink: NetlinkCapabilities{
+			RouteSocket: ok,
+			LinkList:    ok,
+			RouteList:   ok,
+		},
+	}
+	if got := caps.XDPDriverDataplane(); !got.Available {
+		t.Fatalf("XDPDriverDataplane() = %+v, want available without the generic attach probe", got)
+	}
+	caps.BPFMapDevMapHash = CapabilityCheck{Reason: "missing devmap hash"}
+	if got := caps.XDPDriverDataplane(); got.Available || !strings.Contains(got.Reason, "missing devmap hash") {
+		t.Fatalf("XDPDriverDataplane() = %+v, want the devmap reason", got)
+	}
+}

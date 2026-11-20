@@ -30,6 +30,7 @@ func detectKernelCapabilities() KernelCapabilities {
 		BPFNetfilter:       check,
 		BPFNetfilterDynptr: check,
 		TCAttach:           check,
+		TCXAttach:          check,
 		XDPGenericAttach:   check,
 		NetfilterAttach:    check,
 		TC:                 check,

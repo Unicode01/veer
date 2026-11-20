@@ -1011,14 +1011,21 @@
       parts.push('reconcile ' + reconcileDetail);
     }
     const attachmentMode = String(engine.attachment_mode || '').trim().toLowerCase();
-    if (String(engine.name || '').trim().toLowerCase() === 'xdp') {
-      if (attachmentMode === 'generic') {
+    const engineName = String(engine.name || '').trim().toLowerCase();
+    if (engineName === 'xdp') {
+      if (attachmentMode === 'driver') {
+        parts.push(app.t('runtimeReason.xdpDriverMode'));
+      } else if (attachmentMode === 'generic') {
         parts.push(app.t('runtimeReason.xdpGenericMode'));
       } else if (attachmentMode === 'mixed') {
         parts.push(app.t('runtimeReason.xdpMixedMode'));
       }
-    } else if (String(engine.name || '').trim().toLowerCase() === 'tc' && attachmentMode) {
-      parts.push('attach=' + attachmentMode);
+    } else if (engineName === 'tc') {
+      // attachment_api is how the programs hang on the device (tcx or
+      // cls_bpf); attachment_mode is the core program layout.
+      const attachmentAPI = String(engine.attachment_api || '').trim().toLowerCase();
+      if (attachmentAPI) parts.push('attach=' + attachmentAPI);
+      if (attachmentMode) parts.push('program=' + attachmentMode);
     }
     [
       engine.pressure_reason,
@@ -1138,16 +1145,63 @@
     return app.t('common.unavailable') + (reason ? (': ' + reason) : '');
   }
 
-  function kernelRuntimeCapabilitySummary(capabilities) {
+  // Native XDP is up to each device's driver, so the kernel reports it per
+  // device (Linux 6.3+); older kernels leave it unknown until an attach.
+  function kernelXDPNativeDevices(report) {
+    return report && typeof report === 'object' && report.available && Array.isArray(report.devices)
+      ? report.devices.filter((device) => device && typeof device === 'object')
+      : [];
+  }
+
+  function kernelXDPNativeSummary(report) {
+    if (!report || typeof report !== 'object') return '';
+    if (!report.available) return app.t('common.unknown');
+    const count = kernelXDPNativeDevices(report).filter((device) => device.native).length;
+    return app.t('kernel.capability.xdpNativeCount', { count: count });
+  }
+
+  function kernelDeviceNameList(devices) {
+    const names = devices.map((device) => String(device.name || '').trim()).filter(Boolean);
+    if (!names.length) return app.t('common.dash');
+    const limit = 8;
+    const shown = names.slice(0, limit).join(', ');
+    return names.length > limit
+      ? shown + ' … ' + app.t('kernel.capability.moreDevices', { count: names.length })
+      : shown;
+  }
+
+  function kernelXDPNativeRows(report) {
+    if (!report || typeof report !== 'object') return [];
+    if (!report.available) {
+      const reason = String(report.reason || '').trim();
+      return [app.t('kernel.capability.xdpNative') + ': ' + app.t('common.unknown') + (reason ? (' · ' + reason) : '')];
+    }
+    const devices = kernelXDPNativeDevices(report);
+    const native = devices.filter((device) => device.native);
+    let targets = kernelDeviceNameList(devices.filter((device) => device.redirect_target));
+    if (native.some((device) => !device.redirect_target)) {
+      targets += ' · ' + app.t('kernel.capability.xdpRedirectTargetHint');
+    }
+    return [
+      app.t('kernel.capability.xdpNative') + ': ' + kernelDeviceNameList(native),
+      app.t('kernel.capability.xdpRedirectTarget') + ': ' + targets,
+      app.t('kernel.capability.xdpGenericOnly') + ': ' + kernelDeviceNameList(devices.filter((device) => !device.native))
+    ];
+  }
+
+  function kernelRuntimeCapabilitySummary(capabilities, xdpNative) {
     if (!capabilities || typeof capabilities !== 'object') return '';
     const parts = [];
     [
       ['TC', capabilities.tc],
-      ['XDP', capabilities.xdp_generic]
+      ['TCX', capabilities.tcx_attach],
+      ['XDP generic', capabilities.xdp_generic]
     ].forEach(([label, check]) => {
       if (!check || typeof check !== 'object') return;
       parts.push(label + '=' + (check.available ? app.t('kernel.available.yes') : app.t('common.unavailable')));
     });
+    const nativeSummary = kernelXDPNativeSummary(xdpNative);
+    if (nativeSummary) parts.push('XDP native=' + nativeSummary);
     const netlink = capabilities.netlink || {};
     const netlinkChecks = [
       netlink.route_socket,
@@ -1165,7 +1219,7 @@
     return parts.join(' · ');
   }
 
-  function kernelRuntimeCapabilityDetails(capabilities, helper) {
+  function kernelRuntimeCapabilityDetails(capabilities, helper, xdpNative) {
     if (!capabilities || typeof capabilities !== 'object') capabilities = {};
     const rows = [];
     if (helper && helper.name) {
@@ -1180,8 +1234,15 @@
     }
     [
       ['kernel.capability.tc', capabilities.tc],
+      ['kernel.capability.tcx', capabilities.tcx_attach],
       ['kernel.capability.xdpGeneric', capabilities.xdp_generic],
-      ['kernel.capability.xdpGenericAttach', capabilities.xdp_generic_attach],
+      ['kernel.capability.xdpGenericAttach', capabilities.xdp_generic_attach]
+    ].forEach(([labelKey, check]) => {
+      if (!check || typeof check !== 'object') return;
+      rows.push(app.t(labelKey) + ': ' + kernelCapabilityStateText(check));
+    });
+    kernelXDPNativeRows(xdpNative).forEach((row) => rows.push(row));
+    [
       ['kernel.capability.bpfArray', capabilities.bpf_map_array],
       ['kernel.capability.bpfHash', capabilities.bpf_map_hash],
       ['kernel.capability.bpfLRUHash', capabilities.bpf_map_lru_hash],
@@ -1475,8 +1536,8 @@
       ? configuredOrder.map((name) => kernelEngineBadge(name))
       : [app.emptyCellNode('stat-muted')];
     const mapProfileDetail = kernelRuntimeMapProfileDetail(data);
-    const capabilitySummary = kernelRuntimeCapabilitySummary(data.kernel_capabilities);
-    const capabilityDetails = kernelRuntimeCapabilityDetails(data.kernel_capabilities, data.kernel_helper_module);
+    const capabilitySummary = kernelRuntimeCapabilitySummary(data.kernel_capabilities, data.kernel_xdp_native);
+    const capabilityDetails = kernelRuntimeCapabilityDetails(data.kernel_capabilities, data.kernel_helper_module, data.kernel_xdp_native);
 
     const summaryFragment = document.createDocumentFragment();
     summaryFragment.appendChild(kernelRuntimeSummaryCard(
