@@ -389,9 +389,14 @@ function teardownSession(plan) {
   var linkDeleted = !!deleteTarget && !deleteError;
   var arpStillManaged = linkDeleted ? false : (deleteError ? previousTeardown.arp_disabled_by_plugin === true :
     (!arpRestored && previousTeardown.arp_disabled_by_plugin === true));
+  // The driver stays named while the cleanup is unfinished: it checks the
+  // status before it retries the teardown, and nothing may rewrite it first.
   var status = {
     phase: 'deleted',
     wan_id: plan.key,
+    profile_key: plan.session.profile_key,
+    driver: plan.session.driver,
+    driver_plugin: plan.session.driver_plugin,
     local_interface: deleteTarget || plan.profile.local_interface,
     pipeline_interface: plan.profile.pipeline_interface,
     handoff_mode: plan.profile.handoff_mode,

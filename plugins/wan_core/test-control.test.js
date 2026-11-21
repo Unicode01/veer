@@ -70,6 +70,7 @@ function kernel() {
     },
     'net.link.setOffloads': (name, features) => { Object.assign(need(name).offloads, features); },
     'net.link.delete': name => {
+      if (k.failDelete) throw new Error('net.link.delete: link is owned by another plugin');
       const l = need(name);
       k.links.delete(name);
       if (l.peer) k.links.delete(l.peer);
@@ -110,10 +111,11 @@ function fixture(payload = session) {
   const writes = () => calls().filter(api => WRITES.includes(api)).length;
   const timers = () => new Map([...host.state.timers.values()].map(t => [t.name, t]));
   // Deliver an event the way the host does, then run the repair it armed.
+  const EVENT_TIMERS = ['wan_event', 'wan_event_full'];
   const event = (topic, eventPayload = {interface: LOCAL}) => {
-    const before = timers();
+    for (const name of EVENT_TIMERS) host.state.timers.delete(name);
     host.emit(topic, eventPayload);
-    const armed = [...timers().keys()].filter(name => name !== 'wan_repair' && !before.has(name));
+    const armed = EVENT_TIMERS.filter(name => host.state.timers.has(name));
     for (const name of armed) host.fireTimer(name);
     return armed;
   };
@@ -255,4 +257,20 @@ test('direct boundaries check the single dummy', () => {
   h.k.links.get(LOCAL).up = false;
   h.event('net.link');
   assert.equal(h.k.links.get(LOCAL).up, true);
+});
+
+test('an unfinished teardown keeps naming its driver, so the driver can retry it', () => {
+  const driven = {...session, driver: 'wireguard', driver_plugin: 'vpn_core', profile_key: 'default'};
+  const h = fixture(driven);
+  h.k.failDelete = true;
+  h.host.action('teardown', {key: 'default', session: {...driven, state: 'down', usable: false}});
+  assert.equal(h.status().phase, 'delete_failed');
+  assert.equal(h.status().driver_plugin, 'vpn_core');
+  assert.equal(h.status().driver, 'wireguard');
+  assert.equal(h.status().profile_key, 'default');
+  assert.equal(h.timers().has('wan_event') || h.timers().has('wan_retry'), false, 'nothing retries a failed delete on its own');
+  h.k.failDelete = false;
+  h.host.action('teardown', {key: 'default', session: {...driven, state: 'down', usable: false}});
+  assert.equal(h.status().phase, 'deleted');
+  assert.equal(h.k.links.has(LOCAL), false);
 });
