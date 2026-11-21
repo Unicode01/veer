@@ -702,7 +702,9 @@ for(const driver of ['wireguard','mihomo','sing_box','tun']) {
     const procs=clone(h.procs||{}), specs=h.specs?.length;
     let writes=0;const put=map.set.bind(map);map.set=(...args)=>{writes++;return put(...args);};
     const get=map.get.bind(map);map.get=key=>{if(!map.has(key))throw new Error('ebpf.mapGet: get map tunnel_links: lookup: key does not exist');return get(key);};
-    const tick=()=>h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
+    // The adapter maps are verified about every five seconds: run a whole one-second-tick window.
+    let now=Date.now();h.host.context.vpnTestNow=()=>now;require('node:vm').runInContext('Date.now = vpnTestNow',h.host.context);
+    const tick=()=>{for(let i=0;i<5;i++){now+=1000;h.host.run('onTimer',{timer:{name:'tunnel_repair'}});}};
     tick();assert.equal(writes,0,'healthy polls must not rewrite maps');
     for(const damage of ['empty','missing-forward','missing-reply','corrupt-forward','corrupt-reply']) {
       if(damage==='empty')map.clear();
@@ -957,3 +959,33 @@ test('VPN status records the applied profile revision and proxy node for the pag
   assert.deepEqual(status.node,{name:'second',type:'trojan'});
   h.host.action('teardown',{});assert.equal(h.host.snapshot().kv.applied_default,undefined);
 });
+
+for(const driver of ['wireguard','mihomo']) test(driver+' healthy repair ticks read only the tunnel and core between full checks',()=>{
+  const state={links:[], records:{sessions:{},status:{}}, calls:[], services:[], next:10, config:'', fail:null};
+  let wanReads=0, linkReads=0;
+  const adapters={'plugins.resources.get':(plugin,resource,key)=>{wanReads++;return state.records[resource][key]||null;},
+    'net.link.get':name=>{
+      linkReads++;const l=state.links.find(l=>l.ifname===name);
+      if(!l) throw new Error('net.link.get: link not found: '+name);
+      return {name,ifindex:l.ifindex,alias:l.ifalias||'',kind:l.linkinfo?.info_kind,mtu:l.mtu,mac:l.address,up:(l.flags||[]).includes('UP'),
+        peer_ifindex:l.link_index,peer_name:l.link,addresses:l.addresses||[],tun_vnet_hdr:false};
+    }};
+  const h=driver==='wireguard'?fixture(profile(),{state,adapters}):vpnFixture(driver,{}, {state,adapters});
+  h.apply();
+  const map=[...h.maps().values()][0];let mapReads=0;const get=map.get.bind(map);map.get=key=>{mapReads++;return get(key);};
+  let now=Date.now();h.host.context.vpnTestNow=()=>now;require('node:vm').runInContext('Date.now = vpnTestNow',h.host.context);
+  // One-second ticks, as with a proxy exit.
+  const tick=(step=1000)=>{now+=step;wanReads=0;linkReads=0;mapReads=0;h.host.run('onTimer',{timer:{name:'tunnel_repair'}});return {wan:wanReads,links:linkReads,maps:mapReads};};
+  // The first tick after arming is a full check: tunnel, WAN Core boundary and both map entries.
+  const first=tick();assert.ok(first.wan>0);assert.equal(first.maps,2);assert.equal(first.links,3);
+  for(let i=0;i<4;i++) assert.deepEqual(tick(),{wan:0,links:1,maps:0});
+  assert.deepEqual(tick(),first);
+  // A changed tunnel is noticed on the next light tick, not the next full one.
+  // A WireGuard-only timer ticks every five seconds: each of its ticks is a full check.
+  assert.deepEqual(tick(5000),first);assert.deepEqual(tick(5000),first);
+  tick();const before=state.services.length;
+  if(driver==='wireguard') state.links.find(l=>l.ifname==='vwgdefault').mtu=1300;
+  else h.procs.vpn_default.started_at+=1;
+  tick();assert.ok(state.services.length>before,'a light tick must re-apply a changed tunnel');
+});
+
