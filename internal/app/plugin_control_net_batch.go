@@ -101,6 +101,9 @@ func (h *pluginControlHost) netRouteTransactionItems(items []pluginControlNetRou
 			h.throwf("inspect network transaction interfaces: %v", err)
 		}
 	}
+	if h.pluginRouteTransactionWritesNothing(items) {
+		return h.vm.ToValue(map[string]any{"status": "completed", "operations": len(items)})
+	}
 	persistent, err := beginPluginRouteNetTransaction(h.db, h.plugin.ID, items)
 	if err != nil {
 		h.throwf("net.route.transaction: create recovery journal: %v", err)
@@ -182,6 +185,9 @@ func (h *pluginControlHost) netRuleTransactionItems(items []pluginControlNetRule
 		if err != nil {
 			h.throwf("inspect network transaction interfaces: %v", err)
 		}
+	}
+	if h.pluginRuleTransactionWritesNothing(items) {
+		return h.vm.ToValue(map[string]any{"status": "completed", "operations": len(items)})
 	}
 	persistent, err := beginPluginRuleNetTransaction(h.db, h.plugin.ID, items)
 	if err != nil {
@@ -272,6 +278,9 @@ func (h *pluginControlHost) netNeighTransactionItems(items []pluginControlNetNei
 		if err != nil {
 			h.throwf("inspect network transaction interfaces: %v", err)
 		}
+	}
+	if h.pluginNeighTransactionWritesNothing(items) {
+		return h.vm.ToValue(map[string]any{"status": "completed", "operations": len(items)})
 	}
 	persistent, err := beginPluginNeighNetTransaction(h.db, h.plugin.ID, items)
 	if err != nil {
@@ -378,6 +387,49 @@ func (h *pluginControlHost) netBatchValues(call goja.FunctionCall, operation str
 		out = append(out, pluginControlNetBatchValue{operation: op, request: request})
 	}
 	return out
+}
+
+// A transaction in which every item already holds (the kernel entry is
+// exactly what is asked and the lease is exactly what the claim and release
+// would leave) writes nothing, so it needs no recovery journal: a repair
+// tick that re-asserts its routes, rules and neighbours otherwise wrote and
+// deleted a journal row per call. These checks only read; any doubt or
+// error takes the full path, which reports it.
+
+func (h *pluginControlHost) pluginRouteTransactionWritesNothing(items []pluginControlNetRouteBatchItem) bool {
+	for _, item := range items {
+		if !item.present || len(item.original) != 1 || !pluginControlRouteRequestMatchesState(item.request, item.original[0]) {
+			return false
+		}
+		if unchanged, err := h.pluginRouteClaimWritesNothing(item.request, item.present, item.original, item.identities); err != nil || !unchanged {
+			return false
+		}
+	}
+	return true
+}
+
+func (h *pluginControlHost) pluginRuleTransactionWritesNothing(items []pluginControlNetRuleBatchItem) bool {
+	for _, item := range items {
+		if !item.present || len(item.original) == 0 {
+			return false
+		}
+		if unchanged, err := h.pluginRuleClaimWritesNothing(item.request, item.present, item.original, item.links); err != nil || !unchanged {
+			return false
+		}
+	}
+	return true
+}
+
+func (h *pluginControlHost) pluginNeighTransactionWritesNothing(items []pluginControlNetNeighBatchItem) bool {
+	for _, item := range items {
+		if !item.present || len(item.original) != 1 || !pluginControlNeighRequestMatchesState(item.request, item.original[0]) || item.original[0].LinkIfIndex != item.ifIndex {
+			return false
+		}
+		if unchanged, err := h.pluginNeighClaimWritesNothing(item.request, item.present, item.original, item.ifIndex, item.links); err != nil || !unchanged {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *pluginControlHost) applyPluginRouteBatchItem(admin pluginControlNetAdmin, item pluginControlNetRouteBatchItem) error {
