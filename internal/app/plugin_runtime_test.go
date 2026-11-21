@@ -10279,8 +10279,8 @@ func TestBundledWANCorePluginManifest(t *testing.T) {
 		t.Fatalf("wan_core resources/actions/ui = %d/%d/%+v, want complete example surface", len(plugin.Resources), len(plugin.Actions), plugin.UI)
 	}
 	assertPluginResourceMethodsForTest(t, plugin, "status", "get,list", "create,delete,get,list,update")
-	if len(plugin.Control.Permissions) != 5 || strings.Join(plugin.Control.Permissions, ",") != "net.admin,plugin.register,resource,timer,ui" {
-		t.Fatalf("wan_core permissions = %+v, want net.admin,plugin.register,resource,timer,ui", plugin.Control.Permissions)
+	if strings.Join(plugin.Control.Permissions, ",") != "event,net.admin,plugin.register,resource,timer,ui,worker" {
+		t.Fatalf("wan_core permissions = %+v, want event,net.admin,plugin.register,resource,timer,ui,worker", plugin.Control.Permissions)
 	}
 	if !pluginControlHasNetAccess(plugin, "link.create", "veerwan0") || !pluginControlHasNetAccess(plugin, "addr.write", "veerwan0") || !pluginControlHasNetAccess(plugin, "route.write", "veerwan0") || !pluginControlHasNetAccess(plugin, "link.delete", "veerwan0") || !pluginControlHasNetAccess(plugin, "link.state", "veerwan0") {
 		t.Fatalf("wan_core net access = %+v, want veer* create/address/route/delete/state access", plugin.Control.NetAccess)
@@ -13276,12 +13276,18 @@ func TestBundledWANCoreRepairTimerRecoversDummyFailure(t *testing.T) {
 	if err := store.MarkPluginRuntimeError(db, "wan_core", "resource", "sessions", "api apply failed"); err != nil {
 		t.Fatalf("MarkPluginRuntimeError(wan_core sessions) error = %v", err)
 	}
-	if timers := rt.pluginTimerList("wan_core"); len(timers) != 1 {
-		t.Fatalf("wan_core timers after failed apply = %+v, want one repair timer", timers)
+	// The safety repair stays armed and the failed apply is retried soon.
+	timers := map[string]bool{}
+	for _, item := range rt.pluginTimerList("wan_core") {
+		name, _ := item["name"].(string)
+		timers[name] = true
+	}
+	if len(timers) != 2 || !timers["wan_repair"] || !timers["wan_retry"] {
+		t.Fatalf("wan_core timers after failed apply = %+v, want wan_repair and wan_retry", rt.pluginTimerList("wan_core"))
 	}
 
 	controller.ensureDummyErrors = nil
-	firePluginTimerForTest(t, rt, "wan_core", "wan_repair")
+	firePluginTimerForTest(t, rt, "wan_core", "wan_retry")
 	statusRecord, err = store.GetPluginRecord(db, "wan_core", "status", "default")
 	if err != nil {
 		t.Fatalf("GetPluginRecord(wan_core status/default) recovered error = %v", err)

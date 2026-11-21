@@ -3,17 +3,35 @@ var MAIN_ROUTE_TABLE = 254;
 var AUTO_ROUTE_TABLE_BASE = 12000;
 var AUTO_ROUTE_SLOT_COUNT = 8000;
 var AUTO_RULE_PRIORITY_BASE = 10000;
-// Each repair tick reads every session's boundary links and compares them
-// with its applied status: presence and identity, MTU, up and ARP state, GSO
-// limits and addresses. A full apply also replays routes, rules, neighbors
-// and offload flags (one ethtool run per interface); it runs for each session
-// about every FULL_REPAIR_TICKS ticks, staggered by key, and at once when the
-// light check finds a difference, the last apply did not succeed, or the
-// session, profile or status record changed since this VM last applied it.
-var REPAIR_INTERVAL_MS = 2000;
-var FULL_REPAIR_TICKS = 15;
-var repairTick = 0;
+// Repairs run when something changes, not on a polling tick. The host
+// delivers link, address, route, neighbor, rule and offload events for the
+// veer* interfaces this plugin may touch, and changes to its own records;
+// the events worker turns them into a short one-shot timer here:
+// - LIGHT_EVENT_TIMER reads every session's boundary links and compares them
+//   with its applied status (presence and identity, MTU, up and ARP state,
+//   GSO limits and addresses) and the record revisions it last applied; a
+//   session that differs gets a full apply.
+// - FULL_EVENT_TIMER runs a full apply of every session, which also replays
+//   routes, rules, neighbors and offload flags: those have no light check.
+// A full apply of a session that is in place writes nothing, so its own
+// changes echo back at most once. A failed or incomplete apply is retried
+// with backoff from RETRY_MIN_MS to RETRY_MAX_MS, and REPAIR_TIMER runs a
+// full apply every SAFETY_REPAIR_MS in case an event was lost.
+var REPAIR_TIMER = 'wan_repair';
+var LIGHT_EVENT_TIMER = 'wan_event';
+var FULL_EVENT_TIMER = 'wan_event_full';
+var RETRY_TIMER = 'wan_retry';
+var SAFETY_REPAIR_MS = 300000;
+var EVENT_REPAIR_DELAY_MS = 250;
+var RETRY_MIN_MS = 2000;
+var RETRY_MAX_MS = 60000;
+// NUD_NOARP | NUD_PERMANENT: entries this plugin installs. Dynamic entries
+// cycle through reachable and stale on their own and are not drift.
+var NUD_STATIC = 0x40 | 0x80;
+var retryDelay = 0;
 var repairedRevisions = {};
+events.subscribe({id: 'wan_net', topic: 'net', match: 'prefix', worker: 'events', handler: 'onNetEvent', queue_size: 64});
+events.subscribe({id: 'wan_records', topic: 'resource.changed', worker: 'events', handler: 'onRecordEvent', queue_size: 16});
 pipeline.handoff({
   id: 'wan0',
   description: 'Linux L3 boundary shared by the system stack, Veer Core and an optional segmented protocol pipeline.'
@@ -86,10 +104,12 @@ exports.onReconcile = function () {
   applyStoredSessions();
   rememberRepairRevisions(null);
   armRepairTimer();
+  // A session that failed here is retried by the check, with backoff.
+  timer.setTimeout(LIGHT_EVENT_TIMER, RETRY_MIN_MS, {});
 };
 
 exports.onDeactivate = function () {
-  timer.clear('wan_repair');
+  [REPAIR_TIMER, LIGHT_EVENT_TIMER, FULL_EVENT_TIMER, RETRY_TIMER].forEach(function (name) { timer.clear(name); });
   var records = resources.list('sessions') || [];
   var failures = [];
   for (var i = 0; i < records.length; i++) {
@@ -106,39 +126,89 @@ exports.onDeactivate = function () {
 exports.onResourceApply = function (ctx) {
   if (!ctx.resource || ctx.resource.id !== 'sessions') return;
   var records = currentSessionRecords(ctx.records || []);
+  var applied = false;
   try {
     applyRecords(records, true);
+    applied = true;
   } finally {
     rememberRepairRevisions(storedRecordKeys(records));
     armRepairTimer(mergedSessionRecords(records));
+    if (!applied) armRetryTimer(false);
   }
 };
 
 exports.onTimer = function (ctx) {
-  if (!ctx.timer || ctx.timer.name !== 'wan_repair') return;
+  var name = ctx.timer && ctx.timer.name;
+  if (name !== REPAIR_TIMER && name !== LIGHT_EVENT_TIMER && name !== FULL_EVENT_TIMER && name !== RETRY_TIMER) return;
   var sessions = resources.list('sessions') || [];
-  repairSessions(sessions, repairTick++);
+  var complete = repairSessions(sessions, name === REPAIR_TIMER || name === FULL_EVENT_TIMER);
   armRepairTimer(sessions);
+  armRetryTimer(complete);
 };
 
-function repairSessions(sessions, tick) {
+// Runs in the events worker: map an event to the repair it needs.
+exports.onNetEvent = function (ctx) {
+  var event = ctx.event || {};
+  var repair = netEventRepair(event.topic, event.payload || {});
+  if (repair) timer.setTimeout(repair === 'full' ? FULL_EVENT_TIMER : LIGHT_EVENT_TIMER, EVENT_REPAIR_DELAY_MS, {});
+};
+
+// Session records arrive through onResourceApply and status records are this
+// plugin's own; a profile edit is applied by comparing revisions.
+exports.onRecordEvent = function (ctx) {
+  var event = ctx.event || {};
+  var resource = event.resource || (event.payload && event.payload.resource_id);
+  if (resource === 'profiles') timer.setTimeout(LIGHT_EVENT_TIMER, EVENT_REPAIR_DELAY_MS, {});
+};
+
+function netEventRepair(topic, payload) {
+  switch (topic) {
+    case 'net.link':
+    case 'net.addr':
+      return 'light';
+    case 'net.neigh':
+      return payload.operation === 'delete' || (payload.state & NUD_STATIC) ? 'full' : '';
+    case 'net.route':
+    case 'net.rule':
+    case 'net.offload':
+      return 'full';
+  }
+  return '';
+}
+
+// Applies the sessions that need it (all of them when full) and returns
+// whether every one it applied reached its target phase.
+function repairSessions(sessions, full) {
   var profiles = recordsByKey(resources.list('profiles') || []);
   var statuses = recordsByKey(resources.list('status') || []);
   var next = {};
+  var complete = true;
   for (var i = 0; i < sessions.length; i++) {
     var record = sessions[i];
     if (!record) continue;
     var key = token(record.key || 'default');
     var revisions = recordRevisions(record, profiles[key], statuses[key]);
-    var due = (tick + stableTokenHash(key)) % FULL_REPAIR_TICKS === 0;
-    if (!due && repairedRevisions[key] === revisions && sessionRepairHealthy(key, record, statuses[key])) {
+    if (!full && repairedRevisions[key] === revisions && sessionRepairHealthy(key, record, statuses[key])) {
       next[key] = revisions;
       continue;
     }
     applyRecords([record], false);
-    next[key] = recordRevisions(record, profiles[key], resources.get('status', key));
+    var status = resources.get('status', key);
+    next[key] = recordRevisions(record, profiles[key], status);
+    if (!sessionInTargetPhase(key, record, status)) complete = false;
   }
   repairedRevisions = next;
+  return complete;
+}
+
+// After an apply: did it leave the session in its target phase? The boundary
+// was just written, so its status is enough.
+function sessionInTargetPhase(key, record, statusRecord) {
+  var status = statusRecord && statusRecord.data;
+  if (!status || (Array.isArray(status.cleanup_errors) && status.cleanup_errors.length)) return false;
+  if (record.enabled === false) return status.phase === 'disabled' || status.phase === 'deleted';
+  if (!sessionUsable(normalizeSession(key, record.data || {}))) return status.phase === 'skipped';
+  return status.phase === 'applied';
 }
 
 // A full apply outside the timer (reconcile, resource apply) lets the next
@@ -354,11 +424,23 @@ function armRepairTimer(records) {
   var sessions = records || resources.list('sessions') || [];
   for (var i = 0; i < sessions.length; i++) {
     if (sessions[i] && sessions[i].enabled !== false) {
-      timer.setInterval('wan_repair', REPAIR_INTERVAL_MS, {});
+      timer.setInterval(REPAIR_TIMER, SAFETY_REPAIR_MS, {});
       return;
     }
   }
-  timer.clear('wan_repair');
+  timer.clear(REPAIR_TIMER);
+}
+
+// A session that is not in place yet (a failed apply, a boundary that is
+// still coming up) is tried again with backoff: no event may follow.
+function armRetryTimer(complete) {
+  if (complete) {
+    if (retryDelay) timer.clear(RETRY_TIMER);
+    retryDelay = 0;
+    return;
+  }
+  retryDelay = retryDelay ? Math.min(retryDelay * 2, RETRY_MAX_MS) : RETRY_MIN_MS;
+  timer.setTimeout(RETRY_TIMER, retryDelay, {});
 }
 
 // The host reads ctx.records before the event waits for this plugin's queue,

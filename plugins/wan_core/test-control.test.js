@@ -5,7 +5,7 @@ const {createTestHost} = require('../../sdk/plugin/test-host.cjs');
 
 const LOCAL = 'veerlocal0';
 const PIPE = 'veerpipe0';
-const FULL_REPAIR_TICKS = 15;
+
 const WRITES = ['net.link.ensureVeth', 'net.link.ensureDummy', 'net.link.setARP', 'net.link.setGSO', 'net.link.setOffloads',
   'net.addr.replace', 'net.route.replace', 'net.rule.replace', 'net.neigh.replace'];
 
@@ -108,42 +108,44 @@ function fixture(payload = session) {
   host.state.calls.length = 0;
   const calls = () => host.state.calls.map(c => c.api);
   const writes = () => calls().filter(api => WRITES.includes(api)).length;
-  const tick = () => host.fireTimer('wan_repair');
+  const timers = () => new Map([...host.state.timers.values()].map(t => [t.name, t]));
+  // Deliver an event the way the host does, then run the repair it armed.
+  const event = (topic, eventPayload = {interface: LOCAL}) => {
+    const before = timers();
+    host.emit(topic, eventPayload);
+    const armed = [...timers().keys()].filter(name => name !== 'wan_repair' && !before.has(name));
+    for (const name of armed) host.fireTimer(name);
+    return armed;
+  };
+  const safety = () => host.fireTimer('wan_repair');
   const reset = () => { host.state.calls.length = 0; };
   const status = () => host.state.resources.get('status').get('default').data;
-  return {k, host, calls, writes, tick, reset, status};
+  safety(); // learn the record revisions, as the first repair after start does
+  reset();
+  return {k, host, calls, writes, timers, event, safety, reset, status};
 }
 
-test('stable repair ticks only read the boundary and stagger the full apply', () => {
+test('nothing polls: the only interval is the five-minute safety repair', () => {
   const h = fixture();
-  h.tick(); // the first tick after start learns the record revisions with a full apply
-  h.reset();
-  let fullTicks = 0;
-  for (let i = 0; i < FULL_REPAIR_TICKS; i++) {
-    h.reset();
-    h.tick();
-    const calls = h.calls();
-    if (calls.includes('net.link.ensureVeth')) {
-      fullTicks++;
-      continue;
-    }
-    assert.equal(h.writes(), 0, 'light tick wrote: ' + calls.join(','));
-    assert.deepEqual(calls.filter(api => api.startsWith('net.')), ['net.link.get', 'net.link.get']);
-  }
-  assert.equal(fullTicks, 1, 'one full apply per session every FULL_REPAIR_TICKS ticks');
+  const intervals = [...h.timers().values()].filter(t => t.kind === 'interval');
+  assert.deepEqual(intervals.map(t => [t.name, t.delay_ms]), [['wan_repair', 300000]]);
+  // The safety repair replays every write; the host turns those that change
+  // nothing into no-ops, so it arms no retry either.
+  h.safety();
   assert.equal(h.status().phase, 'applied');
+  assert.equal(h.timers().has('wan_retry'), false);
 });
 
-test('a reconcile counts as the full apply for the ticks that follow', () => {
-  const h = fixture();
-  h.host.reconcile();
-  h.reset();
-  h.tick(); // not the staggered full tick of key "default"
-  assert.equal(h.calls().includes('net.link.ensureVeth'), false);
-  assert.equal(h.writes(), 0);
+test('a link or address event on a stable boundary only reads it', () => {
+  for (const topic of ['net.link', 'net.addr']) {
+    const h = fixture();
+    assert.deepEqual(h.event(topic), ['wan_event'], topic);
+    assert.equal(h.writes(), 0, topic + ': ' + h.calls().join(','));
+    assert.deepEqual(h.calls().filter(api => api.startsWith('net.')), ['net.link.get', 'net.link.get'], topic);
+  }
 });
 
-test('the light check repairs boundary drift on the next tick', () => {
+test('the light check after a link event repairs boundary drift', () => {
   const drifts = {
     deleted: k => k.adapters['net.link.delete'](LOCAL),
     local_down: k => { k.links.get(LOCAL).up = false; },
@@ -159,11 +161,8 @@ test('the light check repairs boundary drift on the next tick', () => {
   };
   for (const [name, drift] of Object.entries(drifts)) {
     const h = fixture();
-    h.tick();
-    h.tick();
     drift(h.k);
-    h.reset();
-    h.tick();
+    h.event('net.link');
     assert.ok(h.calls().includes('net.link.ensureVeth'), name + ': no full apply');
     const local = h.k.links.get(LOCAL), pipe = h.k.links.get(PIPE);
     assert.ok(local && pipe, name);
@@ -175,73 +174,85 @@ test('the light check repairs boundary drift on the next tick', () => {
     assert.equal(h.status().local_ifindex, local.ifindex, name);
     assert.equal(h.status().pipeline_ifindex, pipe.ifindex, name);
     h.reset();
-    h.tick();
-    assert.equal(h.writes(), 0, name + ': the tick after the repair is light again');
+    h.event('net.link');
+    assert.equal(h.writes(), 0, name + ': the check after the repair only reads');
   }
 });
 
-test('route, rule, neighbor and offload drift is repaired by the next full apply', () => {
+test('route, rule, static neighbor and offload events run a full apply', () => {
+  const drifts = {
+    'net.route': [k => k.routes.clear(), k => k.routes.size > 0],
+    'net.rule': [k => k.rules.clear(), k => k.rules.size > 0],
+    'net.neigh': [k => k.neigh.clear(), k => k.neigh.size > 0],
+    'net.offload': [k => { k.links.get(PIPE).offloads.gro = true; }, k => k.links.get(PIPE).offloads.gro === false],
+  };
+  for (const [topic, [drift, repaired]] of Object.entries(drifts)) {
+    const h = fixture();
+    drift(h.k);
+    const payload = topic === 'net.neigh' ? {interface: LOCAL, operation: 'delete', state: 0x80} : {interface: LOCAL};
+    assert.deepEqual(h.event(topic, payload), ['wan_event_full'], topic);
+    assert.ok(repaired(h.k), topic + ' not repaired');
+  }
+});
+
+test('a dynamic neighbor changing state arms nothing', () => {
   const h = fixture();
-  h.tick();
+  assert.deepEqual(h.event('net.neigh', {interface: LOCAL, operation: 'update', state: 0x02}), []);
+  assert.deepEqual(h.event('net.neigh', {interface: LOCAL, operation: 'update', state: 0x04}), []);
+});
+
+test('the safety repair replays routes, rules, neighbors and offloads', () => {
+  const h = fixture();
   const routes = h.k.routes.size, rules = h.k.rules.size, neigh = h.k.neigh.size;
   assert.ok(routes && rules && neigh);
   h.k.routes.clear();
   h.k.rules.clear();
   h.k.neigh.clear();
   h.k.links.get(PIPE).offloads.gro = true;
-  let ticks = 0;
-  while (h.k.routes.size === 0 && ticks < FULL_REPAIR_TICKS) {
-    h.tick();
-    ticks++;
-  }
-  assert.ok(ticks <= FULL_REPAIR_TICKS, 'repaired within ' + ticks + ' ticks');
+  h.safety();
   assert.equal(h.k.routes.size, routes);
   assert.equal(h.k.rules.size, rules);
   assert.equal(h.k.neigh.size, neigh);
   assert.equal(h.k.links.get(PIPE).offloads.gro, false);
 });
 
-test('a changed profile or session record is applied on the next tick', () => {
+test('a changed profile is applied after its record event', () => {
   const h = fixture();
-  h.tick();
-  h.tick();
   const profile = h.host.state.resources.get('profiles').get('default');
   profile.data = {...profile.data, mtu: 1480};
   profile.revision++;
-  h.reset();
-  h.tick();
+  assert.deepEqual(h.event('resource.changed', {plugin_id: 'wan_core', resource_id: 'status', operation: 'update', key: 'default'}), [],
+    'its own status records arm nothing');
+  assert.deepEqual(h.event('resource.changed', {plugin_id: 'wan_core', resource_id: 'profiles', operation: 'update', key: 'default'}),
+    ['wan_event']);
   assert.equal(h.k.links.get(LOCAL).mtu, 1480);
   assert.equal(h.status().mtu, 1480);
-  const record = h.host.state.resources.get('sessions').get('default');
-  record.data = {...record.data, ipv4: '192.0.2.3'};
-  record.revision++;
-  h.tick();
-  assert.ok(h.k.links.get(LOCAL).addresses.includes('192.0.2.3/32'));
 });
 
-test('a failed apply is retried on every tick until it succeeds', () => {
+test('a failed apply is retried with backoff until it succeeds', () => {
   const h = fixture();
-  h.tick();
   h.k.failEnsure = true;
   h.k.adapters['net.link.delete'](LOCAL);
-  h.tick();
-  h.tick();
-  assert.equal(h.k.failures, 2);
+  h.event('net.link');
+  assert.equal(h.k.failures, 1);
   assert.equal(h.status().phase, 'error');
+  assert.equal(h.timers().get('wan_retry').delay_ms, 2000);
+  h.host.fireTimer('wan_retry');
+  assert.equal(h.k.failures, 2);
+  assert.equal(h.timers().get('wan_retry').delay_ms, 4000, 'the retry backs off');
   h.k.failEnsure = false;
-  h.tick();
+  h.host.fireTimer('wan_retry');
   assert.equal(h.status().phase, 'applied');
   assert.ok(h.k.links.get(LOCAL));
+  assert.equal(h.timers().has('wan_retry'), false, 'no retry once applied');
 });
 
 test('direct boundaries check the single dummy', () => {
   const h = fixture({key: 'default', driver: 'wireguard', driver_plugin: 'vpn_core', state: 'up', usable: true,
     local_interface: LOCAL, handoff_mode: 'direct', ipv4: '10.77.0.1', addresses: ['10.77.0.1/32'], mtu: 1420});
-  h.tick();
-  h.reset();
-  h.tick();
+  h.event('net.link');
   assert.deepEqual(h.calls().filter(api => api.startsWith('net.')), ['net.link.get']);
   h.k.links.get(LOCAL).up = false;
-  h.tick();
+  h.event('net.link');
   assert.equal(h.k.links.get(LOCAL).up, true);
 });
