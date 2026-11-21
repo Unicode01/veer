@@ -659,7 +659,7 @@ func lookupManagedNetworkDHCPv4Interface(name string) (*net.Interface, error) {
 	if lookupManagedNetworkDHCPv4InterfaceForTests != nil {
 		return lookupManagedNetworkDHCPv4InterfaceForTests(name)
 	}
-	return net.InterfaceByName(name)
+	return interfaceByName(name)
 }
 
 func managedNetworkDHCPv4InterfaceExists(name string) bool {

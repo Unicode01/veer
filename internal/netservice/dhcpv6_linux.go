@@ -440,7 +440,7 @@ func dhcpv6SocketNeedsReopen(state ipv6DHCPv6State) bool {
 	if state.IfName == "" {
 		return false
 	}
-	iface, err := net.InterfaceByName(state.IfName)
+	iface, err := interfaceByName(state.IfName)
 	if err != nil || iface == nil || iface.Index <= 0 {
 		return true
 	}

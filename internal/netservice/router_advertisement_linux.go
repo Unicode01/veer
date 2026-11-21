@@ -552,7 +552,7 @@ func routerSolicitationSocketNeedsReopen(state ipv6RouterSolicitationState) bool
 	if state.IfName == "" {
 		return false
 	}
-	iface, err := net.InterfaceByName(state.IfName)
+	iface, err := interfaceByName(state.IfName)
 	if err != nil || iface == nil || iface.Index <= 0 {
 		return true
 	}
