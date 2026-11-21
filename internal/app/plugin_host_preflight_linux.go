@@ -31,10 +31,14 @@ func pluginRawL2FeatureStatus() PluginHostFeatureStatus {
 	return pluginRawL2ProbeStatus
 }
 
+// Offloads are read and set with ethtool ioctls on an AF_INET socket, so
+// the ethtool tool itself is not needed.
 func pluginNetOffloadFeatureStatus() PluginHostFeatureStatus {
-	if _, err := pluginHostLookPath("ethtool"); err != nil {
-		return PluginHostFeatureStatus{Reason: "network offload control unavailable: ethtool not found"}
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return PluginHostFeatureStatus{Reason: "network offload control unavailable: " + err.Error()}
 	}
+	_ = unix.Close(fd)
 	return PluginHostFeatureStatus{Available: true}
 }
 

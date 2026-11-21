@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os/exec"
 	"sort"
 	"strings"
 
@@ -691,22 +690,12 @@ func (linuxPluginControlNetAdmin) LinkGetOffloads(name string) (map[string]bool,
 	if _, err := pluginControlNetLinkByName(name); err != nil {
 		return nil, err
 	}
-	if _, err := exec.LookPath("ethtool"); err != nil {
-		return nil, fmt.Errorf("ethtool not found: %w", err)
-	}
-	out, err := exec.Command("ethtool", "-k", name).CombinedOutput()
+	dev, err := openPluginOffloadDevice(name)
 	if err != nil {
-		text := strings.TrimSpace(string(out))
-		if text == "" {
-			text = err.Error()
-		}
-		return nil, fmt.Errorf("ethtool -k %s failed: %s", name, text)
+		return nil, err
 	}
-	features := parsePluginControlOffloadFeatures(string(out))
-	if len(features) == 0 {
-		return nil, fmt.Errorf("ethtool -k %s returned no supported feature state", name)
-	}
-	return features, nil
+	defer dev.Close()
+	return dev.read()
 }
 
 func (linuxPluginControlNetAdmin) LinkSetOffloads(req pluginControlNetOffloadRequest) error {
@@ -720,34 +709,17 @@ func (linuxPluginControlNetAdmin) LinkSetOffloads(req pluginControlNetOffloadReq
 	if len(req.Features) == 0 {
 		return fmt.Errorf("features are required")
 	}
-	if _, err := exec.LookPath("ethtool"); err != nil {
-		return fmt.Errorf("ethtool not found: %w", err)
-	}
-	features := make([]string, 0, len(req.Features))
 	for feature := range req.Features {
 		if !isAllowedPluginControlOffloadFeature(feature) {
 			return fmt.Errorf("unsupported offload feature %q", feature)
 		}
-		features = append(features, feature)
 	}
-	sort.Strings(features)
-	args := []string{"-K", name}
-	for _, feature := range features {
-		state := "off"
-		if req.Features[feature] {
-			state = "on"
-		}
-		args = append(args, feature, state)
-	}
-	out, err := exec.Command("ethtool", args...).CombinedOutput()
+	dev, err := openPluginOffloadDevice(name)
 	if err != nil {
-		text := strings.TrimSpace(string(out))
-		if text == "" {
-			text = err.Error()
-		}
-		return fmt.Errorf("ethtool -K %s failed: %s", name, text)
+		return err
 	}
-	return nil
+	defer dev.Close()
+	return dev.set(req.Features)
 }
 
 func (admin linuxPluginControlNetAdmin) LinkSetGSO(req pluginControlNetGSORequest) (pluginControlNetLinkInfo, error) {
