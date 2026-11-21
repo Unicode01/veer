@@ -37,7 +37,8 @@
 .vpn-type strong { font-size: var(--veer-fs-md); display:block; margin-bottom:4px; }
 .vpn-type span { color:var(--veer-muted); display:block; line-height:1.6; font-size: var(--veer-fs-xs); }
 .vpn-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
-.vpn-fields .veer-field { min-width:0; }
+/* Stack each field from the top so help text of different length never shifts the inputs of a row. */
+.vpn-fields .veer-field { min-width:0; align-content:start; }
 .vpn-field-help { font-size: var(--veer-fs-xs); color:var(--veer-muted); line-height:1.6; font-weight: 400; }
 .vpn-wide { grid-column:1/-1; }
 .vpn-page textarea { resize:vertical; width:100%; }

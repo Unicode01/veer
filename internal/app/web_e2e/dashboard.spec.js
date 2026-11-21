@@ -258,7 +258,8 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
       if(id==='delete_profile') {actions.push({id,payload});delete records[payload.key];delete healthValues[payload.key];return route.fulfill({json:{result:{phase:'deleted'}}});}
       // Uplink suggestions and runtime facts are read-only: they do not count as page actions.
       if(id==='upstream_interfaces') return route.fulfill({json:{result:{items:[{name:'vmbr0',kind:'bridge',up:true,addresses:['192.168.10.1/24']},
-        {name:'ppp0',kind:'ppp',up:true,addresses:['192.0.2.9/32','2001:db8::9/128']}]}}});
+        {name:'ppp0',kind:'ppp',up:true,addresses:['192.0.2.9/32','2001:db8::9/128']},
+        {name:'veerwg2',kind:'vpn',up:true,addresses:['10.77.0.1/32'],exit:'saved',driver:'wireguard'}]}}});
       if(id==='inspect') return route.fulfill({json:{result:payload.key==='saved'?{phase:'configured', driver:'wireguard', interface:'vwgsaved', local_interface:'veerwg2',
         wan_id:'wg_saved', handoff_mode:'segmented_veth', dataplane:'bpf', boundary_gso:true, traffic:{rx_bytes:3221225472, tx_bytes:1048576, rx_packets:1, tx_packets:1},
         public_key:profile.peers[0].public_key, peers:[{public_key:profile.peers[0].public_key, endpoint:'192.0.2.7:51820', latest_handshake:Math.floor(Date.now()/1000)-30, rx_bytes:3221225472, tx_bytes:1048576}]}:{phase:'down'}}});
@@ -368,6 +369,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expect(frame.getByLabel('节点分享链接或 Base64')).toBeVisible();
   await expect(frame.getByLabel('Mihomo 配置（JSON）', {exact:true})).toBeHidden();
   // The uplink field suggests the host's interfaces but still accepts any name.
+  // The applied exits are offered too, but never the exit being edited.
   await expect(frame.getByLabel('实际出站接口', {exact:true})).toHaveAttribute('list','vpn-upstreams');
   await expect(frame.locator('#vpn-upstreams option')).toHaveCount(2);
   await expect(frame.locator('#vpn-upstreams option').first()).toHaveAttribute('label','vmbr0 · 192.168.10.1/24 · 已启用');
@@ -434,6 +436,9 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expect(frame.getByLabel('本机 WireGuard 地址',{exact:true})).toHaveCount(0);
   await expect(frame.getByLabel('内部 WAN 地址',{exact:true})).toBeHidden();
   await expect(frame.getByLabel('Mihomo 配置（JSON）',{exact:true})).toHaveCount(0);
+  // Another applied exit is offered last: picking it chains this exit behind it.
+  await expect(frame.locator('#vpn-upstreams option')).toHaveCount(3);
+  await expect(frame.locator('#vpn-upstreams option').last()).toHaveAttribute('label','veerwg2 · VPN 出口 saved · 10.77.0.1/32 · 已启用');
   await frame.getByLabel('实际出站接口',{exact:true}).fill('ppp0');
   // The outbound IP suggestions follow the chosen uplink, without prefixes.
   await expect(frame.locator('#vpn-upstream-ips option')).toHaveCount(2);
@@ -539,6 +544,14 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expect.poll(()=>records.vpn1).toBeUndefined();
   await expect(card).toHaveCount(0);await expect(frame.locator('.vpn-editor')).toBeHidden();
   expect(actions.at(-1)).toEqual({id:'delete_profile',payload:{key:'vpn1'}});
+  // A proxy exit chained behind another applied exit names that exit on its card.
+  savedApplied=true;
+  records.chain={key:'chain',revision:1,data:{driver:'sing_box',slot:3,mtu:1420,upstream_interface:'veerwg2',config_secret:'core_sing_box_chain'},enabled:true};
+  await page.locator('#tab-plugin-vpn .plugin-header-actions').getByRole('button',{name:'刷新出口',exact:true}).click();
+  const chained=frame.locator('.vpn-outlet').filter({has:frame.getByRole('heading',{name:'chain',exact:true})});
+  await expect(chained).toContainText('veerwg2 · 经出口 saved');
+  await expectReadableThemes(page, frame.locator('body'));
+  await page.screenshot({path:testInfo.outputPath('vpn-chained-card.png'),fullPage:true});
 });
 
 

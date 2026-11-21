@@ -88,16 +88,23 @@
     const chosen=upstreams.find(item=>item.name===upstream.value.trim());
     upstreamIPList.replaceChildren(...(chosen?chosen.addresses:[]).map(a=>h('option',{attrs:{value:a.split('/')[0]}})));
   }
+  // Applied VPN exits are offered too (never the one being edited): choosing
+  // one chains this exit behind it.
+  function renderUpstreams() {
+    const self=keyInput.value.trim();
+    upstreamList.replaceChildren(...upstreams.filter(item=>!item.exit || item.exit!==self).map(item=>h('option',{attrs:{value:item.name,
+      label:[item.name,...(item.exit?[T('field.upstream.exit',{key:item.exit})]:[]),item.addresses[0] || T('field.upstream.noAddress'),T(item.up?'field.upstream.up':'field.upstream.down')].join(' · ')}})));
+    fillUpstreamIPs();
+  }
   async function loadUpstreams() {
     // Suggestions only: the backend still validates whatever is typed.
-    if (Date.now()-upstreamsAt<30000) return;
-    try {
-      const response=await F.action('upstream_interfaces',{});
-      upstreams=(response && response.result && response.result.items) || [];upstreamsAt=Date.now();
-    } catch (_) { upstreams=[]; }
-    upstreamList.replaceChildren(...upstreams.map(item=>h('option',{attrs:{value:item.name,
-      label:[item.name,item.addresses[0] || T('field.upstream.noAddress'),T(item.up?'field.upstream.up':'field.upstream.down')].join(' · ')}})));
-    fillUpstreamIPs();
+    if (Date.now()-upstreamsAt>=30000) {
+      try {
+        const response=await F.action('upstream_interfaces',{});
+        upstreams=(response && response.result && response.result.items) || [];upstreamsAt=Date.now();
+      } catch (_) { upstreams=[]; }
+    }
+    renderUpstreams();
   }
   upstream.addEventListener('input',()=>{fillUpstreamIPs();if(nodeNames.length)renderVia();});
   const listenPort=input(L('field.listenPort'),0,'number'), privateKey=input(L('field.privateKey'),'','password');
@@ -344,7 +351,7 @@
     if (apply) {
       say('save.applying');
       try {
-        const response=await F.action('apply',{key});
+        const response=await F.action('apply',{key});upstreamsAt=0;
         appliedNotice(response && response.result || {});
       } catch (error) { await reload();throw error; }
     } else say('save.draftOnly');
@@ -414,6 +421,11 @@
     return h('time',{attrs:{datetime:new Date(ms).toISOString(),title:new Date(ms).toLocaleString(I.locale())},text:ago(ms)});
   }
   function mono(text) { return h('span',{className:F.classes.mono,text:text == null || text === '' ? '—' : String(text)}); }
+  // An upstream that is another applied exit's WAN boundary also names that exit.
+  function upstreamCell(name) {
+    const front=Object.keys(statuses).find(k=>statuses[k] && statuses[k].phase==='applied' && statuses[k].local_interface===name);
+    return front?h('span',{},[mono(name),node('span','vpn-upstream-exit',' · '+T('list.upstreamExit',{key:front}))]):mono(name);
+  }
   function handshake(view) {
     const times=(view && view.peers || []).map(p=>p.latest_handshake).filter(Boolean);
     return times.length?Math.max(...times)*1000:0;
@@ -512,7 +524,7 @@
   }
   async function applyOutlet(key) {
     say('save.applying');
-    const response=await F.action('apply',{key});
+    const response=await F.action('apply',{key});upstreamsAt=0;
     appliedNotice(response && response.result || {});
     await reload();
   }
@@ -530,7 +542,7 @@
       const rows=[[T('list.interface'),mono(name)],[T(wg?'field.wgAddress':'field.wanAddress'),addresses.length?mono(addresses.join(', ')):node('span','',T(wg?'list.notConfigured':'list.assignedOnApply'))]];
       if (wg) rows.push([T('list.peers'),endpoints.length===1 && peers.length===1?mono(endpoints[0]):node('span','',T('list.peerCount',{count:peers.length}))],
         [T('list.handshake'),h('span',{})]);
-      else if (proxy) rows.push([T('field.upstream'),mono(profile.upstream_interface)],[T('list.node'),node('span','',status.node?nodeText(status.node):status.profile_revision?T('list.nativeConfig'):'—')]);
+      else if (proxy) rows.push([T('field.upstream'),upstreamCell(profile.upstream_interface)],[T('list.node'),node('span','',status.node?nodeText(status.node):status.profile_revision?T('list.nativeConfig'):'—')]);
       else rows.push([T('list.tunInterface'),mono(profile.tun_interface)],[T('details.path'),h('span',{})]);
       const metadata=h('dl',{className:'vpn-metadata'},rows.map(pair=>h('div',{},[node('dt','',pair[0]),h('dd',{},[pair[1]])])));
       const slot={facts:h('p',{className:'vpn-facts'}),health:h('div',{className:'vpn-health-line'}),handshake:wg?rows[3][1]:null,path:!wg && !proxy?rows[3][1]:null};

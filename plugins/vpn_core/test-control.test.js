@@ -67,6 +67,11 @@ function fixture(config = profile(), options = {}) {
         assert.ok(!['dump','private-key'].includes(a[2]));
         return ok(a[0]==='pubkey'||a[2]==='public-key'?PUBLIC:'peer\t123');
       }
+      if(request.command==='/usr/sbin/sysctl') {
+        state.sysctl=state.sysctl||{};
+        if(a[0]==='-n') return ok(String(state.sysctl[a[1]] ?? 0)+'\n');
+        const [name,value]=a.at(-1).split('=');state.sysctl[name]=Number(value);return ok();
+      }
       assert.match(request.command,/\/ip$/);
       if(a.includes('route')) {assert.deepEqual(a,['-j','-4','route','show','table','all']);return ok(JSON.stringify(options.routes || []));}
       const args=a.filter(v=>!['-j','-d'].includes(v)), field=k=>args[args.indexOf(k)+1];
@@ -965,6 +970,84 @@ test('VPN inspect reports WG peers, tunnel traffic and the boundary without the 
   assert.ok(!h.state.calls.some(r=>r.args.includes('dump')));
 });
 
+// Chained exits: a WG front, a sing-box exit behind it and a Mihomo exit behind
+// that. Keys sort against the dependency order on purpose.
+function chainFixture() {
+  const mihomo=JSON.stringify({proxies:[{name:'n',type:'ss',server:'192.0.2.9',port:8388,cipher:'aes-128-gcm',password:'chain-secret'}],rules:['MATCH,n']});
+  const proxy=(driver,slot,upstream)=>({data:{driver,slot,mtu:1420,upstream_interface:upstream,config_secret:'core_'+driver+'_'+slot},enabled:true});
+  return vpnFixture('sing_box',{},{inventory:[{name:'eth0',ifindex:2,kind:'ethernet',up:true,addresses:['192.0.2.1/24']}],
+    resources:{profiles:{default:{data:profile(),enabled:true},bmid:proxy('sing_box',2,'veerwg1'),aback:proxy('mihomo',3,'veervpn2'),
+      zfar:proxy('sing_box',4,'veervpn3')}},
+    secrets:{core_sing_box_2:JSON.stringify({outbounds:[{type:'direct',tag:'direct'}]}),core_mihomo_3:mihomo,core_sing_box_4:JSON.stringify({outbounds:[]})}});
+}
+test('VPN chains proxy exits behind applied exits and binds each core to its front boundary',()=>{
+  const h=chainFixture(), apply=key=>h.host.action('apply',{key}), status=key=>h.host.state.resources.get('status').get(key)?.data;
+  // A front that is not applied yet: nothing starts.
+  assert.throws(()=>apply('bmid'),/\[upstream_exit_down\]/);assert.equal(h.procs.vpn_bmid,undefined);
+  h.host.action('set_key',{value:PRIVATE});apply('default');
+  // Strict reverse-path filtering would drop replies on the front boundary: loosen that boundary only.
+  h.state.sysctl={'net.ipv4.conf.all.rp_filter':1};
+  assert.equal(apply('bmid').phase,'applied');
+  assert.equal(h.state.sysctl['net.ipv4.conf.veerwg1.rp_filter'],2);assert.equal(h.state.sysctl['net.ipv4.conf.all.rp_filter'],1);
+  const sing=JSON.parse(h.specs.find(s=>s.id==='vpn_bmid').config);
+  assert.equal(sing.route.default_interface,'veerwg1');
+  assert.equal(h.host.snapshot().kv.lease_bmid.upstream_ifindex,h.state.links.find(l=>l.ifname==='veerwg1').ifindex);
+  // Loose already (2) or off (0) stays as it is.
+  h.state.sysctl={'net.ipv4.conf.all.rp_filter':2};
+  assert.equal(apply('aback').phase,'applied');
+  assert.equal(h.state.sysctl['net.ipv4.conf.veervpn2.rp_filter'],undefined);
+  assert.equal(JSON.parse(h.specs.find(s=>s.id==='vpn_aback').config)['interface-name'],'veervpn2');
+  // Three exits in front are too many.
+  assert.throws(()=>apply('zfar'),/\[upstream_chain_too_long\]/);assert.equal(h.procs.vpn_zfar,undefined);
+  // Applied exits are offered as upstreams after the physical interfaces.
+  const items=h.host.action('upstream_interfaces',{}).items;
+  assert.deepEqual(items.map(i=>[i.name,i.exit||'']),[['eth0',''],['veerwg1','default'],['veervpn2','bmid'],['veervpn3','aback']]);
+  assert.equal(items[1].driver,'wireguard');assert.equal(items[1].kind,'vpn');
+  // A front in use cannot be torn down or deleted; its dependents can.
+  for(const id of ['teardown','delete_profile'])assert.throws(()=>h.host.action(id,{key:'bmid'}),/\[upstream_in_use\].*aback/);
+  assert.throws(()=>h.host.action('teardown',{}),/\[upstream_in_use\].*bmid/);
+  assert.equal(status('bmid').phase,'applied');
+  // A loop through applied exits is refused before anything changes.
+  const front=h.host.state.resources.get('profiles').get('bmid');front.data={...front.data,upstream_interface:'veervpn3'};
+  assert.throws(()=>apply('bmid'),/\[upstream_cycle\]/);assert.equal(status('bmid').phase,'applied');
+  front.data={...front.data,upstream_interface:'veerwg1'};
+  // Tunnels and pipelines of other exits stay refused.
+  for(const upstream of ['vtunbmid','veervpnp2','vwgdefault']) {
+    const far=h.host.state.resources.get('profiles').get('zfar');far.data={...far.data,upstream_interface:upstream};
+    assert.throws(()=>apply('zfar'),/\[upstream_invalid\]/);
+  }
+  h.host.action('teardown',{key:'aback'});h.host.action('teardown',{key:'bmid'});h.host.action('teardown',{});
+  assert.deepEqual(Object.keys(h.host.snapshot().kv).filter(k=>k.startsWith('lease_')),[]);
+});
+test('VPN recovers chained exits front first and rebinds a core when its front boundary is rebuilt',()=>{
+  const h=chainFixture(), apply=key=>h.host.action('apply',{key}), status=key=>h.host.state.resources.get('status').get(key)?.data;
+  h.host.action('set_key',{value:PRIVATE});apply('default');apply('bmid');apply('aback');
+  // A rebuilt front boundary (new ifindex): the same full check repairs the
+  // front, then stops and restarts the exit chained to it.
+  const before=h.procs.vpn_aback.started_at, starts=h.specs.filter(s=>s.id==='vpn_aback').length;
+  const old=h.state.links.find(l=>l.ifname==='veervpn2');
+  h.state.links=h.state.links.filter(l=>l.ifname!=='veervpn2' && l.ifindex!==old.link_index);
+  h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
+  const rebuilt=h.state.links.find(l=>l.ifname==='veervpn2');
+  assert.notEqual(rebuilt.ifindex,old.ifindex);
+  assert.equal(h.host.snapshot().kv.lease_aback.upstream_ifindex,rebuilt.ifindex);
+  assert.equal(h.specs.filter(s=>s.id==='vpn_aback').length,starts+1);assert.notEqual(h.procs.vpn_aback.started_at,before);
+  assert.equal(status('bmid').phase,'applied');assert.equal(status('aback').phase,'applied');
+  // A cold daemon start: every link and core is gone. One reconcile restores
+  // the WG front, then the exits behind it, although "aback" sorts first.
+  h.state.links=[];Object.keys(h.procs).forEach(k=>delete h.procs[k]);
+  h.host.reconcile();
+  for(const key of ['default','bmid','aback'])assert.equal(status(key).phase,'applied',key);
+  // While a front cannot recover, the exits behind it wait without starting their cores.
+  h.state.links=[];Object.keys(h.procs).forEach(k=>delete h.procs[k]);
+  h.state.fail=request=>request.command.endsWith('/wg');
+  assert.throws(()=>h.host.reconcile(),e=>e.message.includes('bmid: [upstream_exit_down]') && e.message.includes('aback: [upstream_exit_down]'));
+  assert.equal(h.procs.vpn_bmid,undefined);assert.equal(h.procs.vpn_aback,undefined);
+  assert.equal(status('bmid').error_code,'upstream_exit_down');
+  // Once the front is back, the next reconcile restores the whole chain.
+  h.state.fail=null;h.host.reconcile();
+  for(const key of ['default','bmid','aback'])assert.equal(status(key).phase,'applied',key);
+});
 test('VPN status records the applied profile revision and proxy node for the page',()=>{
   const h=vpnFixture('mihomo');
   const source='ss://'+Buffer.from('aes-128-gcm:import-secret').toString('base64url')+'@192.0.2.2:8388#first\ntrojan://another-secret@node.example:443?sni=example.com#second';

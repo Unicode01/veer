@@ -16,7 +16,9 @@ var coreDrivers = require('./core-drivers');
 var shares = require('./ui/share');
 var coreManager = require('./core-manager');
 var health = require('./health-check').create({path: healthPath, leases: allLeases});
-var IP = '/usr/sbin/ip', WG = '/usr/bin/wg', NFT = '/usr/sbin/nft';
+var IP = '/usr/sbin/ip', WG = '/usr/bin/wg', NFT = '/usr/sbin/nft', SYSCTL = '/usr/sbin/sysctl';
+// A proxy exit may use another exit as its upstream; at most two exits in front.
+var MAX_CHAIN = 2;
 var PROTOCOL = '242'; // Used only when cleaning up leases from the old routing example.
 var OBJECT = 'tunnel_adapter', MAP = 'tunnel_links', REPAIR_TIMER = 'tunnel_repair';
 var HOOK_IN = 'tunnel-links', HOOK_DIRECT_OUT = 'tunnel-direct-out';
@@ -136,8 +138,8 @@ exports.onAction = function (ctx) {
     return {stdout: logs.stdout.slice(-4000), stderr: logs.stderr.slice(-4000),
       truncated: logs.truncated || logs.stdout.length > 4000 || logs.stderr.length > 4000};
   }
-  if (ctx.action.id === 'teardown') { teardown(key); return {phase: 'down'}; }
-  if (ctx.action.id === 'delete_profile') return deleteProfile(key);
+  if (ctx.action.id === 'teardown') { assertNoDependents(key); teardown(key); return {phase: 'down'}; }
+  if (ctx.action.id === 'delete_profile') { assertNoDependents(key); return deleteProfile(key); }
   if (ctx.action.id === 'apply') {
     var record = resources.get('profiles', key);
     if (!record || record.enabled === false) throw fail('profile_not_saved', 'Save and enable the profile first');
@@ -149,7 +151,7 @@ exports.onReconcile = function () {
   if (changing) return;
   var errors = [];
   var leases = allLeases();
-  Object.keys(leases).sort().forEach(function (key) {
+  chainOrder(leases).forEach(function (key) {
     var lease = leases[key], record = resources.get('profiles', key);
     if (!lease.active) return;
     if (!record || record.enabled === false) { teardown(key); return; }
@@ -167,7 +169,7 @@ exports.onTimer = function (ctx) {
   var now = Date.now(), full = now - lastFullCheck >= FULL_CHECK_MS - 500;
   if (full) lastFullCheck = now;
   var leases = allLeases();
-  Object.keys(leases).sort().forEach(function (key) {
+  chainOrder(leases).forEach(function (key) {
     var lease = leases[key];
     if (!lease.active || isLegacy(lease)) return;
     if (lease.plan.driver && lease.plan.driver !== 'wireguard') { repairTUN(key, lease, full); return; }
@@ -190,7 +192,8 @@ exports.onDeactivate = function () {
   health.stop();
   timer.clear(REPAIR_TIMER);
   var failures = [];
-  Object.keys(allLeases()).forEach(function (key) {
+  // Chained exits first, so no core keeps dialing through a removed front.
+  chainOrder(allLeases()).reverse().forEach(function (key) {
     try { teardown(key); } catch (e) { failures.push(key + ': ' + String(e.message || e)); }
   });
   if (failures.length) throw new Error('VPN cleanup incomplete: ' + failures.join('; '));
@@ -218,6 +221,90 @@ function armRepair() {
   var leases = allLeases(), keys = Object.keys(leases);
   if (keys.some(function (k) { return leases[k].active; })) timer.setInterval(REPAIR_TIMER, keys.some(function (k) { return leases[k].active && leases[k].plan.driver && leases[k].plan.driver !== 'wireguard'; }) ? 1000 : 5000, {});
   else timer.clear(REPAIR_TIMER);
+}
+// Chained exits: a proxy exit's upstream_interface may be another applied
+// exit's WAN boundary. Its core binds every socket there (sing-box
+// default_interface, Mihomo interface-name), and the front's TC adapter carries
+// that traffic into the front tunnel like any other packet leaving the boundary.
+function exitByBoundary(name, leases) {
+  var keys = Object.keys(leases);
+  for (var i = 0; i < keys.length; i++) {
+    var lease = leases[keys[i]];
+    if (name && lease.active && !isLegacy(lease) && lease.plan.local === name) return {key: keys[i], lease: lease};
+  }
+  return null;
+}
+function chainDepth(key, leases) {
+  var depth = 0, seen = {}, cur = leases[key];
+  seen[key] = true;
+  while (cur && cur.plan && cur.plan.upstream_interface) {
+    var front = exitByBoundary(cur.plan.upstream_interface, leases);
+    if (!front || seen[front.key]) break;
+    seen[front.key] = true; depth++; cur = front.lease;
+  }
+  return depth;
+}
+// Fronts before the exits chained behind them, then by key.
+function chainOrder(leases) {
+  var depth = {};
+  Object.keys(leases).forEach(function (k) { depth[k] = chainDepth(k, leases); });
+  return Object.keys(leases).sort(function (a, b) { return depth[a] - depth[b] || (a < b ? -1 : a > b ? 1 : 0); });
+}
+function dependents(key, leases) {
+  leases = leases || allLeases();
+  var lease = leases[key];
+  if (!lease || !lease.plan || !lease.plan.local) return [];
+  return Object.keys(leases).filter(function (k) {
+    return k !== key && leases[k].active && leases[k].plan && leases[k].plan.upstream_interface === lease.plan.local;
+  }).sort();
+}
+function assertNoDependents(key) {
+  var users = dependents(key);
+  if (users.length) throw fail('upstream_in_use', 'Exit ' + key + ' is the upstream of ' + users.join(', ') + '; teardown those exits or change their upstream first');
+}
+// Structural checks of an upstream that is another exit: never a tunnel or
+// pipeline, no loop, at most MAX_CHAIN exits in front. Returns the front exit.
+function upstreamChain(p) {
+  var leases = allLeases();
+  Object.keys(leases).forEach(function (k) {
+    var other = leases[k].plan;
+    if (k !== p.key && other && [other.interface, other.pipeline].indexOf(p.upstream_interface) >= 0)
+      throw fail('upstream_invalid', 'A VPN tunnel or pipeline cannot be the upstream; select the WAN boundary ' + other.local + ' of exit ' + k);
+  });
+  var front = exitByBoundary(p.upstream_interface, leases);
+  if (!front) {
+    if (/^veer(wg|vpn)[0-9]+$/.test(p.upstream_interface)) throw fail('upstream_exit_down', 'Upstream VPN exit boundary ' + p.upstream_interface + ' is not applied; apply that exit first');
+    return null;
+  }
+  for (var cur = front, depth = 1; cur; depth++) {
+    if (cur.key === p.key) throw fail('upstream_cycle', 'Upstream exits would form a loop through ' + p.key);
+    if (depth > MAX_CHAIN) throw fail('upstream_chain_too_long', 'At most ' + MAX_CHAIN + ' VPN exits can be chained in front of a proxy exit');
+    cur = cur.lease.plan.upstream_interface ? exitByBoundary(cur.lease.plan.upstream_interface, leases) : null;
+  }
+  return front;
+}
+// Before (re)starting a chained core: the front must be published, and its
+// boundary must accept replies addressed to the core's own sockets.
+function upstreamReady(front, p) {
+  var status = resources.get('status', front.key), boundary = link(p.upstream_interface);
+  if (front.lease.pending || !status || !status.data || status.data.phase !== 'applied' || !boundary)
+    throw fail('upstream_exit_down', 'Upstream VPN exit ' + front.key + ' is not ready');
+  loosenReversePath(p.upstream_interface);
+  return boundary;
+}
+// Replies to a chained core arrive on the front boundary, while the host's
+// best route back to the node uses the physical uplink. Strict reverse-path
+// filtering (rp_filter 1) drops them. The kernel uses max(all, interface), so
+// loose mode on this plugin-owned boundary alone is enough.
+function loosenReversePath(name) {
+  function value(key) { return Number(command(SYSCTL, ['-n', key]).trim()); }
+  try {
+    var own = 'net.ipv4.conf.' + name + '.rp_filter';
+    if (Math.max(value('net.ipv4.conf.all.rp_filter'), value(own)) !== 1) return;
+    command(SYSCTL, ['-q', '-w', own + '=2']);
+  } catch (e) {
+    throw fail('upstream_rp_filter', 'Strict reverse-path filtering on ' + name + ' drops replies to the chained core and could not be relaxed: ' + String(e.message || e));
+  }
 }
 function normalize(key, raw) {
   raw = raw || {};
@@ -583,13 +670,23 @@ function upstreamInterfaces() {
   // Suggestions only: the profile still accepts any name and apply validates it.
   // Leave out loopback, every VPN tunnel and boundary, and hypervisor plumbing.
   var own = /^(veerwgp?|veervpnp?|vwg|vtun)[a-z0-9_]*$/, plumbing = /^(tap|fwbr|fwpr|fwln|veth)/;
-  return net.link.list().filter(function (l) {
+  function addresses(l) { return (l.addresses || []).filter(function (a) { return !/^fe80:/i.test(a); }); }
+  function boundary(name) { try { return net.link.get(name); } catch (_) { return null; } }
+  var physical = net.link.list().filter(function (l) {
     return l.name && l.name !== 'lo' && !own.test(l.name) && !plumbing.test(l.name) && l.kind !== 'tuntap' && l.kind !== 'dummy';
   }).map(function (l) {
-    return {name: l.name, kind: l.kind || '', up: l.up === true, addresses: (l.addresses || []).filter(function (a) { return !/^fe80:/i.test(a); })};
+    return {name: l.name, kind: l.kind || '', up: l.up === true, addresses: addresses(l)};
   }).sort(function (a, b) {
     return (b.up - a.up) || (b.addresses.length > 0) - (a.addresses.length > 0) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
   });
+  // Applied exits come last: choosing one chains this exit behind it.
+  var leases = allLeases(), exits = [];
+  chainOrder(leases).forEach(function (k) {
+    var lease = leases[k], status = resources.get('status', k), l = lease.plan && lease.plan.local ? boundary(lease.plan.local) : null;
+    if (!lease.active || isLegacy(lease) || !l || !status || !status.data || status.data.phase !== 'applied') return;
+    exits.push({name: lease.plan.local, kind: 'vpn', up: l.up === true, addresses: addresses(l), exit: k, driver: lease.plan.driver || 'wireguard'});
+  });
+  return physical.concat(exits);
 }
 function traffic(name) {
   // Tunnel counters: the boundary's own may skip redirected packets.
@@ -918,9 +1015,8 @@ function applyTUNProfile(key, raw, explicit) {
   Object.keys(allLeases()).forEach(function (k) {
     var other = allLeases()[k].plan;
     if (k !== key && (other.slot === p.slot || other.interface === p.interface)) throw fail('slot_reserved', 'Slot or TUN is already reserved by another profile');
-    if (managed && k !== key && [other.interface, other.local, other.pipeline].indexOf(p.upstream_interface) >= 0)
-      throw fail('upstream_invalid', 'Another VPN boundary cannot be the upstream interface');
   });
+  var front = managed ? upstreamChain(p) : null, frontLink = front ? link(p.upstream_interface) : null;
   plugins.services.resolve({service: 'wan.adapter', version: '^1.0.0', provider: 'wan_core'});
   assertWANOwner(p);
   resolveWANAddresses(p, old);
@@ -943,15 +1039,19 @@ function applyTUNProfile(key, raw, explicit) {
   if (!explicit && old && !old.pending && current && current.linkinfo && current.linkinfo.info_kind === 'tun' && current.ifalias === p.owner && current.ifindex === old.tunnel_ifindex &&
       current.mtu === p.mtu && (current.flags || []).indexOf('UP') >= 0 && stableBoundary &&
       stableBoundary.local.ifindex === old.local_ifindex && stableBoundary.peer.ifindex === old.pipeline_ifindex &&
-      (!managed || (stableProcess.state === 'running' && stableProcess.started_at === old.process_started_at))) {
+      (!managed || (stableProcess.state === 'running' && stableProcess.started_at === old.process_started_at)) &&
+      (!front || (frontLink && frontLink.ifindex === old.upstream_ifindex))) {
     if (managed) process.start({id: 'vpn_' + key, command: spec.command, args: spec.args, config: spec.config,
       restart: 'on-failure', max_restarts: p.max_restarts, stop_timeout_ms: 1000});
     bindings(); installMaps(p, current, stableBoundary, old);
     return resources.get('status', key).data;
   }
+  // A chained core waits for its front; nothing changes until it is ready.
+  if (front) frontLink = upstreamReady(front, p);
   var lease = {active: true, pending: true, settings: p.settings, plan: p,
     tunnel_ifindex: old && old.tunnel_ifindex, pipeline_ifindex: old && old.pipeline_ifindex,
-    local_ifindex: old && old.local_ifindex, process_started_at: old && old.process_started_at};
+    local_ifindex: old && old.local_ifindex, process_started_at: old && old.process_started_at,
+    upstream_ifindex: front ? frontLink.ifindex : null};
   kv.set('lease_' + key, lease);
   try {
     suspendTUN(p, old);
@@ -963,6 +1063,9 @@ function applyTUNProfile(key, raw, explicit) {
         if (link(p.interface)) throw fail('tun_external_remains', 'TUN remains after core stop; refusing to take over an external interface');
         secret.set('active_' + key, spec.config);
       }
+      // A rebuilt front boundary has a new ifindex: restart the chained core so
+      // no socket stays bound to the old one. Stopping costs no restart budget.
+      if (!explicit && front && old && old.upstream_ifindex !== frontLink.ifindex) process.stop('vpn_' + key);
       // A stopped owner generation can be restored; exited/failed entries retain their budget.
       if (!explicit && process.status('vpn_' + key).state === 'stopped') process.stop('vpn_' + key);
       // An exhausted restart budget remains exhausted until an explicit apply.
@@ -1052,6 +1155,11 @@ function repairTUN(key, lease, full) {
       current.ifindex === lease.tunnel_ifindex && current.mtu === p.mtu && (current.flags || []).indexOf('UP') >= 0 &&
       !(proc && (proc.state !== 'running' || proc.started_at !== lease.process_started_at));
     if (tunnelOK && full === false) return;
+    // A chained exit also needs the same front boundary it bound to.
+    if (tunnelOK && lease.upstream_ifindex != null) {
+      var frontLink = link(p.upstream_interface);
+      tunnelOK = !!frontLink && frontLink.ifindex === lease.upstream_ifindex;
+    }
     var boundary = tunnelOK ? boundaryLinks(p) : null;
     if (!tunnelOK || !boundary || boundary.local.ifindex !== lease.local_ifindex || boundary.peer.ifindex !== lease.pipeline_ifindex) {
       suspendTUN(p, lease);
