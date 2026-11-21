@@ -522,20 +522,35 @@ func testFirewallProgramConnectionTracking(t *testing.T, r *firewallTestRig) {
 	r.egress(fwTCP(local, "198.51.100.66", 40002, 443, 0x02))
 	expect("blocklisted peer", fwTCP("198.51.100.66", local, 443, 40002, 0x12), fwVerdictDrop)
 
-	// Idle entries expire: a day for TCP, 120 s after a FIN.
+	// Idle entries expire: a day for TCP, 120 s after a FIN. An entry last
+	// seen that long ago needs a clock that has run that long: a machine up
+	// for less (a fresh CI runner) would write a time before boot, which
+	// wraps around to the future, and the program rightly keeps entries a
+	// later CPU may have written. Such machines skip that case.
 	key := fwCTKey(fwProtoTCP, local, 40000, remote, 443)
 	value := make([]byte, 16)
-	binary.LittleEndian.PutUint64(value, monotonicNS(t)-86401e9)
-	r.put("fw_ct", key, value)
-	expect("expired", fwTCP(remote, local, 443, 40000, 0x10), fwVerdictDrop)
+	seenAgo := func(name string, ago uint64, closing uint32) bool {
+		now := monotonicNS(t)
+		if now <= ago {
+			t.Logf("%s: up for %d s, not %d: skipped", name, now/1e9, ago/1e9)
+			return false
+		}
+		binary.LittleEndian.PutUint64(value, now-ago)
+		binary.LittleEndian.PutUint32(value[8:], closing)
+		r.put("fw_ct", key, value)
+		return true
+	}
+	if seenAgo("expired", 86401e9, 0) {
+		expect("expired", fwTCP(remote, local, 443, 40000, 0x10), fwVerdictDrop)
+	}
 	r.egress(fwTCP(local, remote, 40000, 443, 0x02))
 	r.egress(fwTCP(local, remote, 40000, 443, 0x11))
 	if err := r.coll.Maps["fw_ct"].Lookup(key, &value); err != nil || binary.LittleEndian.Uint32(value[8:]) != 1 {
 		t.Fatalf("after the FIN the entry is %x (%v), want it closing", value, err)
 	}
-	binary.LittleEndian.PutUint64(value, monotonicNS(t)-121e9)
-	r.put("fw_ct", key, value)
-	expect("closed and idle", fwTCP(remote, local, 443, 40000, 0x10), fwVerdictDrop)
+	if seenAgo("closed and idle", 121e9, 1) {
+		expect("closed and idle", fwTCP(remote, local, 443, 40000, 0x10), fwVerdictDrop)
+	}
 	if r.gcounter(fwGcntEstablished) == 0 || r.gcounter(fwGcntBlocklist) != 1 {
 		t.Fatalf("established = %d, blocklist = %d", r.gcounter(fwGcntEstablished), r.gcounter(fwGcntBlocklist))
 	}
