@@ -24,6 +24,8 @@ func LoadInterfaceInfos() ([]InterfaceInfo, error) {
 		}
 		nameByIndex[attrs.Index] = attrs.Name
 	}
+	// One dump for every link's addresses, not one per link.
+	addrsByIndex, addrErr := nlretry.AddrsByLinkIndex(unix.AF_UNSPEC)
 
 	result := make([]InterfaceInfo, 0, len(links))
 	for _, link := range links {
@@ -42,11 +44,10 @@ func LoadInterfaceInfos() ([]InterfaceInfo, error) {
 			info.Parent = nameByIndex[attrs.ParentIndex]
 		}
 
-		addrs, err := nlretry.AddrList(link, unix.AF_UNSPEC)
-		if err == nil {
+		if addrErr == nil {
 			seen := make(map[string]struct{})
 			seenNetworks := make(map[string]struct{})
-			for _, addr := range addrs {
+			for _, addr := range addrsByIndex[attrs.Index] {
 				if !isVisibleInterfaceIP(addr.IP) {
 					continue
 				}

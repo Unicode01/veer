@@ -110,13 +110,26 @@ func (linuxPluginControlNetAdmin) LinkList() ([]pluginControlNetLinkInfo, error)
 	if err != nil {
 		return nil, err
 	}
+	addrs, err := nlretry.AddrsByLinkIndex(unix.AF_UNSPEC)
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[int]string, len(links))
+	for _, link := range links {
+		if link == nil || link.Attrs() == nil {
+			return nil, fmt.Errorf("invalid link")
+		}
+		names[link.Attrs().Index] = link.Attrs().Name
+	}
+	linkName := func(index int) string {
+		if name, ok := names[index]; ok {
+			return name
+		}
+		return pluginControlNetLinkNameByIndex(index)
+	}
 	out := make([]pluginControlNetLinkInfo, 0, len(links))
 	for _, link := range links {
-		info, err := pluginControlNetLinkInfoFromLink(link)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, info)
+		out = append(out, pluginControlNetLinkInfoWith(link, addrs[link.Attrs().Index], linkName))
 	}
 	return out, nil
 }
@@ -781,9 +794,7 @@ func (linuxPluginControlNetAdmin) AddrReplace(req pluginControlNetAddrRequest) e
 	if err != nil {
 		return err
 	}
-	current, err := pluginControlNetRetryDump(func() ([]netlink.Addr, error) {
-		return netlink.AddrList(link, netlink.FAMILY_ALL)
-	})
+	current, err := nlretry.AddrList(link, netlink.FAMILY_ALL)
 	if err != nil {
 		return fmt.Errorf("list addresses on %s: %w", strings.TrimSpace(req.Interface), err)
 	}
@@ -1527,13 +1538,18 @@ func pluginControlNetLinkInfoFromLink(link netlink.Link) (pluginControlNetLinkIn
 	if link == nil || link.Attrs() == nil {
 		return pluginControlNetLinkInfo{}, fmt.Errorf("invalid link")
 	}
-	attrs := link.Attrs()
-	addrs, err := pluginControlNetRetryDump(func() ([]netlink.Addr, error) {
-		return netlink.AddrList(link, unix.AF_UNSPEC)
-	})
+	addrs, err := nlretry.AddrList(link, unix.AF_UNSPEC)
 	if err != nil {
 		return pluginControlNetLinkInfo{}, err
 	}
+	return pluginControlNetLinkInfoWith(link, addrs, pluginControlNetLinkNameByIndex), nil
+}
+
+// pluginControlNetLinkInfoWith builds a link's view from its addresses and a
+// lookup of link names by index, so a caller that reads every link dumps the
+// addresses and the names once instead of once per link.
+func pluginControlNetLinkInfoWith(link netlink.Link, addrs []netlink.Addr, linkName func(int) string) pluginControlNetLinkInfo {
+	attrs := link.Attrs()
 	addrTexts := make([]string, 0, len(addrs))
 	for _, addr := range addrs {
 		if addr.IPNet != nil {
@@ -1569,14 +1585,14 @@ func pluginControlNetLinkInfoFromLink(link netlink.Link) (pluginControlNetLinkIn
 		}
 	}
 	if attrs.ParentIndex > 0 {
-		info.Parent = pluginControlNetLinkNameByIndex(attrs.ParentIndex)
+		info.Parent = linkName(attrs.ParentIndex)
 		if link.Type() == "veth" {
 			info.PeerIfIndex = attrs.ParentIndex
 			info.PeerName = info.Parent
 		}
 	}
 	if attrs.MasterIndex > 0 {
-		info.MasterName = pluginControlNetLinkNameByIndex(attrs.MasterIndex)
+		info.MasterName = linkName(attrs.MasterIndex)
 	}
 	switch typed := link.(type) {
 	case *netlink.Tuntap:
@@ -1592,7 +1608,7 @@ func pluginControlNetLinkInfoFromLink(link netlink.Link) (pluginControlNetLinkIn
 	case *netlink.Vrf:
 		info.VRFTable = typed.Table
 	}
-	return info, nil
+	return info
 }
 
 func pluginControlNetRoute(req pluginControlNetRouteRequest) (*netlink.Route, error) {

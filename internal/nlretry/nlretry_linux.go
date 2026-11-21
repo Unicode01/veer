@@ -55,11 +55,6 @@ func LinkByName(name string) (netlink.Link, error) {
 	return Do(func() (netlink.Link, error) { return netlink.LinkByName(name) })
 }
 
-// AddrList is netlink.AddrList, dumped again when interrupted.
-func AddrList(link netlink.Link, family int) ([]netlink.Addr, error) {
-	return Do(func() ([]netlink.Addr, error) { return netlink.AddrList(link, family) })
-}
-
 // RouteList is netlink.RouteList, dumped again when interrupted.
 func RouteList(link netlink.Link, family int) ([]netlink.Route, error) {
 	return Do(func() ([]netlink.Route, error) { return netlink.RouteList(link, family) })

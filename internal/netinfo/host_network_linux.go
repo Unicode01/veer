@@ -28,6 +28,8 @@ func LoadHostNetworkInterfaces() ([]HostNetworkInterface, error) {
 	}
 	defaultIPv4ByIndex := loadHostDefaultRouteLinkIndexes(unix.AF_INET)
 	defaultIPv6ByIndex := loadHostDefaultRouteLinkIndexes(unix.AF_INET6)
+	// One dump for every link's addresses, not one per link.
+	addrsByIndex, addrErr := nlretry.AddrsByLinkIndex(unix.AF_UNSPEC)
 
 	result := make([]HostNetworkInterface, 0, len(links))
 	for _, link := range links {
@@ -48,10 +50,9 @@ func LoadHostNetworkInterfaces() ([]HostNetworkInterface, error) {
 			item.Parent = nameByIndex[attrs.ParentIndex]
 		}
 
-		addrs, err := nlretry.AddrList(link, unix.AF_UNSPEC)
-		if err == nil {
+		if addrErr == nil {
 			seen := make(map[string]struct{})
-			for _, addr := range addrs {
+			for _, addr := range addrsByIndex[attrs.Index] {
 				address, ok := normalizeHostInterfaceAddress(addr.IP, addr.IPNet)
 				if !ok {
 					continue
