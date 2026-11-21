@@ -73,6 +73,11 @@
 .vpn-error .vpn-error-detail { color:var(--veer-muted); font-family: var(--veer-mono); font-size: var(--veer-fs-xs); margin-top:4px; }
 .vpn-card-error { margin:0 0 14px; }
 .vpn-health-line { margin:0 0 16px; }
+.vpn-facts { margin:-8px 0 16px; color:var(--veer-muted); font-size: var(--veer-fs-sm); line-height:1.6; overflow-wrap:anywhere; }
+.vpn-pending { margin:12px 0 0; font-size: var(--veer-fs-sm); color:var(--veer-warn); }
+.vpn-more-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+.vpn-detail-body .vpn-section-title { margin-top:18px; }
+.vpn-detail-facts { margin-top:0; }
 .vpn-health-result { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:8px 0; }
 .vpn-health-time { font-size: var(--veer-fs-sm); color:var(--veer-muted); }
 .vpn-health-message { flex-basis:100%; font-size: var(--veer-fs-sm); color:var(--veer-danger); overflow-wrap:anywhere; }

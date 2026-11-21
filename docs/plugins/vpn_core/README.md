@@ -24,6 +24,8 @@ WireGuard 地址须来自实际连接配置，页面不虚构默认地址。代�
 
 0.10.0 起插件报错带稳定的原因码，例如 `[ownership_missing] Recorded ownership is missing; leftover: veerwg1`。WebUI 按原因码显示中英文说明和处理办法，原始英文信息作为补充显示；未知错误照常显示原文。出错时 `status` 记录保留 `error_code`、驱动、接口、WAN ID 和首次失败时间 `failed_at`，巡检重复失败不刷新这个时间。残留的接口或 WAN 记录会逐个列出名字；`ip` 命令失败时附带其第一行报错，形似密钥的内容替换为 `[redacted]`，`wg` 和 `nft` 的报错可能引用密钥，仍不显示。代理核心重启次数用完时 `status` 为 `failed`、`error_code` 为 `core_exited`，附带退出码和启动次数；核心输出仍只在“核心日志”中查看。
 
+出口卡片显示运行信息：WireGuard 显示对端和最近握手，代理出口显示上次应用的节点和核心运行时长，所有出口显示隧道收发字节和数据路径（是否保留 GSO、veth 或单口边界、eBPF 或内核扩展）。页面打开时每 15 秒读取一次 `inspect`，只原地更新这些数值，不重建卡片。“详情”列出各对端的 endpoint、最近握手和收发字节；`inspect` 返回结构化的 `peers`、`traffic`、`process`、`node`，不再返回 `wg show` 的原始文本，也从不执行会输出私钥的 `wg show dump`。应用时记录资源修订号 `profile_revision`，草稿保存后尚未应用的出口在卡片上提示“有未应用的修改”并提供“应用”；拆除、删除和核心日志收在“更多”中。
+
 ## 链路健康检测（0.8.0）
 
 出口卡片提供一个“健康检测”按钮，点击后直接在卡片上显示检测中、结果、请求耗时、检测时间及失败原因，不打开独立面板。默认仅手动检测；内网目标、预期状态、DNS 及可选定时检测通过下方 API 设置，不重新应用出口。
@@ -140,6 +142,7 @@ sudo env "PATH=$PATH" sh scripts/verify-vpn-cores.sh
 同一测试门禁还运行 `TestVPNMultiExitLinuxIntegration`：一个 Veer 同时承载 WG、Mihomo、sing-box 和普通 WAN，各用独立上联。逐出口注入双向 TC 映射丢失/损坏、隧道 DOWN/MTU 漂移、删除/同名外部接口替换、WAN 边界删除、上联 DOWN/重建、核心退出、清理所有权冲突和拆除后重新应用。故障出口恢复后检查实际 TCP/UDP 收发；其余三个出口始终使用原 TCP/UDP socket，逐包核对序号、内容和后端观察到的出口源地址，同时核对核心 PID、边界接口代际及最终资源清理。只在独立测试网络命名空间注入故障。
 
 ## WireGuard 驱动
+
 
 显式安装的 `lab` 插件，不进入默认发布包，也不自动安装 WireGuard。一个 profile 提供一个 WAN，LAN 或下游设备通过现有 Veer 出向 NAT 选择它。
 

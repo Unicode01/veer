@@ -19,7 +19,7 @@ function fixture(config = profile(), options = {}) {
       if(options.legacyNetInfo) return {name,kind:l.linkinfo?.info_kind};
       return {name,ifindex:l.ifindex,alias:l.ifalias||'',kind:l.linkinfo?.info_kind,
         mtu:l.mtu,mac:l.address,up:(l.flags||[]).includes('UP'),peer_ifindex:l.link_index,
-        peer_name:l.link,addresses:l.addresses || [],tun_vnet_hdr:options.vnetHeader===true};
+        peer_name:l.link,addresses:l.addresses || [],tun_vnet_hdr:options.vnetHeader===true,statistics:l.statistics};
     },
     'net.link.getOffloads': () => options.offloads || {},
     'process.binaryStatus': id => ({id, versions:[]}),
@@ -927,3 +927,33 @@ test('VPN reports an exhausted core with supervisor facts only',()=>{
 });
 
 
+test('VPN inspect reports WG peers, tunnel traffic and the boundary without the private key',()=>{
+  const h=fixture(profile(),{adapters:{}});h.apply();
+  const link=h.state.links.find(l=>l.ifname==='vwgdefault');link.statistics={rx_bytes:2048,tx_bytes:1024,rx_packets:4,tx_packets:2};
+  const view=h.host.action('inspect',{});
+  assert.equal(view.phase,'configured');assert.equal(view.driver,'wireguard');assert.equal(view.boundary_gso,true);
+  assert.equal(view.handoff_mode,'segmented_veth');assert.equal(view.dataplane,'bpf');
+  assert.deepEqual(view.traffic,{rx_bytes:2048,tx_bytes:1024,rx_packets:4,tx_packets:2});
+  // Configured peers come first, kernel-only ones after.
+  assert.deepEqual(view.peers.map(p=>p.public_key),[PUBLIC,'peer']);
+  assert.deepEqual(view.peers[1],{public_key:'peer',endpoint:'123',latest_handshake:123,rx_bytes:123,tx_bytes:0});
+  assert.equal(JSON.stringify(view).includes(PRIVATE),false);
+  assert.ok(!h.state.calls.some(r=>r.args.includes('dump')));
+});
+
+test('VPN status records the applied profile revision and proxy node for the page',()=>{
+  const h=vpnFixture('mihomo');
+  const source='ss://'+Buffer.from('aes-128-gcm:import-secret').toString('base64url')+'@192.0.2.2:8388#first\ntrojan://another-secret@node.example:443?sni=example.com#second';
+  h.host.action('set_core_config',{format:'links',driver:'mihomo',value:source,selected:1});
+  const record=h.host.state.resources.get('profiles').get('default');
+  h.apply();
+  let status=h.host.state.resources.get('status').get('default').data;
+  assert.equal(status.profile_revision,record.revision||1);assert.deepEqual(status.node,{name:'second',type:'trojan'});
+  assert.equal(status.boundary_gso,false);assert.equal(JSON.stringify(status).includes('another-secret'),false);
+  assert.deepEqual(h.host.action('inspect',{}).node,{name:'second',type:'trojan'});
+  // Recovery keeps the facts of the last explicit apply.
+  h.host.reconcile();h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
+  status=h.host.state.resources.get('status').get('default').data;
+  assert.deepEqual(status.node,{name:'second',type:'trojan'});
+  h.host.action('teardown',{});assert.equal(h.host.snapshot().kv.applied_default,undefined);
+});

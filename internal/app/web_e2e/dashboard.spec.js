@@ -219,6 +219,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   const profile = {slot:2, addresses:['10.77.0.1/32'], peers:[{public_key:Buffer.alloc(32,2).toString('base64'), allowed_ips:['0.0.0.0/0']}],
     remote_routes:[]};
   const records = {saved:{key:'saved', data:profile, enabled:true}};
+  let savedApplied=true;
   const actions = [];
   const coreConfigs = {};
   const methods = ['list','get','create','update'];
@@ -242,7 +243,9 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
       if (!['index.html','app.js','i18n.js','model.js','share.js','style.css'].includes(asset)) return route.fulfill({status:404});
       return route.fulfill({contentType:asset.endsWith('.css')?'text/css':asset.endsWith('.js')?'application/javascript':'text/html; charset=utf-8', body:fs.readFileSync(path.resolve(__dirname, '../../../plugins/vpn_core/ui',asset), 'utf8')});
     }
-    if (endpoint === 'resources/status') return route.fulfill({json:{records:[]}});
+    // The saved outlet is applied: its card shows runtime facts and offers a health check.
+    if (endpoint === 'resources/status') return route.fulfill({json:{records:records.saved && savedApplied?[{key:'saved', data:{phase:'applied', interface:'vwgsaved',
+      local_interface:'veerwg2', wan_id:'wg_saved', handoff_mode:'segmented_veth', dataplane:'bpf', boundary_gso:true, profile_revision:1}}]:[]}});
     if (endpoint === 'resources/profiles' && route.request().method() === 'GET') return route.fulfill({json:{records:Object.values(records)}});
     if (endpoint.startsWith('resources/profiles/')) {
       const key = endpoint.split('/').pop();
@@ -253,6 +256,10 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
       const id=endpoint.split('/').pop();
       const payload=route.request().postDataJSON().payload;
       if(id==='delete_profile') {actions.push({id,payload});delete records[payload.key];delete healthValues[payload.key];return route.fulfill({json:{result:{phase:'deleted'}}});}
+      // Runtime facts are read-only: they do not count as page actions.
+      if(id==='inspect') return route.fulfill({json:{result:payload.key==='saved'?{phase:'configured', driver:'wireguard', interface:'vwgsaved', local_interface:'veerwg2',
+        wan_id:'wg_saved', handoff_mode:'segmented_veth', dataplane:'bpf', boundary_gso:true, traffic:{rx_bytes:3221225472, tx_bytes:1048576, rx_packets:1, tx_packets:1},
+        public_key:profile.peers[0].public_key, peers:[{public_key:profile.peers[0].public_key, endpoint:'192.0.2.7:51820', latest_handshake:Math.floor(Date.now()/1000)-30, rx_bytes:3221225472, tx_bytes:1048576}]}:{phase:'down'}}});
       if(healthActions.includes(id)) {
         Object.keys(records).forEach(key=>{healthValues[key] ||= {key,settings:{...healthDefaults},state:'unknown',result:null};});
         if(id==='health_status') {
@@ -305,6 +312,18 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expect(page.locator('#tab-plugin-vpn h1')).toHaveText('VPN');
   await expect(frame.locator('h1')).toHaveCount(0);
   await expect(frame.locator('.vpn-outlet')).toHaveCount(1);
+  // The card reads runtime facts, not just the saved draft.
+  await expect(frame.locator('.vpn-outlet')).toContainText('发送 1.0 MiB · 接收 3.0 GiB');
+  await expect(frame.locator('.vpn-outlet')).toContainText(/\d+秒钟前/);
+  await frame.getByRole('button',{name:'详情',exact:true}).click();
+  await expect(frame.locator('.vpn-details')).toContainText('192.0.2.7:51820');
+  await expect(frame.locator('.vpn-details pre')).toBeHidden();
+  await frame.getByRole('button',{name:'收起详情',exact:true}).click();
+  // Teardown and delete wait behind More.
+  await expect(frame.getByRole('button',{name:'拆除',exact:true})).toBeHidden();
+  await frame.getByRole('button',{name:'更多',exact:true}).click();
+  await expect(frame.getByRole('button',{name:'拆除',exact:true})).toBeVisible();
+  await frame.getByRole('button',{name:'更多',exact:true}).click();
   await page.evaluate(() => window.VeerApp.setTheme('dark'));
   await expect(frame.locator('html')).toHaveAttribute('data-theme', 'dark');
   await expect(frame.locator('.vpn-health')).toHaveCount(0);
@@ -324,6 +343,8 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expectReadableThemes(page, frame.locator('body'));
   await page.screenshot({path:testInfo.outputPath('vpn-health.png'),fullPage:true});
   await expect(frame.getByLabel('代理核心 JSON 配置')).toHaveCount(0);
+  // From here on the outlet is torn down, so the editor may switch its type.
+  savedApplied=false;
   await frame.getByRole('button', {name:'编辑', exact:true}).click();
   await expect(frame.getByLabel('本机 WireGuard 地址', {exact:true})).toHaveValue('10.77.0.1/32');
   await expect(frame.getByLabel('实际出站接口', {exact:true})).toHaveCount(0);
@@ -484,6 +505,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expectReadableThemes(page, frame.locator('body'));
   await page.screenshot({path:testInfo.outputPath('vpn-external-tun-form.png'),fullPage:true});
   const card=frame.locator('.vpn-outlet').filter({has:frame.getByRole('heading',{name:'vpn1',exact:true})});
+  await card.getByRole('button',{name:'更多',exact:true}).click();
   await card.getByRole('button',{name:'删除',exact:true}).click();
   await expect(page.locator('#confirmMessage')).toContainText('共用的核心程序会保留');
   await page.locator('#confirmCancelBtn').click();

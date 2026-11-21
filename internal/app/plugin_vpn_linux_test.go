@@ -698,7 +698,23 @@ func runVPNWireGuardTopology(t *testing.T) {
 		}
 		routesBefore := ip("-j", "route", "show", "table", "all")
 		interfacesBefore := ip("-o", "link", "show")
-		coreBefore := api("POST", "/api/plugins/vpn_core/actions/inspect", map[string]any{"payload": map[string]any{"key": "default"}})
+		// Traffic counters move with every probe: the core generation is its
+		// process and TUN, not the whole inspect view.
+		coreGeneration := func() string {
+			var view struct {
+				Result struct {
+					Phase     string          `json:"phase"`
+					Interface string          `json:"interface"`
+					Process   json.RawMessage `json:"process"`
+				} `json:"result"`
+			}
+			body := api("POST", "/api/plugins/vpn_core/actions/inspect", map[string]any{"payload": map[string]any{"key": "default"}})
+			if err := json.Unmarshal(body, &view); err != nil {
+				t.Fatalf("inspect: %v: %s", err, body)
+			}
+			return view.Result.Phase + " " + view.Result.Interface + " " + string(view.Result.Process)
+		}
+		coreBefore := coreGeneration()
 		probeHealth("/", "healthy", "")
 		seen, err := os.ReadFile(observed)
 		if err != nil || strings.TrimSpace(string(seen)) != selectedSource {
@@ -813,8 +829,7 @@ func runVPNWireGuardTopology(t *testing.T) {
 			t.Fatal("health checks mutated host routes or interface topology")
 		}
 		if driver != "" {
-			coreAfter := api("POST", "/api/plugins/vpn_core/actions/inspect", map[string]any{"payload": map[string]any{"key": "default"}})
-			if !bytes.Equal(coreBefore, coreAfter) {
+			if coreAfter := coreGeneration(); coreBefore != coreAfter {
 				t.Fatalf("health failure changed the core generation: %s -> %s", coreBefore, coreAfter)
 			}
 			// Local readiness cannot detect a wrong proxy password. The actual

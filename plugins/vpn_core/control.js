@@ -133,7 +133,7 @@ exports.onAction = function (ctx) {
   if (ctx.action.id === 'apply') {
     var record = resources.get('profiles', key);
     if (!record || record.enabled === false) throw fail('profile_not_saved', 'Save and enable the profile first');
-    return apply(key, record.data, true);
+    return apply(key, record.data, true, record.revision);
   }
   throw new Error('Unsupported action');
 };
@@ -393,10 +393,40 @@ function installMaps(p, tunnel, boundary, old) {
   ebpf.mapTransaction({operations: ops.concat(mapEntries(p, tunnel, boundary))});
 }
 function isLegacy(lease) { return !!(lease && lease.plan && lease.plan.bindings); }
-function apply(key, raw, explicit) {
+function apply(key, raw, explicit, revision) {
   if (explicit) health.invalidate(key);
   var before = changing; changing = true;
-  try { return raw && raw.driver && raw.driver !== 'wireguard' ? applyTUNProfile(key, raw, explicit === true) : applyProfile(key, raw, explicit === true); } finally { changing = before; }
+  try {
+    var result = raw && raw.driver && raw.driver !== 'wireguard' ? applyTUNProfile(key, raw, explicit === true) : applyProfile(key, raw, explicit === true);
+    if (explicit) recordApplied(key, raw, revision);
+    annotateStatus(key);
+    return result;
+  } finally { changing = before; }
+}
+// What the page compares with the draft: the profile revision and, for
+// generated proxy configs, the node of the last explicit apply. Kept outside
+// the lease, which the drivers rewrite as a whole.
+function recordApplied(key, raw, revision) {
+  var applied = {profile_revision: typeof revision === 'number' ? revision : 0, node: null};
+  if (raw && (raw.driver === 'mihomo' || raw.driver === 'sing_box')) {
+    try {
+      var saved = JSON.parse(secret.get(raw.config_secret || 'core_' + key) || 'null');
+      if (saved && saved.veer_proxy === 1) {
+        var form = shares.metadata(saved), node = (form.nodes || [])[form.selected || 0];
+        if (node) applied.node = {name: String(node.name || ''), type: String(node.type || '')};
+      }
+    } catch (_) { /* A native or unreadable config has no node summary. */ }
+  }
+  kv.set('applied_' + key, applied);
+}
+function annotateStatus(key) {
+  var status = resources.get('status', key), applied = kv.get('applied_' + key);
+  applied = applied && applied.data;
+  if (!status || !status.data || !applied) return;
+  var data = status.data;
+  if (data.profile_revision === applied.profile_revision && JSON.stringify(data.node || null) === JSON.stringify(applied.node || null)) return;
+  data.profile_revision = applied.profile_revision; data.node = applied.node || null;
+  resources.set('status', key, data, status.enabled !== false);
 }
 function applyProfile(key, raw, explicit) {
   var p = normalize(key, raw), old = allLeases()[key];
@@ -443,7 +473,7 @@ function applyProfile(key, raw, explicit) {
       local_ifindex: boundary.local.ifindex, pipeline_ifindex: boundary.peer.ifindex});
     var result = {phase: 'applied', interface: p.interface, wan_id: p.wan_id, local_interface: p.local,
       pipeline_interface: wanPipeline(p), handoff_mode: p.handoff_mode, egress_nat_interface: p.local, egress_nat_source_ip: wanPayload(p, true).ipv4,
-      egress_nat_redirect_mode: 'prepared_l2', tc_ready: true, mtu: p.mtu, dataplane: KFUNCS ? 'kfuncs' : 'bpf'};
+      egress_nat_redirect_mode: 'prepared_l2', tc_ready: true, mtu: p.mtu, dataplane: KFUNCS ? 'kfuncs' : 'bpf', boundary_gso: true};
     resources.set('status', key, result, true); armRepair(); return result;
   } catch (e) {
     try {
@@ -510,21 +540,48 @@ function teardownProfile(key) {
       if (wanRecord('status', p).data.phase !== 'deleted') throw fail('wan_cleanup_incomplete', 'WAN cleanup incomplete; retry teardown');
     }
   }
-  kv.delete('lease_' + key);
+  kv.delete('lease_' + key); kv.delete('applied_' + key);
   resources.set('status', key, {phase: 'down'}, false); armRepair();
 }
 function inspect(key) {
   var lease = allLeases()[key]; if (!lease) return {phase: 'down'};
-  var p = lease.plan;
+  var p = lease.plan, applied = kv.get('applied_' + key);
+  var base = {driver: p.driver || 'wireguard', interface: p.interface, wan_id: p.wan_id, local_interface: p.local,
+    handoff_mode: p.handoff_mode || 'segmented_veth', dataplane: KFUNCS ? 'kfuncs' : 'bpf', traffic: traffic(p.interface)};
   if (p.driver && p.driver !== 'wireguard') {
     var status = resources.get('status', key);
-    return {phase: status && status.data ? status.data.phase : 'missing', driver: p.driver,
-      process: p.driver === 'tun' ? null : process.status('vpn_' + key), interface: p.interface, wan_id: p.wan_id, tun_gso: p.tun_gso === true};
+    base.phase = status && status.data ? status.data.phase : 'missing';
+    base.process = p.driver === 'tun' ? null : processSummary(process.status('vpn_' + key));
+    base.tun_gso = p.tun_gso === true; base.boundary_gso = p.tun_gso === true;
+    base.node = applied && applied.data ? applied.data.node || null : null;
+    return base;
   }
-  if (!ownedLink(p)) return {phase: 'missing', interface: p.interface};
-  return {phase: 'configured', interface: p.interface, wan_id: p.wan_id, local_interface: p.local,
-    public_key: command(WG, ['show', p.interface, 'public-key']).trim(), endpoints: command(WG, ['show', p.interface, 'endpoints']).trim(),
-    latest_handshakes: command(WG, ['show', p.interface, 'latest-handshakes']).trim(), transfer: command(WG, ['show', p.interface, 'transfer']).trim()};
+  if (!ownedLink(p)) { base.phase = 'missing'; return base; }
+  base.phase = 'configured'; base.boundary_gso = true;
+  base.public_key = command(WG, ['show', p.interface, 'public-key']).trim();
+  base.peers = wgPeers(p);
+  return base;
+}
+function traffic(name) {
+  // Tunnel counters: the boundary's own may skip redirected packets.
+  try {
+    var stats = net.link.get(name).statistics;
+    return stats ? {rx_bytes: stats.rx_bytes, tx_bytes: stats.tx_bytes, rx_packets: stats.rx_packets, tx_packets: stats.tx_packets} : null;
+  } catch (_) { return null; }
+}
+function wgPeers(p) {
+  // Never `wg show dump`: its first line carries the private key.
+  var peers = {};
+  function rows(field) {
+    return command(WG, ['show', p.interface, field]).split('\n').map(function (line) { return line.split('\t'); }).filter(function (cols) { return cols[0]; });
+  }
+  function peer(publicKey) { return peers[publicKey] || (peers[publicKey] = {public_key: publicKey, endpoint: '', latest_handshake: 0, rx_bytes: 0, tx_bytes: 0}); }
+  rows('endpoints').forEach(function (c) { peer(c[0]).endpoint = c[1] && c[1] !== '(none)' ? c[1] : ''; });
+  rows('latest-handshakes').forEach(function (c) { peer(c[0]).latest_handshake = Number(c[1]) || 0; });
+  rows('transfer').forEach(function (c) { var v = peer(c[0]); v.rx_bytes = Number(c[1]) || 0; v.tx_bytes = Number(c[2]) || 0; });
+  // Configured order first; a peer only the kernel knows still shows.
+  var ordered = p.peers.map(function (configured) { var v = peer(configured.public_key); delete peers[configured.public_key]; return v; });
+  return ordered.concat(Object.keys(peers).map(function (k) { return peers[k]; }));
 }
 exports.onHealthProbe = function (ctx) { health.run(ctx.payload || {}); };
 function healthPath(key, workerRead) {
@@ -949,7 +1006,7 @@ function applyTUNProfile(key, raw, explicit) {
     var result = {phase: 'applied', driver: p.driver, interface: p.interface, wan_id: p.wan_id,
       local_interface: p.local, pipeline_interface: wanPipeline(p), handoff_mode: p.handoff_mode, egress_nat_interface: p.local, wan_addresses: p.addresses,
       egress_nat_source_ip: wanPayload(p, true).ipv4, egress_nat_redirect_mode: 'prepared_l2', tc_ready: true,
-      process: proc, dataplane: KFUNCS ? 'kfuncs' : 'bpf', tun_gso: p.tun_gso};
+      process: proc && processSummary(proc), dataplane: KFUNCS ? 'kfuncs' : 'bpf', tun_gso: p.tun_gso, boundary_gso: p.tun_gso === true};
     resources.set('status', key, result, true); armRepair(); return result;
   } catch (e) {
     try { suspendTUN(p, lease); } catch (cleanup) { log.error('VPN suspension failed'); }
@@ -983,7 +1040,7 @@ function teardownTUN(key, lease) {
     wanCall('teardown', wanPayload(p, false));
     if (wanRecord('status', p).data.phase !== 'deleted') throw fail('wan_cleanup_incomplete', 'WAN cleanup incomplete; retry teardown');
   }
-  kv.delete('lease_' + key); secret.delete('active_' + key);
+  kv.delete('lease_' + key); kv.delete('applied_' + key); secret.delete('active_' + key);
   resources.set('status', key, {phase: 'down', driver: p.driver}, false); armRepair();
 }
 

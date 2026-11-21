@@ -6,7 +6,9 @@
   let records=[], statuses={}, busy=false, original={}, currentDriver='wireguard', savedDriver='', editing=false;
   let peers=[], dirty=false, rawDirty=false, coreDriver='mihomo', coreSequence=0, corePoll=null, statusPoll=null;
   let storedMode='empty', nodeNames=[];
-  let healthStates={}, healthPoll=null, coreStatus=null;
+  let healthStates={}, healthPoll=null, coreStatus=null, runtime={}, runtimePoll=null, detailKey='';
+  // Per-card runtime cells, updated in place so a poll never rebuilds buttons under the pointer.
+  const slots=new Map(), expanded=new Set();
   // Locale: text built once is bound to its message (L) and refreshed when the host locale
   // changes; render functions pass translated strings (T) and are simply rerun.
   const T=(key,params) => I.t(key,params), L=(key,params) => () => T(key,params);
@@ -300,9 +302,9 @@
     h('div',{className:'vpn-savebar'},[node('span','vpn-field-help',L('editor.saveHint')),actions([button(L('editor.saveDraft'),()=>save(false),true),button(L('editor.saveApply'),()=>save(true))])])
   );
   editor.addEventListener('input',()=>{dirty=true;});
-  const detailPanel=h('section',{className:'vpn-panel vpn-details',attrs:{hidden:true}}), detailOutput=h('pre',{className:'vpn-raw'});
+  const detailPanel=h('section',{className:'vpn-panel vpn-details',attrs:{hidden:true}}), detailOutput=h('pre',{className:'vpn-raw'}), detailBody=h('div',{className:'vpn-detail-body'});
   const detailTitle=setMessage(h('h2'),'details.title');
-  detailPanel.append(h('div',{className:'vpn-heading'},[detailTitle,button(L('details.close'),async()=>{detailPanel.hidden=true;detailOutput.textContent='';},true)]),detailOutput);
+  detailPanel.append(h('div',{className:'vpn-heading'},[detailTitle,button(L('details.close'),async()=>{detailPanel.hidden=true;detailKey='';detailOutput.textContent='';detailBody.replaceChildren();},true)]),detailBody,detailOutput);
   const healthPhases={unknown:['health.unknown',''],checking:['health.checking',''],healthy:['health.healthy','ready'],unhealthy:['health.unhealthy','error'],stale:['health.stale',''],unavailable:['health.unavailable','']};
   // Results carry a reason code; the runtime's own text is the fallback for unknown reasons.
   function healthMessage(result) {
@@ -322,7 +324,7 @@
     clearTimeout(healthPoll);
     const response=await F.action('health_status',{});
     healthStates={};((response.result || {}).items || []).forEach(value=>{healthStates[value.key]=value;});
-    renderList();
+    records.forEach(r=>fillHealth(r.key));
     const values=Object.values(healthStates), checking=values.some(v=>v.state==='checking');
     if(checking || values.some(v=>v.settings.enabled))healthPoll=setTimeout(()=>refreshHealth().catch(notifyError),checking?1000:5000);
     F.requestResize();
@@ -334,48 +336,171 @@
     return info;
   }
   const phases={applied:['phase.ready','ready'],configured:['phase.ready','ready'],starting:['phase.starting',''],failed:['phase.failed','error'],error:['phase.error','error'],down:['phase.stopped',''],deleted:['phase.stopped','']};
+  // Runtime facts come from inspect: counters, handshakes and the core process.
+  function bytes(value) {
+    const n=Number(value) || 0, units=['B','KiB','MiB','GiB','TiB'];
+    let i=0, v=n;
+    while (v>=1024 && i<units.length-1) {v/=1024;i++;}
+    return (i?v.toFixed(1):String(v))+' '+units[i];
+  }
+  function ago(ms) {
+    const seconds=Math.round((Date.now()-ms)/1000), format=new Intl.RelativeTimeFormat(I.locale(),{numeric:'auto'});
+    if (seconds<60) return format.format(-Math.max(seconds,0),'second');
+    if (seconds<3600) return format.format(-Math.round(seconds/60),'minute');
+    if (seconds<86400) return format.format(-Math.round(seconds/3600),'hour');
+    return format.format(-Math.round(seconds/86400),'day');
+  }
+  function when(ms) {
+    if (!ms) return node('span','',T('list.never'));
+    return h('time',{attrs:{datetime:new Date(ms).toISOString(),title:new Date(ms).toLocaleString(I.locale())},text:ago(ms)});
+  }
+  function mono(text) { return h('span',{className:F.classes.mono,text:text == null || text === '' ? '—' : String(text)}); }
+  function handshake(view) {
+    const times=(view && view.peers || []).map(p=>p.latest_handshake).filter(Boolean);
+    return times.length?Math.max(...times)*1000:0;
+  }
+  function pathText(view) {
+    return [T(view.boundary_gso?'list.gsoOn':'list.gsoOff'),T(view.handoff_mode==='direct'?'list.boundaryDirect':'list.boundaryVeth'),T(view.dataplane==='kfuncs'?'list.dataplaneKfuncs':'list.dataplaneBpf')].join(' · ');
+  }
+  function coreText(proc) {
+    if (!proc) return '—';
+    const state=T(['running','starting','restarting','stopped','exited','failed'].includes(proc.state)?'process.'+proc.state:'process.unknown');
+    return proc.state==='running' && proc.started_at?T('list.coreSince',{state,since:ago(proc.started_at)}):state;
+  }
+  function pending(record,status) {
+    // Status carries the profile revision of the last explicit apply.
+    return !!(status.profile_revision && record.revision && record.revision>status.profile_revision);
+  }
+  function factsText(view,profile) {
+    if (!view || !view.driver) return '';
+    const parts=[];
+    if (view.traffic) parts.push(T('list.traffic',{tx:bytes(view.traffic.tx_bytes),rx:bytes(view.traffic.rx_bytes)}));
+    if (['mihomo','sing_box'].includes(profile.driver)) parts.push(coreText(view.process));
+    parts.push(pathText(view));
+    return parts.join(' · ');
+  }
+  function fillHealth(key) {
+    const slot=slots.get(key), value=healthStates[key];
+    if (!slot) return;
+    const shown=!!value && !['unknown','unavailable'].includes(value.state);
+    slot.health.hidden=!shown;slot.health.replaceChildren(...(shown?[healthSummary(key)]:[]));
+  }
+  function fillRuntime(key) {
+    const slot=slots.get(key), record=records.find(r=>r.key===key);
+    if (!slot || !record) return;
+    const view=runtime[key], text=factsText(view,record.data);
+    slot.facts.textContent=text;slot.facts.hidden=!text;
+    if (slot.handshake) slot.handshake.replaceChildren(view && view.peers?when(handshake(view)):node('span','','—'));
+    if (slot.path) slot.path.textContent=view && view.driver?pathText(view):'—';
+  }
+  async function refreshRuntime() {
+    clearTimeout(runtimePoll);
+    const live=records.filter(r=>{const s=statuses[r.key];return s && ['applied','configured','starting','failed','error'].includes(s.phase);});
+    const views=await Promise.all(live.map(r=>F.action('inspect',{key:r.key}).then(v=>[r.key,v.result || v]).catch(()=>[r.key,null])));
+    runtime={};views.forEach(([key,view])=>{if(view)runtime[key]=view;});
+    records.forEach(r=>fillRuntime(r.key));F.requestResize();
+    if (detailKey && runtime[detailKey]) renderDetails(detailKey);
+    // Counters and handshakes age: refresh while the page is open.
+    if (live.length) scheduleRuntime();
+  }
+  function scheduleRuntime() {
+    clearTimeout(runtimePoll);
+    // A background poll stays quiet on failure; the next one or a reload reports it.
+    runtimePoll=setTimeout(()=>{if(document.hidden)scheduleRuntime();else refreshRuntime().catch(()=>scheduleRuntime());},15000);
+  }
+  function detailRows(rows) {
+    return h('dl',{className:'vpn-metadata vpn-detail-facts'},rows.map(pair=>h('div',{},[node('dt','',pair[0]),h('dd',{},[pair[1] instanceof Node?pair[1]:mono(pair[1])])])));
+  }
+  function renderDetails(key) {
+    const view=runtime[key] || {}, status=statuses[key] || {}, wg=view.driver==='wireguard';
+    const rows=[[T('details.tunnel'),view.interface],[T('list.interface'),view.local_interface],[T('details.wanID'),view.wan_id],[T('details.path'),node('span','',view.driver?pathText(view):'—')]];
+    if (view.traffic) rows.push([T('details.traffic'),node('span','',T('list.traffic',{tx:bytes(view.traffic.tx_bytes),rx:bytes(view.traffic.rx_bytes)}))]);
+    if (wg) rows.push([T('details.publicKey'),view.public_key]);
+    if (view.process) rows.push([T('details.core'),node('span','',coreText(view.process))],[T('details.pid'),view.process.pid || '—'],[T('details.starts'),String(view.process.starts || 0)]);
+    if (view.node) rows.push([T('list.node'),view.node.name+' · '+view.node.type]);
+    if (status.egress_nat_source_ip) rows.push([T('details.natSource'),status.egress_nat_source_ip]);
+    const parts=[detailRows(rows)];
+    if (wg && (view.peers || []).length) {
+      // The host table takes text; mark the address-like columns and give times their absolute value.
+      const table=F.table([T('details.peer'),T('peer.endpoint'),T('list.handshake'),T('details.received'),T('details.sent')],
+        view.peers.map(p=>[p.public_key.slice(0,10)+'…',p.endpoint,p.latest_handshake?ago(p.latest_handshake*1000):T('list.never'),bytes(p.rx_bytes),bytes(p.tx_bytes)]));
+      table.querySelectorAll('tbody tr').forEach((row,i)=>{
+        [0,1,3,4].forEach(c=>row.cells[c].classList.add(F.classes.mono));
+        row.cells[0].title=view.peers[i].public_key;
+        if (view.peers[i].latest_handshake) row.cells[2].title=new Date(view.peers[i].latest_handshake*1000).toLocaleString(I.locale());
+      });
+      parts.push(node('h3','vpn-section-title',T('details.peers')),table);
+    }
+    detailBody.replaceChildren(...parts);
+  }
   async function showDetails(key,logs) {
     const value=await F.action(logs?'core_logs':'inspect',{key});
     setMessage(detailTitle,logs?'details.logs':'details.runtime',{key});
-    detailOutput.textContent=JSON.stringify(value.result || value,null,2);detailPanel.hidden=false;
+    if (logs) {detailKey='';detailBody.replaceChildren();detailOutput.hidden=false;detailOutput.textContent=JSON.stringify(value.result || value,null,2);}
+    else {detailKey=key;runtime[key]=value.result || value;detailOutput.hidden=true;detailOutput.textContent='';renderDetails(key);}
+    detailPanel.hidden=false;
     detailPanel.scrollIntoView({block:'nearest',behavior:'smooth'});
   }
+  async function applyOutlet(key) {
+    say('save.applying');
+    const response=await F.action('apply',{key});
+    say((response && response.result || {}).phase==='starting'?'save.starting':'save.applied');
+    await reload();
+  }
   function renderList() {
-    count.textContent=String(records.length);list.replaceChildren();list.className=records.length?'vpn-list':'';list.hidden=!records.length && !editor.hidden;
+    count.textContent=String(records.length);list.replaceChildren();slots.clear();list.className=records.length?'vpn-list':'';list.hidden=!records.length && !editor.hidden;
     if (!records.length) {list.appendChild(h('div',{className:'vpn-empty'},[
       node('div','vpn-icon','↗'),node('h2','',T('list.emptyTitle')),node('p','',T('list.emptyBody')),button(T('list.create'),()=>openEditor(),true)
     ]));return;}
     records.forEach(record=>{
       const profile=record.data, driver=M.drivers[profile.driver || 'wireguard'] || {name:profile.driver,short:'?'}, status=statuses[record.key] || {};
       const phase=phases[status.phase] || ['phase.notApplied',''], name=status.local_interface || (profile.driver && profile.driver!=='wireguard'?'veervpn':'veerwg')+profile.slot;
-      const metadata=h('dl',{className:'vpn-metadata'});
-      const wg=!profile.driver || profile.driver==='wireguard';
+      const view=runtime[record.key], wg=!profile.driver || profile.driver==='wireguard', proxy=['mihomo','sing_box'].includes(profile.driver);
       const addresses=profile.addresses && profile.addresses.length?profile.addresses:status.wan_addresses || [];
-      [[T('list.interface'),name],[T(wg?'field.wgAddress':'field.wanAddress'),addresses.join(', ') || T(wg?'list.notConfigured':'list.assignedOnApply')],
-        [T(wg?'list.peerRouting':profile.driver==='tun'?'list.tunInterface':'field.upstream'),wg?T('list.hostRoutes'):profile.driver==='tun'?profile.tun_interface:profile.upstream_interface],
-        [T('list.attach'),T('list.attachValue')]].forEach(pair=>metadata.append(h('div',{},[node('dt','',pair[0]),node('dd','',pair[1])])));
+      const peers=profile.peers || [], endpoints=peers.map(p=>p.endpoint).filter(Boolean);
+      const rows=[[T('list.interface'),mono(name)],[T(wg?'field.wgAddress':'field.wanAddress'),addresses.length?mono(addresses.join(', ')):node('span','',T(wg?'list.notConfigured':'list.assignedOnApply'))]];
+      if (wg) rows.push([T('list.peers'),endpoints.length===1 && peers.length===1?mono(endpoints[0]):node('span','',T('list.peerCount',{count:peers.length}))],
+        [T('list.handshake'),h('span',{})]);
+      else if (proxy) rows.push([T('field.upstream'),mono(profile.upstream_interface)],[T('list.node'),node('span','',status.node?status.node.name+' · '+status.node.type:status.profile_revision?T('list.nativeConfig'):'—')]);
+      else rows.push([T('list.tunInterface'),mono(profile.tun_interface)],[T('details.path'),h('span',{})]);
+      const metadata=h('dl',{className:'vpn-metadata'},rows.map(pair=>h('div',{},[node('dt','',pair[0]),h('dd',{},[pair[1]])])));
+      const slot={facts:h('p',{className:'vpn-facts'}),health:h('div',{className:'vpn-health-line'}),handshake:wg?rows[3][1]:null,path:!wg && !proxy?rows[3][1]:null};
+      const stale=pending(record,status), applied=['applied','configured','starting'].includes(status.phase);
+      const remove=button(T('list.delete'),async()=>{
+        if (!await F.confirm({title:T('confirm.delete.title',{key:record.key}),message:T('confirm.delete.message'),confirmText:T('list.delete'),cancelText:T('action.cancel'),danger:true}))return;
+        await F.action('delete_profile',{key:record.key});
+        if(editing && keyInput.value===record.key) {editor.hidden=true;editing=false;dirty=false;original={};}
+        detailPanel.hidden=true;detailKey='';await reload();say('list.deleted',{key:record.key});
+      },true);
+      const teardown=applied || status.phase==='error' || status.phase==='failed'?button(T('list.teardown'),async()=>{
+        if (!await F.confirm({title:T('confirm.teardown.title',{key:record.key}),message:T('confirm.teardown.message'),confirmText:T('list.teardown'),cancelText:T('action.cancel'),danger:true}))return;
+        await F.action('teardown',{key:record.key});await reload();
+      },true):null;
+      [remove,teardown].forEach(b=>{if(b)b.classList.add('is-danger');});
+      // Rarely used and destructive actions stay one click away, not beside Edit.
+      const moreRow=h('div',{className:'vpn-more-actions',attrs:{hidden:!expanded.has(record.key)}},[
+        proxy?button(T('list.coreLogs'),async()=>{
+          if(await F.confirm({title:T('confirm.logs.title'),message:T('confirm.logs.message'),confirmText:T('confirm.logs.confirm'),cancelText:T('action.cancel')}))await showDetails(record.key,true);
+        },true):null,teardown,remove]);
+      const more=F.button(T('list.more'),()=>{
+        moreRow.hidden=!moreRow.hidden;if(moreRow.hidden)expanded.delete(record.key);else expanded.add(record.key);
+        more.setAttribute('aria-expanded',String(!moreRow.hidden));F.requestResize();
+      },true);
+      more.setAttribute('aria-expanded',String(!moreRow.hidden));
       const card=h('article',{className:'vpn-outlet'},[
-        h('div',{className:'vpn-card-top'},[h('div',{className:'vpn-card-heading'},[node('div','vpn-icon',driver.short),h('div',{},[node('h3','',record.key),node('p','vpn-caption',driver.name)])]),h('span',{className:'vpn-badge',attrs:{'data-tone':phase[1]},text:T(phase[0])})]),metadata,
+        h('div',{className:'vpn-card-top'},[h('div',{className:'vpn-card-heading'},[node('div','vpn-icon',driver.short),h('div',{},[node('h3','',record.key),node('p','vpn-caption',driver.name)])]),h('span',{className:'vpn-badge',attrs:{'data-tone':phase[1]},text:T(phase[0])})]),
+        stale?node('p','vpn-pending',T('list.pendingChanges')):null,
+        metadata,slot.facts,
         status.error || status.error_code?errorView(statusError(status),'vpn-card-error'):null,
-        healthStates[record.key] && !['unknown','unavailable'].includes(healthStates[record.key].state)?h('div',{className:'vpn-health-line'},[healthSummary(record.key)]):null,
+        slot.health,
         h('div',{className:'vpn-card-footer'},[
-          button(T('list.edit'),()=>openEditor(record),true),button(T('list.status'),()=>showDetails(record.key,false),true),
-          button(T('list.healthCheck'),async()=>{await F.action('health_check',{key:record.key});await refreshHealth();},true),
-          button(T('list.teardown'),async()=>{
-            if (!await F.confirm({title:T('confirm.teardown.title',{key:record.key}),message:T('confirm.teardown.message'),confirmText:T('list.teardown'),cancelText:T('action.cancel'),danger:true}))return;
-            await F.action('teardown',{key:record.key});await reload();
-          },true),
-          button(T('list.delete'),async()=>{
-            if (!await F.confirm({title:T('confirm.delete.title',{key:record.key}),message:T('confirm.delete.message'),confirmText:T('list.delete'),cancelText:T('action.cancel'),danger:true}))return;
-            await F.action('delete_profile',{key:record.key});
-            if(editing && keyInput.value===record.key) {editor.hidden=true;editing=false;dirty=false;original={};}
-            detailPanel.hidden=true;await reload();say('list.deleted',{key:record.key});
-          },true),
-          ['mihomo','sing_box'].includes(profile.driver)?button(T('list.coreLogs'),async()=>{
-            if(await F.confirm({title:T('confirm.logs.title'),message:T('confirm.logs.message'),confirmText:T('confirm.logs.confirm'),cancelText:T('action.cancel')}))await showDetails(record.key,true);
-          },true):null
-        ])
-      ]);list.appendChild(card);
+          button(T('list.edit'),()=>openEditor(record),true),
+          stale || !applied?button(T('list.apply'),()=>applyOutlet(record.key),true):null,
+          applied?button(T('list.healthCheck'),async()=>{await F.action('health_check',{key:record.key});await refreshHealth();},true):null,
+          applied || status.phase==='failed' || status.phase==='error'?button(T('list.details'),()=>showDetails(record.key,false),true):null,
+          more
+        ]),moreRow
+      ]);list.appendChild(card);slots.set(record.key,slot);fillRuntime(record.key);fillHealth(record.key);
     });
   }
   async function reload() {
@@ -385,7 +510,7 @@
     statuses={};state.forEach(r=>{statuses[r.key]=r.data || {};});renderList();
     clearTimeout(statusPoll);
     if(state.some(r=>r.data && r.data.phase==='starting'))statusPoll=setTimeout(()=>reload().catch(notifyError),2500);
-    await refreshHealth();
+    await Promise.all([refreshHealth(),refreshRuntime()]);
     F.requestResize();
   }
   const coreVersion=setMessage(h('div',{className:'vpn-core-version'}),'core.notInstalled'),coreInfo=node('p','vpn-status-line',''),coreProgress=h('progress',{className:'vpn-progress',attrs:{hidden:true,max:100}});
@@ -456,7 +581,7 @@
     F.requestResize();
   }
   if (F.onLocaleChange) F.onLocaleChange(relocalize);
-  window.addEventListener('pagehide',()=>{++coreSequence;clearTimeout(corePoll);clearTimeout(statusPoll);clearTimeout(healthPoll);privateKey.value='';coreConfig.value='';shareLinks.value='';importConfig.value='';});
+  window.addEventListener('pagehide',()=>{++coreSequence;clearTimeout(corePoll);clearTimeout(statusPoll);clearTimeout(healthPoll);clearTimeout(runtimePoll);privateKey.value='';coreConfig.value='';shareLinks.value='';importConfig.value='';});
   document.body.replaceChildren(page);
       if (F.headerActions) F.headerActions([refreshOutletButton, createOutletButton]);reload().catch(error=>message(F.errorText(error),true));
 })();
