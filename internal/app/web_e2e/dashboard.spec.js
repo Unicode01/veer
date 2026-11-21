@@ -231,9 +231,9 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   let installationPolls=0;
   const plugin = {id:'vpn_core', name:'VPN WAN', kind:'pipeline', stability:'lab', version:'0.6.1', status:'active', enabled:true,
     resources:[{id:'profiles', methods}, {id:'status', methods:['list','get']}],
-    actions:['set_key','set_core_config','core_form','apply','teardown','delete_profile','inspect','core_logs',...coreActions,...healthActions].map(id => ({id})),
+    actions:['set_key','set_core_config','core_form','apply','teardown','delete_profile','inspect','upstream_interfaces','core_logs',...coreActions,...healthActions].map(id => ({id})),
     ui:{entry:'index.html', page:'vpn', page_title:'VPN', resources:[{resource:'profiles', methods}, {resource:'status', methods:['list']}],
-      actions:['set_key','set_core_config','core_form','apply','teardown','delete_profile','inspect','core_logs',...coreActions,...healthActions]}, asset_base_path:'/api/plugins/vpn_core/assets/', runtime:{mode:'control'}};
+      actions:['set_key','set_core_config','core_form','apply','teardown','delete_profile','inspect','upstream_interfaces','core_logs',...coreActions,...healthActions]}, asset_base_path:'/api/plugins/vpn_core/assets/', runtime:{mode:'control'}};
   await page.route('**/api/plugins', route => route.fulfill({json:{...pluginCatalog, plugins:[...pluginCatalog.plugins, plugin]}}));
   await page.route('**/api/plugins/vpn_core/**', async route => {
     const url = new URL(route.request().url());
@@ -256,7 +256,9 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
       const id=endpoint.split('/').pop();
       const payload=route.request().postDataJSON().payload;
       if(id==='delete_profile') {actions.push({id,payload});delete records[payload.key];delete healthValues[payload.key];return route.fulfill({json:{result:{phase:'deleted'}}});}
-      // Runtime facts are read-only: they do not count as page actions.
+      // Uplink suggestions and runtime facts are read-only: they do not count as page actions.
+      if(id==='upstream_interfaces') return route.fulfill({json:{result:{items:[{name:'vmbr0',kind:'bridge',up:true,addresses:['192.168.10.1/24']},
+        {name:'ppp0',kind:'ppp',up:true,addresses:['192.0.2.9/32','2001:db8::9/128']}]}}});
       if(id==='inspect') return route.fulfill({json:{result:payload.key==='saved'?{phase:'configured', driver:'wireguard', interface:'vwgsaved', local_interface:'veerwg2',
         wan_id:'wg_saved', handoff_mode:'segmented_veth', dataplane:'bpf', boundary_gso:true, traffic:{rx_bytes:3221225472, tx_bytes:1048576, rx_packets:1, tx_packets:1},
         public_key:profile.peers[0].public_key, peers:[{public_key:profile.peers[0].public_key, endpoint:'192.0.2.7:51820', latest_handshake:Math.floor(Date.now()/1000)-30, rx_bytes:3221225472, tx_bytes:1048576}]}:{phase:'down'}}});
@@ -312,6 +314,8 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expect(page.locator('#tab-plugin-vpn h1')).toHaveText('VPN');
   await expect(frame.locator('h1')).toHaveCount(0);
   await expect(frame.locator('.vpn-outlet')).toHaveCount(1);
+  // One applied outlet: the KPI strip counts it ready.
+  await expect(frame.locator('.vpn-kpis')).toContainText('1 / 1');
   // The card reads runtime facts, not just the saved draft.
   await expect(frame.locator('.vpn-outlet')).toContainText('发送 1.0 MiB · 接收 3.0 GiB');
   await expect(frame.locator('.vpn-outlet')).toContainText(/\d+秒钟前/);
@@ -363,6 +367,10 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expect(frame.getByLabel('内部 WAN 地址', {exact:true})).toBeHidden();
   await expect(frame.getByLabel('节点分享链接或 Base64')).toBeVisible();
   await expect(frame.getByLabel('Mihomo 配置（JSON）', {exact:true})).toBeHidden();
+  // The uplink field suggests the host's interfaces but still accepts any name.
+  await expect(frame.getByLabel('实际出站接口', {exact:true})).toHaveAttribute('list','vpn-upstreams');
+  await expect(frame.locator('#vpn-upstreams option')).toHaveCount(2);
+  await expect(frame.locator('#vpn-upstreams option').first()).toHaveAttribute('label','vmbr0 · 192.168.10.1/24 · 已启用');
   await frame.getByLabel('实际出站接口', {exact:true}).fill('vmbr0');
   await frame.getByText('分流与高级配置',{exact:true}).click();
   await frame.getByLabel('核心配置方式').selectOption('native');
@@ -427,6 +435,9 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expect(frame.getByLabel('内部 WAN 地址',{exact:true})).toBeHidden();
   await expect(frame.getByLabel('Mihomo 配置（JSON）',{exact:true})).toHaveCount(0);
   await frame.getByLabel('实际出站接口',{exact:true}).fill('ppp0');
+  // The outbound IP suggestions follow the chosen uplink, without prefixes.
+  await expect(frame.locator('#vpn-upstream-ips option')).toHaveCount(2);
+  await expect(frame.locator('#vpn-upstream-ips option').first()).toHaveAttribute('value','192.0.2.9');
   await expect(frame.getByLabel('出站 IP',{exact:true})).toHaveValue('');
   const interfaceBox=await frame.getByLabel('实际出站接口',{exact:true}).boundingBox(), ipBox=await frame.getByLabel('出站 IP',{exact:true}).boundingBox();
   if(testInfo.project.name.startsWith('desktop')) expect(Math.abs(interfaceBox.y-ipBox.y)).toBeLessThan(2);

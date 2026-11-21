@@ -61,15 +61,45 @@
   function button(text,task,secondary) { return bind(F.button('',() => run(task),secondary),'text',text); }
   function actions(children) { return h('div',{className:'vpn-actions'},children); }
   const count=node('span','vpn-count','0'), list=h('div',{className:'vpn-list'});
+  const kpis=h('div',{className:F.classes.grid+' vpn-kpis'});
+  function renderKpis() {
+    const states=records.map(r=>(statuses[r.key] || {}).phase), ready=states.filter(p=>p==='applied' || p==='configured').length;
+    const attention=states.filter(p=>p==='error' || p==='failed').length;
+    let sent=0, received=0, known=false;
+    Object.values(runtime).forEach(view=>{if(view && view.traffic){known=true;sent+=Number(view.traffic.tx_bytes) || 0;received+=Number(view.traffic.rx_bytes) || 0;}});
+    kpis.replaceChildren(F.stat(T('kpi.outlets'),String(records.length)),F.stat(T('kpi.ready'),ready+' / '+records.length),
+      F.stat(T('kpi.attention'),String(attention)),F.stat(T('kpi.traffic'),known?T('kpi.trafficValue',{tx:bytes(sent),rx:bytes(received)}):'—'));
+    kpis.hidden=!records.length;
+  }
   const notice=h('div',{className:'vpn-notice',attrs:{role:'status','aria-live':'polite',hidden:true}});
   const outletPanel=h('section',{},[list]);
   const corePanel=h('section',{attrs:{hidden:true}});
-  const editor=h('section',{className:'vpn-panel vpn-editor',attrs:{hidden:true}});
+  const editor=h('section',{className:F.classes.card+' vpn-panel vpn-editor',attrs:{hidden:true}});
   const editorTitle=setMessage(h('h2'),'editor.new');
   const keyInput=input(L('field.key'),''), addressInput=input(L('field.wgAddress'),''), wanAddressInput=input(L('field.wanAddress'),''), slotInput=input(L('field.slot'),1,'number');
   bind(addressInput,'placeholder',L('field.wgAddress.placeholder'));bind(wanAddressInput,'placeholder',L('field.wanAddress.placeholder'));
   const mtuInput=input(L('field.mtu'),1420,'number'), upstream=input(L('field.upstream'),'','text');
   const upstreamIP=bind(input(L('field.upstreamIP'),'','text'),'placeholder',L('field.upstreamIP.placeholder'));
+  const upstreamList=h('datalist',{attrs:{id:'vpn-upstreams'}}), upstreamIPList=h('datalist',{attrs:{id:'vpn-upstream-ips'}});
+  upstream.setAttribute('list','vpn-upstreams');upstreamIP.setAttribute('list','vpn-upstream-ips');
+  upstream.classList.add(F.classes.mono);upstreamIP.classList.add(F.classes.mono);
+  let upstreams=[], upstreamsAt=0;
+  function fillUpstreamIPs() {
+    const chosen=upstreams.find(item=>item.name===upstream.value.trim());
+    upstreamIPList.replaceChildren(...(chosen?chosen.addresses:[]).map(a=>h('option',{attrs:{value:a.split('/')[0]}})));
+  }
+  async function loadUpstreams() {
+    // Suggestions only: the backend still validates whatever is typed.
+    if (Date.now()-upstreamsAt<30000) return;
+    try {
+      const response=await F.action('upstream_interfaces',{});
+      upstreams=(response && response.result && response.result.items) || [];upstreamsAt=Date.now();
+    } catch (_) { upstreams=[]; }
+    upstreamList.replaceChildren(...upstreams.map(item=>h('option',{attrs:{value:item.name,
+      label:[item.name,item.addresses[0] || T('field.upstream.noAddress'),T(item.up?'field.upstream.up':'field.upstream.down')].join(' · ')}})));
+    fillUpstreamIPs();
+  }
+  upstream.addEventListener('input',fillUpstreamIPs);
   const listenPort=input(L('field.listenPort'),0,'number'), privateKey=input(L('field.privateKey'),'','password');
   const routes=input(L('field.routes'),''), tunName=input(L('field.tunName'),''), tunAlias=input(L('field.tunAlias'),'');
   const coreConfig=area(L('field.coreConfig')), rawConfig=area(L('field.rawConfig')), importConfig=area(L('field.importConfig'));
@@ -171,15 +201,15 @@
     wgAdvanced.hidden=currentDriver!=='wireguard';proxyAdvanced.hidden=currentDriver==='wireguard';
     driverSpecific.replaceChildren();
     if (currentDriver==='wireguard') driverSpecific.appendChild(h('div',{className:'vpn-subsection'},[
-      node('h3','vpn-section-title',T('wg.title')),
+      node('h3','vpn-section-title veer-section-title',T('wg.title')),
       node('p','vpn-subtle',T('wg.intro')),wgImport,
       h('div',{className:'vpn-fields'},[
         field(T('field.wgAddress'),addressInput,T('field.wgAddress.help')),
         field(T('field.localPrivateKey'),privateKey,T('field.localPrivateKey.help'))]),
-      h('div',{className:'vpn-subsection'},[node('h3','vpn-section-title',T('wg.peers')),peerList,button(T('peer.add'),async () => {if(peers.length>=8)throw new Error(T('error.maxPeers'));addPeer();dirty=true;},true)])
+      h('div',{className:'vpn-subsection'},[node('h3','vpn-section-title veer-section-title',T('wg.peers')),peerList,button(T('peer.add'),async () => {if(peers.length>=8)throw new Error(T('error.maxPeers'));addPeer();dirty=true;},true)])
     ]));
     else if (currentDriver==='tun') driverSpecific.appendChild(h('div',{className:'vpn-subsection'},[
-      node('h3','vpn-section-title',T('tun.title')),
+      node('h3','vpn-section-title veer-section-title',T('tun.title')),
       node('p','vpn-subtle',T('tun.intro')),
       h('div',{className:'vpn-fields'},[field(T('field.tunName'),tunName,T('field.tunName.help')),field(T('field.tunAliasShort'),tunAlias,T('field.tunAlias.help'))])
     ]));
@@ -187,10 +217,10 @@
       const name=M.drivers[currentDriver].name;
       coreConfig.setAttribute('aria-label',T('field.nativeConfig',{name}));
       driverSpecific.appendChild(h('div',{className:'vpn-subsection'},[
-        node('h3','vpn-section-title',T('proxy.title',{name})),
+        node('h3','vpn-section-title veer-section-title',T('proxy.title',{name})),
         node('p','vpn-subtle',T('proxy.intro')),
         h('div',{className:'vpn-fields'},[
-          field(T('field.upstream'),upstream,T('field.upstream.help'),currentDriver!=='sing_box'),
+          field(T('field.upstream'),upstream,T('field.upstream.help'),currentDriver!=='sing_box'),upstreamList,upstreamIPList,
           currentDriver==='sing_box'?field(T('field.upstreamIP.optional'),upstreamIP,T('field.upstreamIP.help')):null
         ]),
         linksPanel,
@@ -211,6 +241,7 @@
           field(T('field.bootstrapDNS'),bootstrapDNS,T('field.bootstrapDNS.help')),field(T('field.hijackDNS'),hijackDNS,T('field.hijackDNS.help')),field(T('field.proxyDNS'),proxyDNS,T('field.proxyDNS.help'))])
       );
       nativePanel.replaceChildren(field(T('field.nativeConfig',{name}),coreConfig,T('field.nativeConfig.help')));
+      loadUpstreams();
       renderProxyMode();
     }
   }
@@ -286,8 +317,7 @@
       say('save.applying');
       try {
         const response=await F.action('apply',{key});
-        const result=response && response.result || {};
-        say(result.phase==='starting'?'save.starting':'save.applied');
+        appliedNotice(response && response.result || {});
       } catch (error) { await reload();throw error; }
     } else say('save.draftOnly');
     await reload();notify(T(apply?'save.applySubmitted':'save.draftSaved'));
@@ -302,10 +332,11 @@
     h('div',{className:'vpn-savebar'},[node('span','vpn-field-help',L('editor.saveHint')),actions([button(L('editor.saveDraft'),()=>save(false),true),button(L('editor.saveApply'),()=>save(true))])])
   );
   editor.addEventListener('input',()=>{dirty=true;});
-  const detailPanel=h('section',{className:'vpn-panel vpn-details',attrs:{hidden:true}}), detailOutput=h('pre',{className:'vpn-raw'}), detailBody=h('div',{className:'vpn-detail-body'});
+  const detailPanel=h('section',{className:F.classes.card+' vpn-panel vpn-details',attrs:{hidden:true}}), detailOutput=h('pre',{className:'vpn-raw'}), detailBody=h('div',{className:'vpn-detail-body'});
   const detailTitle=setMessage(h('h2'),'details.title');
   detailPanel.append(h('div',{className:'vpn-heading'},[detailTitle,button(L('details.close'),async()=>{detailPanel.hidden=true;detailKey='';detailOutput.textContent='';detailBody.replaceChildren();},true)]),detailBody,detailOutput);
-  const healthPhases={unknown:['health.unknown',''],checking:['health.checking',''],healthy:['health.healthy','ready'],unhealthy:['health.unhealthy','error'],stale:['health.stale',''],unavailable:['health.unavailable','']};
+  function pill(text,tone) { return h('span',{className:F.classes.status,attrs:{'data-tone':tone},text}); }
+  const healthPhases={unknown:['health.unknown','off'],checking:['health.checking','off'],healthy:['health.healthy','live'],unhealthy:['health.unhealthy','error'],stale:['health.stale','warn'],unavailable:['health.unavailable','']};
   // Results carry a reason code; the runtime's own text is the fallback for unknown reasons.
   function healthMessage(result) {
     const key='health.reason.'+result.reason;
@@ -314,7 +345,7 @@
   function healthSummary(key) {
     const value=healthStates[key] || {}, phase=healthPhases[value.state] || healthPhases.unknown, result=value.result;
     const row=h('div',{className:'vpn-health-result',attrs:{role:'status','aria-live':'polite'}},[
-      h('span',{className:'vpn-badge',attrs:{'data-tone':phase[1]},text:T(phase[0])}),
+      pill(T(phase[0]),phase[1]),
       result && ['healthy','unhealthy'].includes(value.state)?node('span','vpn-health-time',result.latency_ms+' ms · '+new Date(result.checked_at).toLocaleTimeString(I.locale())):null
     ]);
     if(result && value.state==='unhealthy')row.appendChild(node('span','vpn-health-message',healthMessage(result)+(result.consecutive_failures>1?' · '+T('health.failures',{count:result.consecutive_failures}):'')));
@@ -335,7 +366,7 @@
     if (status.error_code==='core_exited' && status.process) {info.detail='';info.facts=T('err.process',{code:status.process.exit_code,starts:status.process.starts});}
     return info;
   }
-  const phases={applied:['phase.ready','ready'],configured:['phase.ready','ready'],starting:['phase.starting',''],failed:['phase.failed','error'],error:['phase.error','error'],down:['phase.stopped',''],deleted:['phase.stopped','']};
+  const phases={applied:['phase.ready','live'],configured:['phase.ready','live'],starting:['phase.starting','off'],failed:['phase.failed','error'],error:['phase.error','error'],down:['phase.stopped','off'],deleted:['phase.stopped','off']};
   // Runtime facts come from inspect: counters, handshakes and the core process.
   function bytes(value) {
     const n=Number(value) || 0, units=['B','KiB','MiB','GiB','TiB'];
@@ -398,7 +429,7 @@
     const live=records.filter(r=>{const s=statuses[r.key];return s && ['applied','configured','starting','failed','error'].includes(s.phase);});
     const views=await Promise.all(live.map(r=>F.action('inspect',{key:r.key}).then(v=>[r.key,v.result || v]).catch(()=>[r.key,null])));
     runtime={};views.forEach(([key,view])=>{if(view)runtime[key]=view;});
-    records.forEach(r=>fillRuntime(r.key));F.requestResize();
+    records.forEach(r=>fillRuntime(r.key));renderKpis();F.requestResize();
     if (detailKey && runtime[detailKey]) renderDetails(detailKey);
     // Counters and handshakes age: refresh while the page is open.
     if (live.length) scheduleRuntime();
@@ -418,7 +449,7 @@
     if (wg) rows.push([T('details.publicKey'),view.public_key]);
     if (view.process) rows.push([T('details.core'),node('span','',coreText(view.process))],[T('details.pid'),view.process.pid || '—'],[T('details.starts'),String(view.process.starts || 0)]);
     if (view.node) rows.push([T('list.node'),view.node.name+' · '+view.node.type]);
-    if (status.egress_nat_source_ip) rows.push([T('details.natSource'),status.egress_nat_source_ip]);
+    if (status.egress_nat_source_ip) rows.push([T('details.assign'),node('span',F.classes.mono,T('details.assignValue',{interface:status.egress_nat_interface || view.local_interface,source:status.egress_nat_source_ip}))]);
     const parts=[detailRows(rows)];
     if (wg && (view.peers || []).length) {
       // The host table takes text; mark the address-like columns and give times their absolute value.
@@ -429,7 +460,7 @@
         row.cells[0].title=view.peers[i].public_key;
         if (view.peers[i].latest_handshake) row.cells[2].title=new Date(view.peers[i].latest_handshake*1000).toLocaleString(I.locale());
       });
-      parts.push(node('h3','vpn-section-title',T('details.peers')),table);
+      parts.push(node('h3','vpn-section-title veer-section-title',T('details.peers')),table);
     }
     detailBody.replaceChildren(...parts);
   }
@@ -441,20 +472,25 @@
     detailPanel.hidden=false;
     detailPanel.scrollIntoView({block:'nearest',behavior:'smooth'});
   }
+  function appliedNotice(result) {
+    if (result.phase==='starting') say('save.starting');
+    else if (result.egress_nat_interface && result.egress_nat_source_ip) say('save.appliedAssign',{interface:result.egress_nat_interface,source:result.egress_nat_source_ip});
+    else say('save.applied');
+  }
   async function applyOutlet(key) {
     say('save.applying');
     const response=await F.action('apply',{key});
-    say((response && response.result || {}).phase==='starting'?'save.starting':'save.applied');
+    appliedNotice(response && response.result || {});
     await reload();
   }
   function renderList() {
-    count.textContent=String(records.length);list.replaceChildren();slots.clear();list.className=records.length?'vpn-list':'';list.hidden=!records.length && !editor.hidden;
-    if (!records.length) {list.appendChild(h('div',{className:'vpn-empty'},[
+    count.textContent=String(records.length);list.replaceChildren();slots.clear();renderKpis();list.className=records.length?'vpn-list':'';list.hidden=!records.length && !editor.hidden;
+    if (!records.length) {list.appendChild(h('div',{className:'veer-empty vpn-empty'},[
       node('div','vpn-icon','↗'),node('h2','',T('list.emptyTitle')),node('p','',T('list.emptyBody')),button(T('list.create'),()=>openEditor(),true)
     ]));return;}
     records.forEach(record=>{
       const profile=record.data, driver=M.drivers[profile.driver || 'wireguard'] || {name:profile.driver,short:'?'}, status=statuses[record.key] || {};
-      const phase=phases[status.phase] || ['phase.notApplied',''], name=status.local_interface || (profile.driver && profile.driver!=='wireguard'?'veervpn':'veerwg')+profile.slot;
+      const phase=phases[status.phase] || ['phase.notApplied','off'], name=status.local_interface || (profile.driver && profile.driver!=='wireguard'?'veervpn':'veerwg')+profile.slot;
       const view=runtime[record.key], wg=!profile.driver || profile.driver==='wireguard', proxy=['mihomo','sing_box'].includes(profile.driver);
       const addresses=profile.addresses && profile.addresses.length?profile.addresses:status.wan_addresses || [];
       const peers=profile.peers || [], endpoints=peers.map(p=>p.endpoint).filter(Boolean);
@@ -487,8 +523,8 @@
         more.setAttribute('aria-expanded',String(!moreRow.hidden));F.requestResize();
       },true);
       more.setAttribute('aria-expanded',String(!moreRow.hidden));
-      const card=h('article',{className:'vpn-outlet'},[
-        h('div',{className:'vpn-card-top'},[h('div',{className:'vpn-card-heading'},[node('div','vpn-icon',driver.short),h('div',{},[node('h3','',record.key),node('p','vpn-caption',driver.name)])]),h('span',{className:'vpn-badge',attrs:{'data-tone':phase[1]},text:T(phase[0])})]),
+      const card=h('article',{className:F.classes.card+' vpn-outlet'},[
+        h('div',{className:'vpn-card-top'},[h('div',{className:'vpn-card-heading'},[node('div','vpn-icon',driver.short),h('div',{},[node('h3','',record.key),node('p','vpn-caption',driver.name)])]),pill(T(phase[0]),phase[1])]),
         stale?node('p','vpn-pending',T('list.pendingChanges')):null,
         metadata,slot.facts,
         status.error || status.error_code?errorView(statusError(status),'vpn-card-error'):null,
@@ -516,7 +552,7 @@
   const coreVersion=setMessage(h('div',{className:'vpn-core-version'}),'core.notInstalled'),coreInfo=node('p','vpn-status-line',''),coreProgress=h('progress',{className:'vpn-progress',attrs:{hidden:true,max:100}});
   const installVersion=bind(input(L('core.installVersion'),''),'placeholder',L('core.installVersion.placeholder')),installDigest=input('SHA256','');
   const installed=bind(h('select',{className:F.classes.input}),'aria-label',L('core.installedVersions.label'));
-  const coreName=node('h2','','Mihomo'),coreOptions={},coreDetails=h('div',{className:'vpn-panel'});
+  const coreName=node('h2','','Mihomo'),coreOptions={},coreDetails=h('div',{className:F.classes.card+' vpn-panel'});
   const jobPhases=['resolving','downloading','verifying','ready','failed'];
   function setCoreStatus(status) {
     coreStatus=status;
@@ -564,10 +600,10 @@
   outletPanel.append(editor,detailPanel);
   const refreshOutletButton=button(L('action.refreshOutlets'),reload,true);
   const createOutletButton=button(L('action.newOutlet'),async()=>{switchTab(false);await openEditor();});
-  const page=h('main',{className:F.classes.page+' vpn-page'},[
-    actions([refreshOutletButton, createOutletButton]),
+  const page=h('main',{className:F.classes.page+' vpn-page'},[h('div',{className:F.classes.stack},[
+    actions([refreshOutletButton, createOutletButton]),kpis,
     bind(h('nav',{className:'vpn-nav',attrs:{role:'tablist'}},[outletTab,coreTab]),'aria-label',L('page.nav')),notice,outletPanel,corePanel
-  ]);
+  ])]);
   // Rerendering keeps every input value; only the open state of the rebuilt proxy section needs restoring.
   function relocalize() {
     bound.forEach(put);peers.forEach(p=>p.bound.forEach(put));

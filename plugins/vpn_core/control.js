@@ -60,6 +60,7 @@ plugin.action({id: 'apply', description: 'Create or update a VPN WAN; select it 
 plugin.action({id: 'teardown', description: 'Remove the owned VPN WAN and its TC adapter.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'delete_profile', description: 'Teardown the owned VPN WAN, then delete its draft and unshared credentials.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 plugin.action({id: 'inspect', description: 'Read public interface, peer, handshake and traffic state.', runtime_update: 'runtime_query', max_payload_bytes: 2048});
+plugin.action({id: 'upstream_interfaces', description: 'List interfaces a proxy core can use as its uplink.', runtime_update: 'runtime_query', max_payload_bytes: 2048});
 plugin.action({id: 'core_logs', description: 'Explicitly read managed core logs; output may contain credentials.', runtime_update: 'runtime_query', max_payload_bytes: 2048});
 plugin.action({id: 'core_status', description: 'List persistent core versions and installation progress.', runtime_update: 'runtime_query', max_payload_bytes: 2048});
 plugin.action({id: 'core_install', description: 'Download and verify an official core release in the background.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
@@ -68,7 +69,7 @@ plugin.action({id: 'core_rollback', description: 'Restore the previous default c
 plugin.action({id: 'core_remove', description: 'Remove an unused installed core version.', runtime_update: 'runtime_apply', max_payload_bytes: 2048});
 ui.register({static_dir: 'ui', entry: 'index.html', sha256: '30039017dbb70e05163e484256e5a986e3a0049258c6cf617813b3c0d23831c9', page: 'vpn', page_title: 'VPN',
   resources: [{resource: 'profiles', methods: ['list', 'get', 'create', 'update']}, {resource: 'status', methods: ['list']}],
-  actions: ['set_key', 'set_core_config', 'core_form', 'health_status', 'health_settings', 'health_check', 'apply', 'teardown', 'delete_profile', 'inspect', 'core_logs', 'core_status', 'core_install', 'core_select', 'core_rollback', 'core_remove']});
+  actions: ['set_key', 'set_core_config', 'core_form', 'health_status', 'health_settings', 'health_check', 'apply', 'teardown', 'delete_profile', 'inspect', 'upstream_interfaces', 'core_logs', 'core_status', 'core_install', 'core_select', 'core_rollback', 'core_remove']});
 
 exports.onAction = function (ctx) {
   var payload = ctx.payload || {}, key = profileKey(payload.key);
@@ -126,6 +127,7 @@ exports.onAction = function (ctx) {
     return form;
   }
   if (ctx.action.id === 'inspect') return inspect(key);
+  if (ctx.action.id === 'upstream_interfaces') return {items: upstreamInterfaces()};
   if (ctx.action.id === 'core_logs') {
     var active = allLeases()[key];
     if (!active || ['mihomo', 'sing_box'].indexOf(active.plan.driver) < 0) throw new Error('No managed proxy core for this profile');
@@ -573,6 +575,18 @@ function inspect(key) {
   base.public_key = command(WG, ['show', p.interface, 'public-key']).trim();
   base.peers = wgPeers(p);
   return base;
+}
+function upstreamInterfaces() {
+  // Suggestions only: the profile still accepts any name and apply validates it.
+  // Leave out loopback, every VPN tunnel and boundary, and hypervisor plumbing.
+  var own = /^(veerwgp?|veervpnp?|vwg|vtun)[a-z0-9_]*$/, plumbing = /^(tap|fwbr|fwpr|fwln|veth)/;
+  return net.link.list().filter(function (l) {
+    return l.name && l.name !== 'lo' && !own.test(l.name) && !plumbing.test(l.name) && l.kind !== 'tuntap' && l.kind !== 'dummy';
+  }).map(function (l) {
+    return {name: l.name, kind: l.kind || '', up: l.up === true, addresses: (l.addresses || []).filter(function (a) { return !/^fe80:/i.test(a); })};
+  }).sort(function (a, b) {
+    return (b.up - a.up) || (b.addresses.length > 0) - (a.addresses.length > 0) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  });
 }
 function traffic(name) {
   // Tunnel counters: the boundary's own may skip redirected packets.
