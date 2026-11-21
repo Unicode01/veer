@@ -32,11 +32,28 @@
   function showNotice(error) { notice.hidden=!notice.textContent;notice.dataset.tone=error?'error':'';F.requestResize(); }
   function message(text,error) { setRaw(notice,text || '');showNotice(error); }
   function say(key,params) { setMessage(notice,key,params);showNotice(false); }
+  // The plugin prefixes errors it can explain with a stable [code]: show the
+  // localized explanation and what to do, and keep the original text as detail.
+  function errorInfo(text,code) {
+    let detail=String(text || '');
+    if (!code) {const match=/^\[([a-z_]+)\] ([\s\S]*)$/.exec(detail);if(match){code=match[1];detail=match[2];}}
+    if (!code || !Object.prototype.hasOwnProperty.call(I.messages['zh-CN'],'err.'+code)) return {title:detail,hint:'',detail:''};
+    return {title:T('err.'+code),hint:T('err.'+code+'.hint'),detail};
+  }
+  function errorView(info,className) {
+    return h('div',{className:'vpn-error'+(className?' '+className:''),attrs:{role:'alert'}},[
+      node('p','vpn-error-title',info.title),info.facts?node('p','vpn-error-facts',info.facts):null,info.hint?node('p','vpn-error-hint',info.hint):null,
+      info.detail?node('p','vpn-error-detail',T('err.detail',{text:info.detail})):null]);
+  }
+  function showError(text) {
+    const info=errorInfo(text);
+    dynamic.delete(notice);notice.replaceChildren(errorView(info));showNotice(true);notifyError(info.title);
+  }
   async function run(task) {
     if (busy) return;
     busy=true; controlNodes().forEach(el => {el.disabled=true;});
     try { await task(); }
-    catch (error) { message(F.errorText(error),true);notifyError(error); }
+    catch (error) { showError(F.errorText(error)); }
     finally { busy=false;controlNodes().forEach(el => {el.disabled=false;});keyInput.readOnly=editing;renderProxyMode();F.requestResize(); }
   }
   function button(text,task,secondary) { return bind(F.button('',() => run(task),secondary),'text',text); }
@@ -310,6 +327,12 @@
     if(checking || values.some(v=>v.settings.enabled))healthPoll=setTimeout(()=>refreshHealth().catch(notifyError),checking?1000:5000);
     F.requestResize();
   }
+  function statusError(status) {
+    const info=errorInfo(status.error,status.error_code==='unknown'?'':status.error_code);
+    // A stopped core's supervisor facts read better localized than as the English detail.
+    if (status.error_code==='core_exited' && status.process) {info.detail='';info.facts=T('err.process',{code:status.process.exit_code,starts:status.process.starts});}
+    return info;
+  }
   const phases={applied:['phase.ready','ready'],configured:['phase.ready','ready'],starting:['phase.starting',''],failed:['phase.failed','error'],error:['phase.error','error'],down:['phase.stopped',''],deleted:['phase.stopped','']};
   async function showDetails(key,logs) {
     const value=await F.action(logs?'core_logs':'inspect',{key});
@@ -333,7 +356,7 @@
         [T('list.attach'),T('list.attachValue')]].forEach(pair=>metadata.append(h('div',{},[node('dt','',pair[0]),node('dd','',pair[1])])));
       const card=h('article',{className:'vpn-outlet'},[
         h('div',{className:'vpn-card-top'},[h('div',{className:'vpn-card-heading'},[node('div','vpn-icon',driver.short),h('div',{},[node('h3','',record.key),node('p','vpn-caption',driver.name)])]),h('span',{className:'vpn-badge',attrs:{'data-tone':phase[1]},text:T(phase[0])})]),metadata,
-        status.error?node('p','vpn-card-error',status.error):null,
+        status.error || status.error_code?errorView(statusError(status),'vpn-card-error'):null,
         healthStates[record.key] && !['unknown','unavailable'].includes(healthStates[record.key].state)?h('div',{className:'vpn-health-line'},[healthSummary(record.key)]):null,
         h('div',{className:'vpn-card-footer'},[
           button(T('list.edit'),()=>openEditor(record),true),button(T('list.status'),()=>showDetails(record.key,false),true),

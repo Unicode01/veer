@@ -1,7 +1,9 @@
 // Core-specific configuration ends here. The WAN and packet handoff are shared.
 var shares = require('./ui/share');
+// Same [code] convention as control.js: the WebUI localizes the code.
+function fail(code, message) { return new Error('[' + code + '] ' + message); }
 function object(value, label) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(label + ' must be a JSON object');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw fail('core_config_invalid', label + ' must be a JSON object');
   return value;
 }
 function bindSource(config, p) {
@@ -28,15 +30,15 @@ exports.command = function (driver, path) {
   var name = driver === 'mihomo' ? 'mihomo' : 'sing-box';
   path = String(path || '/usr/local/bin/' + name);
   if (path.slice(-name.length - 1) !== '/' + name || !/^\/[a-zA-Z0-9_./-]+$/.test(path) || /\/(\.\.?)(\/|$)/.test(path))
-    throw new Error('Core executable must be a locally installed ' + name + ' binary');
+    throw fail('core_path_invalid', 'Core executable must be a locally installed ' + name + ' binary');
   return path;
 };
 exports.build = function (p, text) {
   var config;
   try { config = object(JSON.parse(text), 'Core configuration'); }
-  catch (e) { throw new Error('Core configuration must be valid JSON'); }
+  catch (e) { throw fail('core_config_invalid', 'Core configuration must be valid JSON'); }
   if (config.veer_proxy === 1) {
-    if (config.driver !== p.driver) throw new Error('Saved node configuration belongs to another core');
+    if (config.driver !== p.driver) throw fail('core_config_invalid', 'Saved node configuration belongs to another core');
     config = shares.generate(config);
   }
   var tunAddress = '198.18.' + p.slot + '.1/30';
@@ -63,7 +65,7 @@ exports.build = function (p, text) {
   config.route.default_interface = p.upstream_interface;
   bindSource(config, p);
   // A core must not create a second privileged network topology behind this WAN.
-  if (config.endpoints && config.endpoints.length) throw new Error('Use outbound proxies; managed VPN cores do not accept additional endpoints');
+  if (config.endpoints && config.endpoints.length) throw fail('core_config_invalid', 'Use outbound proxies; managed VPN cores do not accept additional endpoints');
   delete config.experimental;
   return {command: exports.command(p.driver, p.core_path), args: ['run', '-c', '{config}'], config: JSON.stringify(config)};
 };

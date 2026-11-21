@@ -80,3 +80,16 @@ test('VPN form and share errors follow the page locale and default to Chinese', 
   inLocale('zh-CN', () => assert.throws(() => S.parse('hy2://@192.0.2.1:443', 'sing_box'), /^Error: 第 1 个节点：Hysteria2 密码无效$/));
   assert.equal(M.drivers.tun.name, '外部 TUN');
 });
+
+test('VPN page explains every error code the plugin runtime raises', () => {
+  const runtime = ['control.js', 'core-drivers.js'].map((name) => fs.readFileSync(path.join(uiDir, '..', name), 'utf8')).join('\n');
+  const codes = new Set([...runtime.matchAll(/fail\('([a-z_]+)'/g)].map((m) => m[1]));
+  for (const match of runtime.matchAll(/error_code = '([a-z_]+)'/g)) codes.add(match[1]);
+  assert.ok(codes.size >= 25, [...codes].join(','));
+  assert.ok(codes.has('core_exited'));
+  const missing = [];
+  for (const code of codes) for (const key of ['err.' + code, 'err.' + code + '.hint'])
+    for (const locale of ['zh-CN', 'en-US']) if (!Object.prototype.hasOwnProperty.call(I.messages[locale], key)) missing.push(locale + ' ' + key);
+  assert.deepEqual(missing, []);
+});
+

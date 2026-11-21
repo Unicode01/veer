@@ -60,7 +60,7 @@ function fixture(config = profile(), options = {}) {
     },
     'process.exec': request => {
       state.calls.push(clone(request));
-      if(state.fail && state.fail(request)) return {...ok(),exit_code:2,stderr:PRIVATE};
+      if(state.fail && state.fail(request)) return {...ok(),exit_code:2,stderr:state.failStderr||PRIVATE};
       const a=request.args;
       if(request.command.endsWith('/wg')) {
         if(a[0]==='syncconf') state.config=request.stdin;
@@ -882,3 +882,48 @@ test('VPN external TUN mode checks explicit ownership and leaves the provider de
   h.apply();assert.equal(h.specs.length,0);h.host.action('teardown',{});
   assert.deepEqual(h.state.links.map(l=>l.ifname),['tun0']);
 });
+
+test('VPN errors carry stable codes, keep context in status and never leak keys',()=>{
+  // No private key saved: say so before touching the network.
+  const missing=fixture(profile(),{missingKey:true});
+  assert.throws(missing.apply,/^Error: \[private_key_missing\] /);
+  assert.equal(missing.state.calls.length,0);assert.equal(missing.state.services.length,0);
+
+  // ip explains why WireGuard could not be created; anything key-shaped is redacted.
+  const h=fixture();h.host.action('set_key',{value:PRIVATE});
+  h.state.fail=r=>r.args.includes('wireguard');h.state.failStderr='Error: Unknown device type. '+PRIVATE+'\nsecond line';
+  assert.throws(h.apply,e=>/^\[wireguard_unavailable\] Command failed: \/usr\/sbin\/ip link \(exit 2\): Error: Unknown device type\. \[redacted\]$/.test(e.message));
+  let status=h.host.state.resources.get('status').get('default').data;
+  assert.equal(status.error_code,'wireguard_unavailable');assert.equal(JSON.stringify(status).includes(PRIVATE),false);
+  assert.equal(status.driver,'wireguard');assert.equal(status.interface,'vwgdefault');assert.equal(status.local_interface,'veerwg1');
+  assert.equal(status.wan_id,'wg_default');assert.equal(status.error.startsWith('['),false);
+
+  // wg never shows stderr: it can quote keys.
+  h.state.fail=r=>r.args[0]==='syncconf';h.state.failStderr='';
+  assert.throws(h.apply,e=>e.message==='[command_failed] Command failed: /usr/bin/wg syncconf (exit 2)');
+
+  // A repeating failure keeps the time it first appeared.
+  const first=h.host.state.resources.get('status').get('default').data.failed_at;
+  assert.ok(first>0);
+  h.host.run('onTimer',{timer:{name:'tunnel_repair'}});
+  assert.equal(h.host.state.resources.get('status').get('default').data.failed_at,first);
+});
+
+test('VPN names leftover interfaces it refuses to adopt',()=>{
+  const h=fixture();h.host.action('set_key',{value:PRIVATE});
+  h.state.links.push({ifname:'veerwg1',ifindex:77,ifalias:'',linkinfo:{info_kind:'veth'}});
+  assert.throws(h.apply,e=>e.message==='[ownership_missing] Recorded ownership is missing; leftover: veerwg1');
+  assert.equal(h.state.services.length,0);
+});
+
+test('VPN reports an exhausted core with supervisor facts only',()=>{
+  const failed={id:'vpn_default',state:'failed',pid:0,starts:4,exit_code:1,started_at:5000};
+  const h=vpnFixture('mihomo',{}, {adapters:{'process.start':()=>({...failed}),'process.status':()=>({...failed})}});
+  assert.equal(h.apply().phase,'starting');
+  const status=h.host.state.resources.get('status').get('default').data;
+  assert.equal(status.phase,'failed');assert.equal(status.error_code,'core_exited');
+  assert.deepEqual(status.process,{state:'failed',pid:0,starts:4,exit_code:1,started_at:5000});
+  assert.equal(JSON.stringify(status).includes('sensitive-core-password'),false);
+});
+
+

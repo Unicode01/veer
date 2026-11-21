@@ -66,7 +66,12 @@
 .vpn-core-version { font-size: var(--veer-fs-2xl); font-weight: 600; letter-spacing:-.04em; margin:20px 0 6px; overflow-wrap:anywhere; }
 .vpn-status-line { margin:12px 0; color:var(--veer-muted); font-size: var(--veer-fs-sm); line-height:1.7; }
 .vpn-progress { width:100%; accent-color:var(--veer-primary); margin-top:12px; }
-.vpn-card-error { font-size: var(--veer-fs-sm); color:var(--veer-danger); overflow-wrap:anywhere; margin:0 0 14px; }
+.vpn-error { overflow-wrap:anywhere; font-size: var(--veer-fs-sm); line-height:1.6; }
+.vpn-error p { margin:0; }
+.vpn-error .vpn-error-title { color:var(--veer-danger); font-weight: 600; }
+.vpn-error .vpn-error-facts, .vpn-error .vpn-error-hint { color:var(--veer-text); margin-top:2px; }
+.vpn-error .vpn-error-detail { color:var(--veer-muted); font-family: var(--veer-mono); font-size: var(--veer-fs-xs); margin-top:4px; }
+.vpn-card-error { margin:0 0 14px; }
 .vpn-health-line { margin:0 0 16px; }
 .vpn-health-result { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:8px 0; }
 .vpn-health-time { font-size: var(--veer-fs-sm); color:var(--veer-muted); }
