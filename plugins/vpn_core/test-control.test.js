@@ -1079,8 +1079,8 @@ for(const driver of ['wireguard','mihomo']) test(driver+' exits are checked afte
   h.apply();
   const map=[...h.maps().values()][0];let mapReads=0;const get=map.get.bind(map);map.get=key=>{mapReads++;return get(key);};
   const timers=h.host.state.timers;
-  // The only interval left is the five-minute safety check.
-  assert.deepEqual([...timers.values()].filter(t=>t.kind==='interval'&&t.name!=='vpn_health').map(t=>[t.name,t.delay_ms]),[['tunnel_repair',300000]]);
+  // The intervals left: the five-minute safety check and the five-second map check.
+  assert.deepEqual([...timers.values()].filter(t=>t.kind==='interval'&&t.name!=='vpn_health').map(t=>[t.name,t.delay_ms]).sort(),[['tunnel_maps',5000],['tunnel_repair',300000]]);
   const fire=name=>{wanReads=0;linkReads=0;mapReads=0;h.host.fireTimer(name);return {wan:wanReads,links:linkReads,maps:mapReads};};
   // A link event arms one check of the tunnel, the WAN Core boundary and both map entries.
   timers.delete('tunnel_event');
@@ -1088,6 +1088,11 @@ for(const driver of ['wireguard','mihomo']) test(driver+' exits are checked afte
   assert.equal(timers.get('tunnel_event')?.kind,'timeout');
   const check=fire('tunnel_event');assert.ok(check.wan>0);assert.equal(check.maps,2);assert.equal(check.links,3);
   assert.equal(timers.has('tunnel_retry'),false,'a healthy exit arms no retry');
+  // The map check reads the two adapter entries and nothing else, and puts back a lost one.
+  assert.deepEqual(fire('tunnel_maps'),{wan:0,links:0,maps:2});
+  const [lostKey,lostValue]=[...map.entries()][0];map.delete(lostKey);
+  fire('tunnel_maps');assert.equal(get(lostKey),lostValue,'the map check must restore a lost entry');
+  assert.deepEqual(fire('tunnel_maps'),{wan:0,links:0,maps:2});
   // A managed core changing state arms the check; other processes do not.
   h.host.emit('process.state',{id:'other',state:'exited'});
   assert.equal(timers.has('tunnel_event'),false);

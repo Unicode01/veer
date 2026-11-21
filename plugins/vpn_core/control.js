@@ -21,7 +21,7 @@ var IP = '/usr/sbin/ip', WG = '/usr/bin/wg', NFT = '/usr/sbin/nft', SYSCTL = '/u
 var MAX_CHAIN = 2;
 var PROTOCOL = '242'; // Used only when cleaning up leases from the old routing example.
 var OBJECT = 'tunnel_adapter', MAP = 'tunnel_links', REPAIR_TIMER = 'tunnel_repair';
-var EVENT_TIMER = 'tunnel_event', RETRY_TIMER = 'tunnel_retry';
+var EVENT_TIMER = 'tunnel_event', RETRY_TIMER = 'tunnel_retry', MAP_TIMER = 'tunnel_maps';
 var HOOK_IN = 'tunnel-links', HOOK_DIRECT_OUT = 'tunnel-direct-out';
 var changing = false;
 // Exits are checked when something changes, not on a polling tick: a link
@@ -31,9 +31,14 @@ var changing = false;
 // exit and repairs what differs. An exit that is still negotiating its TUN
 // offloads is checked again every PENDING_RETRY_MS, a failed repair with
 // backoff from RETRY_MIN_MS to RETRY_MAX_MS, and REPAIR_TIMER checks
-// everything every SAFETY_REPAIR_MS in case an event was lost (the TC map
-// entries have no event).
-var SAFETY_REPAIR_MS = 300000, EVENT_REPAIR_DELAY_MS = 250, PENDING_RETRY_MS = 1000;
+// everything every SAFETY_REPAIR_MS in case an event was lost. The TC map
+// entries have no event: MAP_TIMER reads them every MAP_CHECK_MS and puts
+// back what the last check or install wrote (two map reads per exit, no link
+// or record reads).
+var SAFETY_REPAIR_MS = 300000, EVENT_REPAIR_DELAY_MS = 250, PENDING_RETRY_MS = 1000, MAP_CHECK_MS = 5000;
+// Per exit key: the adapter entries last written and the ifindexes they
+// belong to. Dropped whenever the entries are withdrawn on purpose.
+var expectedMaps = {};
 var RETRY_MIN_MS = 2000, RETRY_MAX_MS = 60000, retryDelay = 0;
 plugin.capabilities(['vpn', 'wireguard', 'mihomo', 'sing_box', 'wan', 'tc_adapter', 'control']);
 events.subscribe({id: 'vpn_links', topic: 'net.link', worker: 'events', handler: 'onNetEvent', queue_size: 64});
@@ -178,6 +183,7 @@ exports.onReconcile = function () {
 exports.onTimer = function (ctx) {
   var name = ctx.timer && ctx.timer.name;
   if (name === 'vpn_health') { health.tick(); return; }
+  if (name === MAP_TIMER) { checkMaps(); return; }
   // Stop timers this version no longer arms, such as wg_repair from 0.9.0.
   if (name !== REPAIR_TIMER && name !== EVENT_TIMER && name !== RETRY_TIMER) { if (name) timer.clear(name); return; }
   var failed = false;
@@ -196,6 +202,7 @@ exports.onTimer = function (ctx) {
       } else repairMaps(p, wg, boundary);
     } catch (e) {
       failed = true;
+      delete expectedMaps[key];
       try { clearMaps(lease); } catch (cleanup) { log.error('Tunnel map cleanup failed: ' + String(cleanup.message || cleanup)); }
       resources.set('status', key, errorStatus(key, lease.plan, e), true);
     }
@@ -211,6 +218,26 @@ exports.onProcessEvent = function (ctx) {
   var payload = (ctx.event && ctx.event.payload) || {};
   if (String(payload.id || '').indexOf('vpn_') === 0) timer.setTimeout(EVENT_TIMER, EVENT_REPAIR_DELAY_MS, {});
 };
+// Puts back an exit's adapter entries when they differ from what was last
+// written, as long as its lease still holds the same tunnel and boundary.
+function checkMaps() {
+  Object.keys(expectedMaps).forEach(function (key) {
+    var want = expectedMaps[key];
+    var intact = want.entries.every(function (entry) {
+      // Hash-map reads may throw for absent keys.
+      try { return ebpf.mapGet(OBJECT, MAP, entry.key) === entry.value; }
+      catch (_) { return false; }
+    });
+    if (intact) return;
+    var record = kv.get('lease_' + key), lease = record && record.data;
+    if (!lease || !lease.active || lease.pending || lease.tunnel_ifindex !== want.tunnel || lease.pipeline_ifindex !== want.pipeline) {
+      delete expectedMaps[key];
+      return;
+    }
+    try { ebpf.mapTransaction({operations: want.entries}); }
+    catch (e) { log.error('Tunnel map repair failed: ' + String(e.message || e)); }
+  });
+}
 function hostFeature(name) {
   if (typeof plugin.host !== 'function') return false;
   return (plugin.host().available_features || []).indexOf(name) >= 0;
@@ -231,7 +258,8 @@ function armRetry(failed) {
 }
 exports.onDeactivate = function () {
   health.stop();
-  [REPAIR_TIMER, EVENT_TIMER, RETRY_TIMER].forEach(function (name) { timer.clear(name); });
+  [REPAIR_TIMER, EVENT_TIMER, RETRY_TIMER, MAP_TIMER].forEach(function (name) { timer.clear(name); });
+  expectedMaps = {};
   var failures = [];
   // Chained exits first, so no core keeps dialing through a removed front.
   chainOrder(allLeases()).reverse().forEach(function (key) {
@@ -260,13 +288,15 @@ function allLeases() {
 function armRepair() {
   health.arm();
   var leases = allLeases(), keys = Object.keys(leases);
+  Object.keys(expectedMaps).forEach(function (k) { if (!leases[k] || !leases[k].active) delete expectedMaps[k]; });
   if (keys.some(function (k) { return leases[k].active; })) {
     timer.setInterval(REPAIR_TIMER, SAFETY_REPAIR_MS, {});
+    timer.setInterval(MAP_TIMER, MAP_CHECK_MS, {});
     // Whatever was just applied gets one check soon: a TUN that is still
     // negotiating or an apply that failed is then retried from there.
     if (keys.some(function (k) { return leases[k].active && leases[k].pending; })) timer.setTimeout(RETRY_TIMER, PENDING_RETRY_MS, {});
   } else {
-    [REPAIR_TIMER, EVENT_TIMER, RETRY_TIMER].forEach(function (name) { timer.clear(name); });
+    [REPAIR_TIMER, EVENT_TIMER, RETRY_TIMER, MAP_TIMER].forEach(function (name) { timer.clear(name); });
   }
 }
 // Chained exits: a proxy exit's upstream_interface may be another applied
@@ -512,6 +542,7 @@ function bindings(exclude) {
 function u32(n) { var s = ''; for (var i = 0; i < 4; i++) s += ('0' + ((n >>> (i * 8)) & 255).toString(16)).slice(-2); return s; }
 function macHex(s) { if (!/^([a-fA-F0-9]{2}:){5}[a-fA-F0-9]{2}$/.test(s || '')) throw new Error('Invalid WAN boundary MAC'); return s.replace(/:/g, '').toLowerCase(); }
 function clearMaps(lease) {
+  if (lease && lease.plan && lease.plan.key) delete expectedMaps[lease.plan.key];
   [lease && lease.tunnel_ifindex, lease && lease.pipeline_ifindex].forEach(function (index) {
     if (!index) return;
     try { ebpf.mapDelete(OBJECT, MAP, u32(index)); }
@@ -519,10 +550,13 @@ function clearMaps(lease) {
   });
 }
 function mapEntries(p, tunnel, boundary) {
-  return [
+  var entries = [
     {op: 'put', object: OBJECT, map: MAP, key: u32(boundary.peer.ifindex), value: u32(1) + u32(tunnel.ifindex) + '000000000000000000000000' + u32(p.mtu)},
     {op: 'put', object: OBJECT, map: MAP, key: u32(tunnel.ifindex), value: u32(boundary.direct ? 3 : 2) + u32(boundary.peer.ifindex) + macHex(boundary.peer.address) + macHex(boundary.local.address) + u32(p.mtu)}
   ];
+  // Every caller writes these or checks them against the map.
+  if (p.key) expectedMaps[p.key] = {tunnel: tunnel.ifindex, pipeline: boundary.peer.ifindex, entries: entries};
+  return entries;
 }
 function repairMaps(p, tunnel, boundary) {
   // A dataplane replacement can lose private maps without replacing netdevs
@@ -1034,6 +1068,7 @@ function resolveWANAddresses(p, old) {
   p.settings.addresses = p.addresses;
 }
 function suspendTUN(p, lease) {
+  if (p && p.key) delete expectedMaps[p.key];
   clearMaps(lease);
   // Keep the selected WAN boundary, but withdraw availability. Never fall back
   // to the host's direct default route when a core is absent or restarting.

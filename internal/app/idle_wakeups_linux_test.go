@@ -128,6 +128,17 @@ func TestPluginCatalogWatcherSeesChangesBelowTheRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	wait("a new plugin directory")
+	// MkdirAll creates second and then ui: the second event may still be on
+	// its way. Let the watch settle before expecting silence.
+	for settle := time.Now().Add(5 * time.Second); ; {
+		time.Sleep(100 * time.Millisecond)
+		if !w.takeChange() {
+			break
+		}
+		if time.Now().After(settle) {
+			t.Fatal("the watch keeps reporting changes on an idle tree")
+		}
+	}
 	quiet("the tree after the new directory")
 	if err := os.WriteFile(filepath.Join(root, "second", "ui", "index.html"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
