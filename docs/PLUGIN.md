@@ -972,7 +972,7 @@ hooks.attach({
 
 接口名运行时仍会校验长度和非法字符。生产插件应尽量只授权自己创建的接口前缀；物理口需要逐项显式授权。
 
-`net.link.get()` 和 `net.link.list()` 在 Linux 下返回的 link 对象包含 `statistics`，其中有 `rx_packets/tx_packets/rx_bytes/tx_bytes/rx_errors/tx_errors/rx_dropped/tx_dropped`。读取由 netlink 完成，不会给数据面增加指令；TC redirect 到 dummy 等路径可能绕过该 netdev 的驱动计数，这类逻辑隧道应改读自己的 eBPF 计数。`net.link.getOffloads(iface)` 通过 `ethtool -k` 返回 `rx/tx/sg/tso/ufo/gso/gro/lro` 当前布尔状态，可在修改前记录并在 teardown 时精确恢复。
+`net.link.get()` 和 `net.link.list()` 在 Linux 下返回的 link 对象包含 `statistics`，其中有 `rx_packets/tx_packets/rx_bytes/tx_bytes/rx_errors/tx_errors/rx_dropped/tx_dropped`。读取由 netlink 完成，不会给数据面增加指令；TC redirect 到 dummy 等路径可能绕过该 netdev 的驱动计数，这类逻辑隧道应改读自己的 eBPF 计数。`net.link.getOffloads(iface)` 通过 ethtool ioctl 读取 `rx/tx/sg/tso/ufo/gso/gro/lro` 的当前布尔状态，结果与 `ethtool -k` 一致，可在修改前记录并在 teardown 时精确恢复。
 
 `net.neigh.list({interface,family,namespace,limit})` 返回指定接口的 IPv4/IPv6 邻居，`net.bridge.fdb.list({interface,namespace,limit})` 返回指定 bridge 或 bridge port 可见的 FDB。两者都要求显式接口名，默认最多 1024 条、上限 4096 条，返回 `{items,truncated}`；达到上限时调用方应把结果视为截断快照。示例：
 
@@ -1115,7 +1115,7 @@ var result = net.link.ensureMacvlan({
 log.info(result.link.name + " created=" + result.created);
 ```
 
-`mac` 必须是非零单播地址。清理前应记录并校验 `created=true`，只删除插件自己创建的接口。`net.link.getOffloads()` 和 `net.link.setOffloads()` 依赖系统 `ethtool`；一键部署会安装该依赖，裁剪系统需要自行提供。需要这两个 API 的插件应声明 `control.net_offloads.v1`，宿主会在启用前检查工具是否存在。`net.link.setGSO(iface, {max_size: mtu, max_segs: 1})` 只设置设备 GSO 上限，不能保证 TC egress 在执行前已完成分段；不支持 GSO 的封装器还必须在 ingress 侧限制 GRO/GSO，或使用显式分段边界。
+`mac` 必须是非零单播地址。清理前应记录并校验 `created=true`，只删除插件自己创建的接口。`net.link.getOffloads()` 和 `net.link.setOffloads()` 由宿主直接调用 ethtool ioctl，不需要系统安装 `ethtool`，也不启动子进程。`setOffloads()` 的成败规则与 `ethtool -K` 相同：只有请求的状态没有达成、且设备上什么都没改变时才报错，部分生效视为成功。唯一的差别：内核已不支持 UFO（Linux 4.14 起）时，请求 `ufo: false` 视为成功，而 `ethtool -K` 会报告无法修改。需要这两个 API 的插件仍应声明 `control.net_offloads.v1`。`net.link.setGSO(iface, {max_size: mtu, max_segs: 1})` 只设置设备 GSO 上限，不能保证 TC egress 在执行前已完成分段；不支持 GSO 的封装器还必须在 ingress 侧限制 GRO/GSO，或使用显式分段边界。
 
 `net.udp.exchange` 适合做一次请求一次响应的控制面探测：
 
@@ -1197,7 +1197,7 @@ socket 生命周期不受单次 handler 结束影响，但一次拨号、手工�
 
 VPN 的“拆除”保留配置，“删除”清理自有出口、配置和未被其他出口引用的凭据；已安装的核心版本保留。sing-box 可在出站接口旁指定该接口上的出站源 IP，使用核心原生绑定。WAN Core 的 `teardown` 动作支持可选 `forget:true`：仅在网络清理完整成功后移除对应 profiles / sessions / status 记录，失败时保留记录供重试。
 
-WAN 自愈仍会检查实际接口、地址、路由、策略规则、邻居和 offload 状态；状态一致时跳过重复写入及不变的恢复租约更新，发现漂移时再补回。已有的匹配策略规则不会先删除再添加。WAN Core 1.6.3 起每 2 秒的巡检只读取各会话的边界接口，核对其存在与身份、MTU、启用与 ARP 状态、GSO 上限和地址；完整核对（另含路由、策略规则、邻居和 offload，offload 每个接口要运行一次 ethtool）每个会话约 30 秒一次，按会话错开。轻检查发现不一致、上次应用未成功，或会话、配置、状态记录有变化时，立即完整核对。因此接口被删、被替换、停用或改动 MTU、ARP、GSO 上限、地址的情况仍在 2 秒内修复；接口保持启用时被单独删掉的路由、规则、邻居，以及被手动修改的 offload，最长约 30 秒后修复。在 8 个外部 TUN 出口、无流量的测试中，veer 空闲 CPU 从单核的约 6.0% 降到约 2.0%（含 ethtool 子进程），每轮巡检从约 80 ms 降到约 13 ms。
+WAN 自愈仍会检查实际接口、地址、路由、策略规则、邻居和 offload 状态；状态一致时跳过重复写入及不变的恢复租约更新，发现漂移时再补回。已有的匹配策略规则不会先删除再添加。WAN Core 1.6.3 起每 2 秒的巡检只读取各会话的边界接口，核对其存在与身份、MTU、启用与 ARP 状态、GSO 上限和地址；完整核对（另含路由、策略规则、邻居和 offload）每个会话约 30 秒一次，按会话错开。轻检查发现不一致、上次应用未成功，或会话、配置、状态记录有变化时，立即完整核对。因此接口被删、被替换、停用或改动 MTU、ARP、GSO 上限、地址的情况仍在 2 秒内修复；接口保持启用时被单独删掉的路由、规则、邻居，以及被手动修改的 offload，最长约 30 秒后修复。在 8 个外部 TUN 出口、无流量的测试中，veer 空闲 CPU 从单核的约 6.0% 降到约 2.0%（含当时读取 offload 的 ethtool 子进程），每轮巡检从约 80 ms 降到约 13 ms。宿主随后改用 ioctl 读写 offload，完整核对也不再启动子进程。
 
 PPPoE 的 TC Hook 都设置了 `binding_required`：拨号成功后插件写入 `hook_bindings`（物理口和本地边界），记录出现之前 Hook 不挂载，不会以全局 Hook 跑在每个接口上（那会关掉所有接口的连接缓存，并让核心固定走 TC）。关闭 `sync_hook_bindings` 的 profile 需要自行维护这些记录。
 
