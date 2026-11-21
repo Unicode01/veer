@@ -246,7 +246,12 @@ func runVPNWireGuardTopology(t *testing.T) {
 				"tls": map[string]any{"enabled": true,
 					"certificate": []string{string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]}))},
 					"key":         []string{string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))}}},
-		}, "outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}}}
+			// The exit of the proxy-chain test: only the remote host itself can
+			// reach it, and it sends from an address the other nodes never use.
+			map[string]any{"type": "shadowsocks", "tag": "chain-exit", "listen": "127.0.0.1", "listen_port": 8390, "method": "aes-128-gcm", "password": "veer-chain-exit-only"},
+		}, "outbounds": []any{map[string]any{"type": "direct", "tag": "direct"},
+			map[string]any{"type": "direct", "tag": "chain-exit", "inet4_bind_address": "198.51.100.1"}},
+			"route": map[string]any{"rules": []any{map[string]any{"inbound": []string{"chain-exit"}, "outbound": "chain-exit"}}}}
 		data, _ := json.Marshal(serverConfig)
 		path := filepath.Join(t.TempDir(), "server.json")
 		if err := os.WriteFile(path, data, 0600); err != nil {
@@ -865,6 +870,46 @@ func runVPNWireGuardTopology(t *testing.T) {
 		t.Log("WAN-bound health: real VPN source, HTTP failure, timeout, async control, stale generation and ordinary TC traffic passed")
 	}
 	if driver != "" {
+		// A front-node chain: the exit node listens only on the remote host's
+		// loopback, so the core reaches it only through the front node, and the
+		// target sees the exit's own source address. TCP and UDP cross both nodes.
+		credential := func(password string) string {
+			return base64.RawURLEncoding.EncodeToString([]byte("aes-128-gcm:" + password))
+		}
+		chain := "ss://" + credential("wrong-password") + "@192.0.2.2:8388#unused\n" +
+			"ss://" + credential("veer-integration-only") + "@192.0.2.2:8388#front\n" +
+			"ss://" + credential("veer-chain-exit-only") + "@127.0.0.1:8390#exit"
+		api("POST", "/api/plugins/vpn_core/actions/set_core_config", map[string]any{"payload": map[string]any{
+			"key": "default", "format": "links", "driver": driver, "value": base64.StdEncoding.EncodeToString([]byte(chain)),
+			"selected": 2, "via": []int{1},
+		}})
+		action("apply")
+		probe(selected, "198.51.100.1")
+		probe(direct, "192.0.2.1")
+		type chainNode struct {
+			Name string      `json:"name"`
+			Type string      `json:"type"`
+			Via  []chainNode `json:"via,omitempty"`
+		}
+		var statuses struct {
+			Records []struct {
+				Key  string `json:"key"`
+				Data struct {
+					Node *chainNode `json:"node"`
+				} `json:"data"`
+			} `json:"records"`
+		}
+		body := api("GET", "/api/plugins/vpn_core/resources/status", nil)
+		if err := json.Unmarshal(body, &statuses); err != nil || len(statuses.Records) != 1 || statuses.Records[0].Data.Node == nil {
+			t.Fatalf("chain status: %s %v", body, err)
+		}
+		if got, _ := json.Marshal(statuses.Records[0].Data.Node); string(got) != `{"name":"exit","type":"ss","via":[{"name":"front","type":"ss"}]}` {
+			t.Fatalf("status does not show the applied chain: %s", got)
+		}
+		if bytes.Contains(body, []byte("veer-chain-exit-only")) || bytes.Contains(body, []byte("127.0.0.1:8390")) {
+			t.Fatalf("status leaks chain credentials or addresses: %s", body)
+		}
+		t.Log("front-node chain carried TCP/UDP through both nodes; status shows the chain")
 		// Replace the SS import with AnyTLS through the same public action.
 		// Both cores must carry TCP/UDP before and after supervised recovery.
 		api("POST", "/api/plugins/vpn_core/actions/set_core_config", map[string]any{"payload": map[string]any{

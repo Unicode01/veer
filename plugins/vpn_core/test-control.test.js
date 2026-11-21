@@ -605,6 +605,28 @@ for(const driver of ['mihomo','sing_box']) {
     assert.equal(h.host.snapshot().secrets.core_default,'[REDACTED]');
     for(const resource of ['profiles','status'])assert.ok(!JSON.stringify(h.host.snapshot().resources[resource]).includes('import-secret'));
   });
+  test('VPN '+driver+' stores a front-node chain, shows it on the status and applies it to the core',()=>{
+    const h=vpnFixture(driver), m=driver==='mihomo';
+    const source='ss://'+Buffer.from('aes-128-gcm:front-secret').toString('base64url')+'@192.0.2.2:8388#front\n'+
+      'trojan://exit-secret@node.example:443?sni=example.com#exit';
+    const saved=h.host.action('set_core_config',{format:'links',driver,value:source,selected:1,via:[0]});
+    assert.deepEqual(saved.form.via,[0]);assert.deepEqual(h.host.action('core_form',{}).via,[0]);
+    h.apply();
+    const config=JSON.parse(h.specs.at(-1).config), list=config[m?'proxies':'outbounds'];
+    const main=list.find(p=>(p.name||p.tag)==='veer-node'), hop=list.find(p=>(p.name||p.tag)==='veer-hop-1');
+    assert.equal(main.password,'exit-secret');assert.equal(main[m?'dialer-proxy':'detour'],'veer-hop-1');assert.equal(hop.password,'front-secret');
+    const status=h.host.state.resources.get('status').get('default').data;
+    assert.deepEqual(status.node,{name:'exit',type:'trojan',via:[{name:'front',type:'ss'}]});
+    assert.deepEqual(h.host.action('inspect',{}).node,status.node);
+    assert.ok(!JSON.stringify(status).includes('front-secret') && !JSON.stringify(status).includes('192.0.2.2'));
+    // Adjusting the selection without new links replaces the chain from the payload; a bad chain changes nothing.
+    assert.throws(()=>h.host.action('set_core_config',{format:'links',driver,value:'',selected:1,via:[1]}),/不能是所选节点/);
+    assert.deepEqual(h.host.action('core_form',{}).via,[0]);
+    h.host.action('set_core_config',{format:'links',driver,value:'',selected:1});
+    assert.deepEqual(h.host.action('core_form',{}).via,[]);
+    h.apply();
+    assert.deepEqual(h.host.state.resources.get('status').get('default').data.node,{name:'exit',type:'trojan'});
+  });
   test('VPN '+driver+' validates the entire import before changing a saved config or touching networking',()=>{
     const h=vpnFixture(driver), source='ss://'+Buffer.from('aes-128-gcm:private-password').toString('base64url')+'@192.0.2.2:8388';
     h.host.action('set_core_config',{format:'links',driver,value:source});

@@ -7,7 +7,7 @@ WebUI 默认显示出口卡片，新建或编辑时按类型显示表单。支�
 | 表单类型 | 普通配置 | 高级配置 |
 | --- | --- | --- |
 | WireGuard | 配置文件导入，或本机 Address/PrivateKey 与远端 Peer | 监听端口、宿主访问远端内网的路由、MTU、出口位置 |
-| Mihomo / sing-box | 实际出站接口、分享链接或 Base64 内容、节点选择 | 直连网段/域名、DNS、原生 JSON；内部 WAN 地址覆盖、MTU、出口位置 |
+| Mihomo / sing-box | 实际出站接口、分享链接或 Base64 内容、节点选择、可选前置节点（链式代理） | 直连网段/域名、DNS、原生 JSON；内部 WAN 地址覆盖、MTU、出口位置 |
 | 外部 TUN | 已有 TUN 接口名、匹配的接口 alias | 内部 WAN 地址覆盖、MTU、出口位置 |
 
 WireGuard 地址须来自实际连接配置，页面不虚构默认地址。代理和外部 TUN 的内部 WAN 地址不属于节点参数，留空在首次应用时自动分配；核心自己的 TUN 地址由插件管理，外部 TUN 地址则由外部程序管理。
@@ -102,6 +102,14 @@ Veer 热重启（部署更新）时，运行中的 Mihomo / sing-box 核心交�
 | AnyTLS `anytls://` | 密码按 URL 编码，端口默认 443，支持 SNI、insecure，以及 ALPN / 指纹参数；兼容显式 `security=tls`、`type=tcp` / `raw`、`headerType=none`，不支持 REALITY 或其他传输封装 |
 
 不支持的协议、传输或参数会在写入 Secret 前报错，不静默丢弃。其他核心功能仍可在“分流与高级配置”中切换为原生 JSON。已有原生 JSON 配置会以原生模式打开，留空继续沿用。这里只导入粘贴内容，不下载订阅 URL，也不接受 YAML；协议映射以 [Mihomo 文档](https://wiki.metacubex.one/en/config/proxies/)、[sing-box 文档](https://sing-box.sagernet.org/configuration/outbound/)、[SIP002](https://shadowsocks.org/doc/sip002.html)、[VMess/VLESS 链接提案](https://github.com/XTLS/Xray-core/discussions/716)、[Hysteria2 URI](https://v2.hysteria.network/docs/developers/URI-Scheme/) 和 [AnyTLS URI](https://github.com/anytls/anytls-go/blob/main/docs/uri_scheme.md) 为依据。
+
+### 链式代理（0.11.0）
+
+代理出口可以给所选节点设置最多 2 个前置节点，从同一次导入的节点中选择。连接顺序是：实际出站接口 → 第一跳 → 第二跳 → 所选节点 → 目标，表单在选择框下方显示这条路径。生成的 sing-box 配置给所选节点和第二跳写 `detour`，Mihomo 写 `dialer-proxy`；只有第一跳从实际出站接口连接，sing-box 的出站 IP 也只绑定第一跳和直连出站。直连例外仍直接从上联发出；接管下游 DNS 时，经节点的 DNS 同样走整条链。UDP 需要每一跳都能转发：后面的节点若是 Hysteria2 这类基于 UDP 的协议，前置节点必须支持 UDP。
+
+`set_core_config` 的链接格式接受 `via`：按连接顺序排列、从 0 开始的节点序号，最多 2 项，不能重复，也不能包含所选节点。`value` 留空只调整选择时，链路按本次的 `via` 替换，省略即不使用。`core_form` 返回 `via`；出口卡片、`status.node` 和 `inspect.node` 的 `via` 列出已应用链路中各前置节点的名称和协议，不含地址和凭据。
+
+也可以把两个 VPN 出口串起来：后一个出口用原生 JSON，让节点出站绑定前一个出口的边界（sing-box `bind_interface`，Mihomo `interface-name`）。表单不支持把另一个出口填为实际出站接口。测试中这种做法比单个核心内的前置节点慢约 20–25%（单流上行约 1.12 对 1.42 Gbit/s）；宿主 `rp_filter=1` 时回包被丢弃、连接失败；前一个出口重新应用会中断后一个出口经它建立的连接。优先使用前置节点。
 
 自动配置默认把流量发送到所选节点。高级栏可填写直连 CIDR、直连域名及子域名（依赖 HTTP/TLS/QUIC 嗅探，识别不到时仍走节点）。节点域名解析默认使用经实际上联访问的 `223.5.5.5`，可修改。下游 DNS 默认沿用；可选择接管经过此出口的 TCP/UDP 53 流量，通过节点访问指定 DNS（默认 `1.1.1.1`）。LAN 网关代发的 DNS 不一定经过此出口，DoH/DoT 也不属于 53 端口接管范围。
 

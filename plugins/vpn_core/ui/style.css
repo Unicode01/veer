@@ -43,6 +43,7 @@
 .vpn-page textarea { resize:vertical; width:100%; }
 .vpn-page .vpn-json { min-height:230px; font-family: var(--veer-mono); line-height:1.7; }
 .vpn-page .vpn-links { min-height:120px; font-family: var(--veer-mono); }
+.vpn-via { display:grid; gap:8px; margin-top:16px; }
 .vpn-page .vpn-rule-input { min-height:100px; font-family: var(--veer-mono); }
 .vpn-proxy-advanced { border:1px solid var(--veer-border); border-radius: var(--veer-radius); padding:12px 14px; }
 .vpn-subsection { border-top:1px solid var(--veer-border); padding-top:20px; margin-top:20px; }

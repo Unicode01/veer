@@ -99,12 +99,38 @@
       label:[item.name,item.addresses[0] || T('field.upstream.noAddress'),T(item.up?'field.upstream.up':'field.upstream.down')].join(' · ')}})));
     fillUpstreamIPs();
   }
-  upstream.addEventListener('input',fillUpstreamIPs);
+  upstream.addEventListener('input',()=>{fillUpstreamIPs();if(nodeNames.length)renderVia();});
   const listenPort=input(L('field.listenPort'),0,'number'), privateKey=input(L('field.privateKey'),'','password');
   const routes=input(L('field.routes'),''), tunName=input(L('field.tunName'),''), tunAlias=input(L('field.tunAlias'),'');
   const coreConfig=area(L('field.coreConfig')), rawConfig=area(L('field.rawConfig')), importConfig=area(L('field.importConfig'));
   const shareLinks=area(L('field.shareLinks')), nodeSelect=bind(h('select',{className:F.classes.input}),'aria-label',L('field.node'));
   shareLinks.classList.add('vpn-links');bind(shareLinks,'placeholder',L('field.shareLinks.placeholder'));
+  // Front hops of a proxy chain in dialing order: the first is dialed from the
+  // uplink and the selected node is reached through the last (see share.js).
+  const viaSelects=[0,1].map(i=>bind(h('select',{className:F.classes.input}),'aria-label',L(i?'field.via.second':'field.via.first')));
+  const viaPath=h('span',{className:'vpn-field-help vpn-via-path'}), viaSecond=field(L('field.via.second'),viaSelects[1]);
+  const viaPanel=h('div',{className:'vpn-via'},[h('div',{className:'vpn-fields'},[field(L('field.via.first'),viaSelects[0]),viaSecond]),viaPath]);
+  function currentVia() {return viaSelects.map(select=>select.value).filter(v=>v!=='').map(Number);}
+  function renderVia(via) {
+    const selectedNode=Number(nodeSelect.value);
+    via=(via || currentVia()).filter(i=>Number.isInteger(i) && i!==selectedNode && i<nodeNames.length).slice(0,S.MAX_VIA);
+    viaSelects.forEach((select,i)=>{
+      const others=via.filter((_,j)=>j!==i);
+      select.replaceChildren(h('option',{attrs:{value:''},text:T('field.via.none')}),...nodeNames.map((n,k)=>{
+        const el=h('option',{attrs:{value:String(k)},text:(k+1)+'. '+n.name+' · '+n.type});
+        el.disabled=k===selectedNode || others.includes(k);
+        return el;
+      }));
+      select.value=via[i]==null?'':String(via[i]);
+    });
+    viaPanel.hidden=nodeNames.length<2;
+    viaSecond.hidden=!via.length || nodeNames.length<3;
+    const target=nodeNames[selectedNode];
+    viaPath.textContent=via.length && target?T('field.via.path',{path:[upstream.value.trim() || T('field.via.uplink'),...via.map(i=>nodeNames[i].name),target.name,T('field.via.target')].join(' → ')}):T('field.via.help');
+    F.requestResize();
+  }
+  viaSelects.forEach(select=>select.addEventListener('change',()=>renderVia()));
+  nodeSelect.addEventListener('change',()=>renderVia());
   const configMode=bind(h('select',{className:F.classes.input},[
     option('links',L('field.configMode.links')),option('native',L('field.configMode.native'))
   ]),'aria-label',L('field.configMode'));
@@ -115,16 +141,17 @@
     option('off',L('field.hijackDNS.off')),option('on',L('field.hijackDNS.on'))
   ]),'aria-label',L('field.hijackDNS'));
   const linksPanel=h('div',{}), nativePanel=h('div',{}), routingPanel=h('div',{});
-  function nodeOptions(nodes,selected) {
+  function nodeOptions(nodes,selected,via) {
     nodeNames=nodes.map(n=>({name:n.name,type:n.type}));
     nodeSelect.replaceChildren(...nodeNames.map((n,i)=>h('option',{attrs:{value:String(i)},text:(i+1)+'. '+n.name+' · '+n.type})));
     if(!nodeNames.length)nodeSelect.appendChild(h('option',{attrs:{value:'0'},text:T('field.node.placeholder')}));
     nodeSelect.value=String(selected||0);
+    renderVia(via || []);
   }
   function proxyOptions() {return S.options({direct_cidrs:directCIDRs.value,direct_domains:directDomains.value,dns_hijack:hijackDNS.value==='on',bootstrap_dns:bootstrapDNS.value.trim(),proxy_dns:proxyDNS.value.trim()});}
   function proxyForm(form) {
     storedMode=form.mode||'empty';configMode.value=storedMode==='native'?'native':'links';
-    nodeOptions(form.nodes||[],form.selected);
+    nodeOptions(form.nodes||[],form.selected,form.via);
     const o=S.options(form.options);
     directCIDRs.value=o.direct_cidrs.join('\n');directDomains.value=o.direct_domains.join('\n');
     bootstrapDNS.value=o.bootstrap_dns;proxyDNS.value=o.proxy_dns;hijackDNS.value=o.dns_hijack?'on':'off';
@@ -234,8 +261,9 @@
         actions([button(T('proxy.detect'),async()=>{
           nodeOptions(S.parse(shareLinks.value,currentDriver),0);dirty=true;
           say('proxy.detected',{count:nodeNames.length});
-        },true)]),field(T('field.node'),nodeSelect,T('field.node.help'))
+        },true)]),field(T('field.node'),nodeSelect,T('field.node.help')),viaPanel
       );
+      renderVia();
       routingPanel.replaceChildren(node('p','vpn-subtle',T('proxy.routingIntro')),
         h('div',{className:'vpn-fields'},[field(T('field.directCIDRs'),directCIDRs,T('field.directCIDRs.help')),field(T('field.directDomainsLong'),directDomains,T('field.directDomains.help')),
           field(T('field.bootstrapDNS'),bootstrapDNS,T('field.bootstrapDNS.help')),field(T('field.hijackDNS'),hijackDNS,T('field.hijackDNS.help')),field(T('field.proxyDNS'),proxyDNS,T('field.proxyDNS.help'))])
@@ -277,9 +305,9 @@
     button(L('editor.applyJSON'),async () => {
       const value=JSON.parse(rawConfig.value);if(!value || typeof value!=='object' || Array.isArray(value))throw new Error(T('error.profileObject'));
       const keep=['mihomo','sing_box'].includes(currentDriver) && value.driver===currentDriver && value.config_secret===original.config_secret;
-      const draft=keep?{storedMode,mode:configMode.value,nodes:nodeNames,selected:Number(nodeSelect.value),options:proxyOptions(),links:shareLinks.value,native:coreConfig.value}:null;
+      const draft=keep?{storedMode,mode:configMode.value,nodes:nodeNames,selected:Number(nodeSelect.value),via:currentVia(),options:proxyOptions(),links:shareLinks.value,native:coreConfig.value}:null;
       fill(value);
-      if(draft) {proxyForm({mode:draft.storedMode,nodes:draft.nodes,selected:draft.selected,options:draft.options});configMode.value=draft.mode;shareLinks.value=draft.links;coreConfig.value=draft.native;renderProxyMode();}
+      if(draft) {proxyForm({mode:draft.storedMode,nodes:draft.nodes,selected:draft.selected,via:draft.via,options:draft.options});configMode.value=draft.mode;shareLinks.value=draft.links;coreConfig.value=draft.native;renderProxyMode();}
       dirty=true;notify(T('editor.jsonApplied'));
     },true)
   ]);
@@ -292,7 +320,7 @@
     const managed=['mihomo','sing_box'].includes(currentDriver), links=shareLinks.value.trim();
     let imported=null;
     if(managed && configMode.value==='links') {
-      if(links)imported=S.create(currentDriver,links,nodeSelect.value,proxyOptions());
+      if(links)imported=S.create(currentDriver,links,nodeSelect.value,proxyOptions(),currentVia());
       else {if(storedMode!=='links')throw new Error(T('error.linksRequired'));proxyOptions();}
     } else if(managed) {
       if(text) {try {const parsed=JSON.parse(text);if(!parsed || typeof parsed!=='object' || Array.isArray(parsed))throw new Error();}catch(error){throw new Error(T('error.coreJSON'));}}
@@ -306,9 +334,9 @@
         if (privateKey.value.trim()) await F.action('set_key',{key,value:privateKey.value.trim()});
         for (let i=0;i<peers.length;i++) if (peers[i].psk.value.trim()) await F.action('set_key',{key,name:profile.peers[i].preshared_key_secret,value:peers[i].psk.value.trim()});
       } else if(managed && configMode.value==='links') {
-        const result=await F.action('set_core_config',{key,...(profile.config_secret?{name:profile.config_secret}:{}),format:'links',driver:currentDriver,value:links,selected:Number(nodeSelect.value),options:proxyOptions()});
+        const result=await F.action('set_core_config',{key,...(profile.config_secret?{name:profile.config_secret}:{}),format:'links',driver:currentDriver,value:links,selected:Number(nodeSelect.value),via:currentVia(),options:proxyOptions()});
         if(result.result && result.result.form)proxyForm(result.result.form);
-        else {storedMode='links';if(imported)nodeOptions(S.metadata(imported).nodes,imported.selected);}
+        else {storedMode='links';if(imported)nodeOptions(S.metadata(imported).nodes,imported.selected,imported.via);}
       } else if(managed && text) {await F.action('set_core_config',{key,...(profile.config_secret?{name:profile.config_secret}:{}),value:text});storedMode='native';}
     } finally {privateKey.value='';peers.forEach(p=>{p.psk.value='';});coreConfig.value='';shareLinks.value='';}
     await F.data.upsert('profiles',key,profile,{enabled:true});
@@ -439,6 +467,11 @@
     // A background poll stays quiet on failure; the next one or a reload reports it.
     runtimePoll=setTimeout(()=>{if(document.hidden)scheduleRuntime();else refreshRuntime().catch(()=>scheduleRuntime());},15000);
   }
+  // The applied node, with its front hops when it is reached through a chain.
+  function nodeText(n) {
+    const text=n.name+' · '+n.type;
+    return n.via && n.via.length?text+' · '+T('list.via',{path:n.via.map(v=>v.name).join(' → ')}):text;
+  }
   function detailRows(rows) {
     return h('dl',{className:'vpn-metadata vpn-detail-facts'},rows.map(pair=>h('div',{},[node('dt','',pair[0]),h('dd',{},[pair[1] instanceof Node?pair[1]:mono(pair[1])])])));
   }
@@ -448,7 +481,7 @@
     if (view.traffic) rows.push([T('details.traffic'),node('span','',T('list.traffic',{tx:bytes(view.traffic.tx_bytes),rx:bytes(view.traffic.rx_bytes)}))]);
     if (wg) rows.push([T('details.publicKey'),view.public_key]);
     if (view.process) rows.push([T('details.core'),node('span','',coreText(view.process))],[T('details.pid'),view.process.pid || '—'],[T('details.starts'),String(view.process.starts || 0)]);
-    if (view.node) rows.push([T('list.node'),view.node.name+' · '+view.node.type]);
+    if (view.node) rows.push([T('list.node'),nodeText(view.node)]);
     if (status.egress_nat_source_ip) rows.push([T('details.assign'),node('span',F.classes.mono,T('details.assignValue',{interface:status.egress_nat_interface || view.local_interface,source:status.egress_nat_source_ip}))]);
     const parts=[detailRows(rows)];
     if (wg && (view.peers || []).length) {
@@ -497,7 +530,7 @@
       const rows=[[T('list.interface'),mono(name)],[T(wg?'field.wgAddress':'field.wanAddress'),addresses.length?mono(addresses.join(', ')):node('span','',T(wg?'list.notConfigured':'list.assignedOnApply'))]];
       if (wg) rows.push([T('list.peers'),endpoints.length===1 && peers.length===1?mono(endpoints[0]):node('span','',T('list.peerCount',{count:peers.length}))],
         [T('list.handshake'),h('span',{})]);
-      else if (proxy) rows.push([T('field.upstream'),mono(profile.upstream_interface)],[T('list.node'),node('span','',status.node?status.node.name+' · '+status.node.type:status.profile_revision?T('list.nativeConfig'):'—')]);
+      else if (proxy) rows.push([T('field.upstream'),mono(profile.upstream_interface)],[T('list.node'),node('span','',status.node?nodeText(status.node):status.profile_revision?T('list.nativeConfig'):'—')]);
       else rows.push([T('list.tunInterface'),mono(profile.tun_interface)],[T('details.path'),h('span',{})]);
       const metadata=h('dl',{className:'vpn-metadata'},rows.map(pair=>h('div',{},[node('dt','',pair[0]),h('dd',{},[pair[1]])])));
       const slot={facts:h('p',{className:'vpn-facts'}),health:h('div',{className:'vpn-health-line'}),handshake:wg?rows[3][1]:null,path:!wg && !proxy?rows[3][1]:null};

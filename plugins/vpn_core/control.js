@@ -103,7 +103,7 @@ exports.onAction = function (ctx) {
         if (!previous || previous.veer_proxy !== 1 || previous.driver !== payload.driver) throw fail('links_required', '请为当前核心重新导入分享链接');
         source = previous.links;
       }
-      var imported = shares.create(payload.driver, source, payload.selected, payload.options);
+      var imported = shares.create(payload.driver, source, payload.selected, payload.options, payload.via);
       // Validate both parsing and generation before replacing any saved Secret.
       shares.generate(imported);
       secret.set(name, JSON.stringify(imported));
@@ -426,8 +426,11 @@ function recordApplied(key, raw, revision) {
     try {
       var saved = JSON.parse(secret.get(raw.config_secret || 'core_' + key) || 'null');
       if (saved && saved.veer_proxy === 1) {
-        var form = shares.metadata(saved), node = (form.nodes || [])[form.selected || 0];
-        if (node) applied.node = {name: String(node.name || ''), type: String(node.type || '')};
+        var form = shares.metadata(saved), nodes = form.nodes || [], node = nodes[form.selected || 0];
+        var summary = function (n) { return {name: String(n.name || ''), type: String(n.type || '')}; };
+        if (node) applied.node = summary(node);
+        // Front hops in dialing order, so the card can show the chain that was applied.
+        if (node && form.via && form.via.length) applied.node.via = form.via.map(function (i) { return summary(nodes[i]); });
       }
     } catch (_) { /* A native or unreadable config has no node summary. */ }
   }

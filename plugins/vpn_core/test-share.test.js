@@ -71,6 +71,42 @@ for(const driver of ['mihomo','sing_box']) {
       assert.ok(config.rules.includes('IP-CIDR6,fd00::/8,DIRECT,no-resolve'));assert.equal(config.sniffer.enable,true);
     } else {assert.equal(config.dns.final,'remote');assert.equal(config.dns.servers[1].detour,'veer-node');assert.ok(config.route.rules.some(r=>r.action==='hijack-dns'));}
   });
+  test(driver+' chains the selected node through front nodes and binds only the first hop to the uplink',()=>{
+    const source=samples.join('\n'), m=driver==='mihomo', key=m?'dialer-proxy':'detour';
+    // Selected AnyTLS, reached through SS (dialed first) and then VLESS REALITY.
+    const v=S.create(driver,source,5,{dns_hijack:true},[0,2]), config=S.generate(v), list=config[m?'proxies':'outbounds'];
+    assert.deepEqual(v.via,[0,2]);assert.deepEqual(S.metadata(v).via,[0,2]);
+    const byTag=Object.fromEntries(list.map(p=>[p[m?'name':'tag'],p]));
+    assert.equal(list[0][m?'name':'tag'],'veer-node');assert.equal(list[0].type,'anytls');assert.equal(list[0][key],'veer-hop-2');
+    assert.equal(byTag['veer-hop-1'].type,m?'ss':'shadowsocks');assert.equal(byTag['veer-hop-1'][key],undefined);
+    assert.equal(byTag['veer-hop-2'].type,'vless');assert.equal(byTag['veer-hop-2'][key],'veer-hop-1');
+    if(m) {assert.equal(config.rules.at(-1),'MATCH,veer-node');assert.deepEqual(config.dns.nameserver,['1.1.1.1#veer-node']);}
+    else {
+      assert.equal(config.route.final,'veer-node');assert.equal(config.dns.servers[1].detour,'veer-node');
+      // A source address binds the sockets the core opens itself: direct and the first hop.
+      const built=JSON.parse(D.build({driver,slot:1,interface:'vtunhome',mtu:1420,upstream_interface:'eth0',upstream_ip:'192.0.2.9'},JSON.stringify(v)).config);
+      const bound=built.outbounds.filter(o=>o.bind_interface==='eth0').map(o=>o.tag).sort();
+      assert.deepEqual(bound,['direct','veer-hop-1']);
+      assert.equal(built.outbounds.find(o=>o.tag==='veer-node').inet4_bind_address,undefined);
+    }
+    const publicJSON=JSON.stringify(S.metadata(v));
+    for(const secret of ['p@ss:word','node.example',id])assert.ok(!publicJSON.includes(secret));
+    // One front node; an empty chain keeps the stored form of earlier versions.
+    const one=S.generate(S.create(driver,source,1,{},['3']));
+    assert.equal(one[m?'proxies':'outbounds'][0][key],'veer-hop-1');
+    assert.equal(S.create(driver,source,1,{},[]).via,undefined);assert.deepEqual(S.metadata(S.create(driver,source,1)).via,[]);
+    assert.deepEqual(S.generate(S.create(driver,source,1,{},[])),S.generate(S.create(driver,source,1)));
+  });
+  test(driver+' rejects front nodes that are missing, repeated, the selected node or too many',()=>{
+    const source=samples.join('\n');
+    for(const bad of [[6],[-1],[1.5],['x'],[null]])assert.throws(()=>S.create(driver,source,0,{},bad),/前置节点/);
+    assert.throws(()=>S.create(driver,source,2,{},[2]),/不能是所选节点/);
+    assert.throws(()=>S.create(driver,source,0,{},[1,1]),/不能重复/);
+    assert.throws(()=>S.create(driver,source,0,{},[1,2,3]),/最多可设置 2 个/);
+    for(const bad of [[2],[1,1],[1,2,3]])assert.throws(()=>S.create(driver,source,2,{},bad),e=>!e.message.includes('p@ss:word') && !e.message.includes(id));
+    // A stored chain is checked again against its links.
+    assert.throws(()=>S.metadata({veer_proxy:1,driver,links:samples[0],selected:0,via:[1],options:{}}),/前置节点/);
+  });
   test(driver+' rejects incomplete or unsupported links without putting credentials in errors',()=>{
     const invalid=['', '!!!!', 'Zg===', '/w==', 'Zh==', 'abc', 'x'.repeat(256*1024+1), Array(129).fill(ss).join('\n'),
       'https://subscription.example/secret','vless://'+id+'@node.example:443?type=kcp',
@@ -102,8 +138,10 @@ for(const [driver,env] of [['mihomo','VEER_TEST_MIHOMO'],['sing_box','VEER_TEST_
     const dir=fs.mkdtempSync(path.join(os.tmpdir(),'veer-import-config-'));
     try {
       const links=[...samples,...['tcp','ws','grpc','h2'].flatMap(type=>['vless','vmess'].map(protocol=>protocol+'://'+id+'@node.example:443?security=tls&type='+type+(type==='grpc'?'&serviceName=proxy':'')+'&sni=example.com'))];
-      for(const link of links)for(const opts of [{},{dns_hijack:true,direct_domains:['example.com'],direct_cidrs:['10.0.0.0/8','fd00::/8']}]) {
-        const config=D.build({driver,slot:1,interface:'vtuncheck',mtu:1420,upstream_interface:'lo'},JSON.stringify(S.create(driver,link,0,opts))).config;
+      // Every protocol alone, plus chains where each kind of node is reached through two others.
+      const cases=links.map(link=>[link,0,undefined]).concat(samples.map((_,i)=>[samples.join('\n'),i,[(i+1)%samples.length,(i+2)%samples.length]]));
+      for(const [link,selected,via] of cases)for(const opts of [{},{dns_hijack:true,direct_domains:['example.com'],direct_cidrs:['10.0.0.0/8','fd00::/8']}]) {
+        const config=D.build({driver,slot:1,interface:'vtuncheck',mtu:1420,upstream_interface:'lo'},JSON.stringify(S.create(driver,link,selected,opts,via))).config;
         const file=path.join(dir,'config.json');fs.writeFileSync(file,config);
         const args=driver==='mihomo'?['-t','-d',dir,'-f',file]:['check','-c',file];
         const result=cp.spawnSync(process.env[env],args,{encoding:'utf8',timeout:20000,cwd:dir});

@@ -281,7 +281,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
         actions.push({id,...route.request().postDataJSON()});
         const name=payload.name || 'core_'+payload.key;
         if(payload.format==='links') {
-          coreConfigs[name]=vpnShares.create(payload.driver,payload.value||coreConfigs[name]?.links,payload.selected,payload.options);
+          coreConfigs[name]=vpnShares.create(payload.driver,payload.value||coreConfigs[name]?.links,payload.selected,payload.options,payload.via);
           return route.fulfill({json:{result:{stored:true,form:vpnShares.metadata(coreConfigs[name])}}});
         }
         coreConfigs[name]=JSON.parse(payload.value);
@@ -457,6 +457,14 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await frame.getByRole('button',{name:'识别节点',exact:true}).click();
   await expect(frame.getByLabel('使用节点').locator('option')).toHaveCount(2);
   await frame.getByLabel('使用节点').selectOption('1');
+  // A proxy chain: the selected node is reached through a front node dialed from the uplink.
+  const firstHop=frame.getByLabel('链式代理：第一跳',{exact:true}), secondHop=frame.getByLabel('链式代理：第二跳',{exact:true});
+  await expect(firstHop).toHaveValue('');
+  await expect(firstHop.locator('option[value="1"]')).toHaveJSProperty('disabled',true);
+  await firstHop.selectOption('0');
+  await expect(frame.locator('.vpn-via-path')).toHaveText('连接顺序：ppp0 → first → second → 目标');
+  // Two nodes leave no candidate for a second hop.
+  await expect(secondHop).toBeHidden();
   await frame.getByText('分流与高级配置',{exact:true}).click();
   await frame.getByLabel('直连网段').fill('10.0.0.0/8');
   await frame.getByLabel('直连域名').fill('example.com');
@@ -467,6 +475,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   expect(records.vpn1.data.upstream_ip).toBe('192.0.2.9');
   expect(records.vpn1.data.config_secret).toBe('core_sing_box_vpn1');
   expect(actions.at(-1).payload.format).toBe('links');expect(actions.at(-1).payload.selected).toBe(1);
+  expect(actions.at(-1).payload.via).toEqual([0]);expect(coreConfigs.core_sing_box_vpn1.via).toEqual([0]);
   expect(actions.at(-1).payload.options.direct_cidrs).toEqual(['10.0.0.0/8']);
   expect(actions.at(-1).payload.options.dns_hijack).toBe(true);
   await expect(frame.getByLabel('节点分享链接或 Base64')).toHaveValue('');
@@ -479,14 +488,18 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await frame.getByRole('button',{name:'收起编辑',exact:true}).click();
   await frame.locator('.vpn-outlet').filter({has:frame.getByRole('heading',{name:'vpn1',exact:true})}).getByRole('button',{name:'编辑',exact:true}).click();
   await expect(frame.getByLabel('使用节点')).toHaveValue('1');
+  await expect(frame.getByLabel('链式代理：第一跳',{exact:true})).toHaveValue('0');
   await expect(frame.getByLabel('出站 IP',{exact:true})).toHaveValue('192.0.2.9');
   await expect(frame.getByLabel('直连网段')).toBeHidden();
   await frame.getByText('分流与高级配置',{exact:true}).click();
   await expect(frame.getByLabel('直连网段')).toHaveValue('10.0.0.0/8');
+  // Selecting the front node itself drops it from the chain.
   await frame.getByLabel('使用节点').selectOption('0');
+  await expect(frame.getByLabel('链式代理：第一跳',{exact:true})).toHaveValue('');
+  await expect(frame.locator('.vpn-via-path')).toContainText('第一跳直接从实际出站接口连接');
   await frame.getByRole('button',{name:'保存草稿',exact:true}).click();
   await expect.poll(()=>coreConfigs.core_sing_box_vpn1.selected).toBe(0);
-  expect(actions.at(-1).payload.value).toBe('');
+  expect(actions.at(-1).payload.value).toBe('');expect(actions.at(-1).payload.via).toEqual([]);
   await frame.getByText('高级设置与 JSON',{exact:true}).click();
   await frame.getByRole('button',{name:'读取当前表单 JSON',exact:true}).click();
   const rawProfile=JSON.parse(await frame.getByLabel('VPN 出口 JSON').inputValue());rawProfile.mtu=1400;
