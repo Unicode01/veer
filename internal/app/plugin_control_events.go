@@ -43,6 +43,9 @@ const (
 	pluginEventTopicNetAddr            = "net.addr"
 	pluginEventTopicNetNeigh           = "net.neigh"
 	pluginEventTopicNetRoute           = "net.route"
+	pluginEventTopicNetRule            = "net.rule"
+	pluginEventTopicNetOffload         = "net.offload"
+	pluginEventTopicProcessState       = "process.state"
 	pluginEventTopicResourceChanged    = "resource.changed"
 	pluginEventTopicPluginLifecycle    = "plugin.lifecycle"
 )
@@ -476,11 +479,13 @@ func validPluginEventTopic(value string) bool {
 }
 
 func validPluginSystemEventSubscriptionTopic(topic, match string) bool {
-	if match == pluginEventMatchPrefix && (topic == "net" || topic == "resource" || topic == "plugin") {
+	if match == pluginEventMatchPrefix && (topic == "net" || topic == "resource" || topic == "plugin" || topic == "process") {
 		return true
 	}
 	switch topic {
-	case pluginEventTopicNetLink, pluginEventTopicNetAddr, pluginEventTopicNetNeigh, pluginEventTopicNetRoute, pluginEventTopicResourceChanged, pluginEventTopicPluginLifecycle:
+	case pluginEventTopicNetLink, pluginEventTopicNetAddr, pluginEventTopicNetNeigh, pluginEventTopicNetRoute,
+		pluginEventTopicNetRule, pluginEventTopicNetOffload, pluginEventTopicProcessState,
+		pluginEventTopicResourceChanged, pluginEventTopicPluginLifecycle:
 		return true
 	default:
 		return false
@@ -1078,6 +1083,13 @@ func validatePluginEventPayload(spec PluginEventSubscription, event pluginContro
 }
 
 func pluginEventDeliveryAllowed(plugin LoadedPlugin, event pluginControlBusEvent) bool {
+	switch event.Topic {
+	case pluginEventTopicNetRule:
+		return pluginControlHasPermission(plugin, "net.admin") && pluginEventRuleAccessAllowed(plugin, event.Payload)
+	case pluginEventTopicProcessState:
+		// A managed process belongs to the plugin that started it.
+		return event.TargetPlugin != "" && event.TargetPlugin == plugin.ID
+	}
 	if pluginEventTopicRequiresNetAdmin(event.Topic) {
 		return pluginControlHasPermission(plugin, "net.admin") && pluginEventNetAccessAllowed(plugin, event.Payload)
 	}
@@ -1110,6 +1122,34 @@ func pluginEventDeliveryAllowed(plugin LoadedPlugin, event pluginControlBusEvent
 			pluginControlHasPermission(plugin, "worker") &&
 			pluginControlHasEventAccess(plugin, sourcePlugin, event.Topic)
 	}
+}
+
+// pluginEventRuleAccessAllowed mirrors net.rule writes: a rule naming iif or
+// oif needs rule.write on those interfaces, one naming neither needs any
+// rule.write entry.
+func pluginEventRuleAccessAllowed(plugin LoadedPlugin, payload json.RawMessage) bool {
+	var value struct {
+		IIF string `json:"iif"`
+		OIF string `json:"oif"`
+	}
+	if err := json.Unmarshal(payload, &value); err != nil {
+		return false
+	}
+	names := make([]string, 0, 2)
+	for _, name := range []string{value.IIF, value.OIF} {
+		if name = strings.TrimSpace(name); name != "" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return pluginControlHasAnyNetAccess(plugin, "rule.write")
+	}
+	for _, name := range names {
+		if !pluginControlHasNetAccess(plugin, "rule.write", name) {
+			return false
+		}
+	}
+	return true
 }
 
 func pluginEventNetAccessAllowed(plugin LoadedPlugin, payload json.RawMessage) bool {
@@ -1280,4 +1320,35 @@ func (pm *ProcessManager) publishPluginSystemEvent(topic, targetPlugin, resource
 	if rt, ok := pm.pluginControlRuntime.(*gojaPluginControlRuntime); ok {
 		rt.publishPluginSystemEvent(topic, targetPlugin, resourceID, payload)
 	}
+}
+
+// publishPluginSystemEventFor publishes the payload built by build, calling
+// it only when some plugin subscribes to topic: building a netlink payload
+// looks the interface up, once per neighbour or route change.
+func (pm *ProcessManager) publishPluginSystemEventFor(topic string, build func() any) {
+	if pm == nil || pm.pluginControlRuntime == nil {
+		return
+	}
+	rt, ok := pm.pluginControlRuntime.(*gojaPluginControlRuntime)
+	if !ok || !rt.pluginEventTopicSubscribed(topic) {
+		return
+	}
+	rt.publishPluginSystemEvent(topic, "", "", build())
+}
+
+// pluginEventTopicSubscribed reports whether any running subscription matches
+// topic.
+func (rt *gojaPluginControlRuntime) pluginEventTopicSubscribed(topic string) bool {
+	if rt == nil {
+		return false
+	}
+	topic = normalizePluginEventTopic(topic)
+	rt.eventMu.Lock()
+	defer rt.eventMu.Unlock()
+	for _, sub := range rt.eventSubscriptions {
+		if !sub.stopped.Load() && pluginEventSubscriptionMatches(sub.spec, topic) {
+			return true
+		}
+	}
+	return false
 }

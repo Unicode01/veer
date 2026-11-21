@@ -130,8 +130,16 @@ func TestPluginSDKContractMatchesGojaHost(t *testing.T) {
 		pluginEventTopicNetAddr,
 		pluginEventTopicNetNeigh,
 		pluginEventTopicNetRoute,
+		pluginEventTopicNetRule,
+		pluginEventTopicNetOffload,
+		pluginEventTopicProcessState,
 		pluginEventTopicResourceChanged,
 		pluginEventTopicPluginLifecycle,
+	}
+	for _, topic := range wantSystemTopics {
+		if !validPluginSystemEventSubscriptionTopic(topic, pluginEventMatchExact) {
+			t.Fatalf("SDK system topic %s cannot be subscribed", topic)
+		}
 	}
 	if !reflect.DeepEqual(contract.EventBus.SystemTopics, wantSystemTopics) {
 		t.Fatalf("SDK event bus topics = %v, runtime = %v", contract.EventBus.SystemTopics, wantSystemTopics)

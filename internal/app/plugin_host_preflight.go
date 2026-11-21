@@ -37,6 +37,7 @@ func currentPluginHostFeatureAvailability() pluginHostFeatureAvailability {
 			"control.http_client.v1",
 			"control.dns_client.v1",
 			"control.net_events.v1",
+			"control.net_policy_events.v1",
 			"control.net_leases.v1",
 			"control.netns_provider.v1",
 			"control.netns_scoped.v1",
@@ -128,6 +129,9 @@ func currentPluginHostFeatureAvailability() pluginHostFeatureAvailability {
 		caps.Netlink.NeighborSubscribe,
 		caps.Netlink.RouteSubscribe,
 	)
+	// Rule events need only the routing groups; offload events also need
+	// ethtool netlink (Linux 5.6), without which none arrive.
+	status["control.net_policy_events.v1"] = netAdminStatus
 	status["control.raw_l2"] = pluginRawL2FeatureStatus()
 	status["control.netns_provider.v1"] = pluginNetworkNamespaceFeatureStatus()
 	status["control.netns_scoped.v1"] = status["control.netns_provider.v1"]
@@ -235,6 +239,12 @@ func pluginRequiredHostFeatures(plugin LoadedPlugin) []string {
 	for _, subscription := range plugin.EventSubscriptions {
 		if pluginEventTopicRequiresNetAdmin(subscription.Topic) {
 			required["control.net_events.v1"] = struct{}{}
+		}
+		switch subscription.Topic {
+		case pluginEventTopicNetRule, pluginEventTopicNetOffload:
+			required["control.net_policy_events.v1"] = struct{}{}
+		case "process", pluginEventTopicProcessState:
+			required["control.process_events.v1"] = struct{}{}
 		}
 	}
 	out := make([]string, 0, len(required))

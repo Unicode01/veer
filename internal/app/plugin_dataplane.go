@@ -472,6 +472,8 @@ func (pm *ProcessManager) reconcilePluginsForRuntimeWithError() (pluginRuntimeSn
 	}
 	pm.pluginReconcileMu.Lock()
 	defer pm.pluginReconcileMu.Unlock()
+	// Plugins can contribute managed networks; a reconcile may change them.
+	defer pm.noteManagedRuntimeInputsChanged()
 	startedAt := time.Now()
 	pm.mu.Lock()
 	pm.pluginReconcileLastAttemptAt = startedAt

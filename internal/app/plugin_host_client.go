@@ -52,6 +52,25 @@ type pluginHostClient struct {
 	resourceError atomic.Value
 	sandboxState  atomic.Value
 	rssLimit      uint64
+	// hardMemoryLimit is set when the host's cgroup memory.max is in force,
+	// so the kernel stops a runaway host even between RSS samples.
+	hardMemoryLimit bool
+}
+
+// The RSS limit is per process and the kernel cannot enforce it, so it is
+// sampled: every second while the host is near it or nothing else bounds it,
+// and every ten seconds while it is under half of it inside a cgroup whose
+// memory.max ends any faster growth.
+const (
+	pluginHostRSSSampleNear = time.Second
+	pluginHostRSSSampleFar  = 10 * time.Second
+)
+
+func pluginHostRSSSampleInterval(rss, limit uint64, hardMemoryLimit bool) time.Duration {
+	if !hardMemoryLimit || limit == 0 || rss >= limit/2 {
+		return pluginHostRSSSampleNear
+	}
+	return pluginHostRSSSampleFar
 }
 
 func startPluginHostClient(cfg *Config, plugin LoadedPlugin, mode, workerName, source string, broker pluginHostCallBroker) (*pluginHostClient, error) {
@@ -131,6 +150,7 @@ func startPluginHostClient(cfg *Config, plugin LoadedPlugin, mode, workerName, s
 		log.Printf("plugin host %s resource limits degraded: %v", plugin.ID, limitErr)
 	} else if cleanup != nil {
 		client.cleanup = combinePluginHostCleanup(client.cleanup, cleanup)
+		client.hardMemoryLimit = true
 		if limitWarning != "" {
 			client.resourceError.Store(limitWarning)
 			log.Printf("plugin host %s resource limits partially degraded: %s", plugin.ID, limitWarning)
@@ -309,19 +329,21 @@ func (client *pluginHostClient) monitorResources() {
 	if limit == 0 || client.command == nil || client.command.Process == nil {
 		return
 	}
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+	timer := time.NewTimer(pluginHostRSSSampleNear)
+	defer timer.Stop()
 	for {
 		select {
 		case <-client.done:
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			rss, err := pluginHostProcessRSS(client.command.Process.Pid)
 			if err != nil {
+				timer.Reset(pluginHostRSSSampleNear)
 				continue
 			}
 			client.lastRSS.Store(rss)
 			if rss <= limit {
+				timer.Reset(pluginHostRSSSampleInterval(rss, limit, client.hardMemoryLimit))
 				continue
 			}
 			reason := fmt.Sprintf("plugin host RSS %d exceeds limit %d", rss, limit)

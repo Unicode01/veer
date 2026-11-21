@@ -7,9 +7,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Unicode01/veer/internal/netservice"
 	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+)
+
+// The DHCP and RA servers skip their interface lookups while the monitor
+// reports every link and address change. Tests replace these.
+var (
+	setNetserviceInterfaceEvents  = netservice.SetInterfaceEventsAvailable
+	noteNetserviceInterfaceChange = netservice.NoteInterfaceChange
 )
 
 func (pm *ProcessManager) startKernelNetlinkMonitor() {
@@ -36,6 +44,7 @@ func (pm *ProcessManager) startKernelNetlinkMonitor() {
 
 	go pm.runKernelNetlinkRecoveryLoop(stop, wake)
 	go pm.runKernelNetlinkMonitor(stop)
+	pm.startPluginNetEventMonitors(stop)
 }
 
 func (pm *ProcessManager) stopKernelNetlinkMonitor() {
@@ -163,6 +172,18 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 	if linkUpdates == nil && addrUpdates == nil && neighUpdates == nil && routeUpdates == nil {
 		return
 	}
+	// Checks that would otherwise poll the interface inventory trust the
+	// link and address events only while both subscriptions are open.
+	watched := func() {
+		ok := linkUpdates != nil && addrUpdates != nil
+		pm.netlinkInventoryWatched.Store(ok)
+		setNetserviceInterfaceEvents(ok)
+	}
+	watched()
+	defer func() {
+		pm.netlinkInventoryWatched.Store(false)
+		setNetserviceInterfaceEvents(false)
+	}()
 
 	// lost holds the subscriptions that ended and wait to be opened again;
 	// one that was unavailable from the start is not retried.
@@ -177,6 +198,7 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 		}
 		log.Printf("kernel dataplane netlink: %s monitor ended; subscribing again", kind)
 		lost[kind] = true
+		watched()
 		if retry == nil {
 			retry = time.After(backoff)
 		}
@@ -219,6 +241,9 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 			log.Printf("kernel dataplane netlink: monitor subscribed again; reconciling what it missed")
 			pm.requestRedistributeWorkers(0)
 			pm.requestManagedNetworkRuntimeReloadWithSource(0, "netlink_resubscribe")
+			pm.noteManagedRuntimeInputsChanged()
+			noteNetserviceInterfaceChange()
+			watched()
 		}
 	}
 
@@ -237,10 +262,16 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 				continue
 			}
 			if update.Header.Type == unix.RTM_NEWLINK || update.Header.Type == unix.RTM_DELLINK {
+				// Any link change can matter to a DHCP or RA socket, the
+				// managed network fingerprint or a plugin repairing its
+				// boundary, an MTU, MAC or GSO change included; only a
+				// change to the link snapshot reaches the dataplane recovery.
+				pm.noteManagedRuntimeInputsChanged()
+				noteNetserviceInterfaceChange()
+				pm.publishPluginSystemEventFor(pluginEventTopicNetLink, func() any { return pluginNetlinkLinkEventPayload(update) })
 				if !pm.shouldHandleKernelNetlinkLinkUpdate(update) {
 					continue
 				}
-				pm.publishPluginSystemEvent(pluginEventTopicNetLink, "", "", pluginNetlinkLinkEventPayload(update))
 				pm.handleIPv6AssignmentLinkUpdate(update)
 				pm.handleKernelNetlinkRecoveryTrigger(kernelNetlinkRecoveryTriggerFromLinkUpdate(update))
 			}
@@ -252,10 +283,14 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 				}
 				continue
 			}
+			// Any address change can matter to a DHCP or RA socket; only
+			// visible ones reach the managed networks and plugins.
+			noteNetserviceInterfaceChange()
 			if !isVisibleInterfaceIP(update.LinkAddress.IP) {
 				continue
 			}
-			pm.publishPluginSystemEvent(pluginEventTopicNetAddr, "", "", pluginNetlinkAddrEventPayload(update))
+			pm.noteManagedRuntimeInputsChanged()
+			pm.publishPluginSystemEventFor(pluginEventTopicNetAddr, func() any { return pluginNetlinkAddrEventPayload(update) })
 			pm.handleIPv6AssignmentAddrUpdate(update)
 		case update, ok := <-neighUpdates:
 			if !ok {
@@ -265,7 +300,7 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 				}
 				continue
 			}
-			pm.publishPluginSystemEvent(pluginEventTopicNetNeigh, "", "", pluginNetlinkNeighEventPayload(update))
+			pm.publishPluginSystemEventFor(pluginEventTopicNetNeigh, func() any { return pluginNetlinkNeighEventPayload(update) })
 			switch update.Family {
 			case unix.AF_INET, unix.AF_INET6:
 				pm.handleKernelNetlinkRecoveryTrigger(kernelNetlinkRecoveryTriggerFromNeighUpdate("neighbor", update))
@@ -285,7 +320,7 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 			if update.Type != unix.RTM_NEWROUTE && update.Type != unix.RTM_DELROUTE {
 				continue
 			}
-			pm.publishPluginSystemEvent(pluginEventTopicNetRoute, "", "", pluginNetlinkRouteEventPayload(update))
+			pm.publishPluginSystemEventFor(pluginEventTopicNetRoute, func() any { return pluginNetlinkRouteEventPayload(update) })
 		}
 	}
 }

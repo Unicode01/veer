@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-const pluginSDKContractVersion = 16
+const pluginSDKContractVersion = 17
 
 type pluginSDKAPIContract struct {
 	Version           int                                 `json:"version"`
@@ -132,6 +132,9 @@ func currentPluginSDKAPIContract() pluginSDKAPIContract {
 				pluginEventTopicNetAddr,
 				pluginEventTopicNetNeigh,
 				pluginEventTopicNetRoute,
+				pluginEventTopicNetRule,
+				pluginEventTopicNetOffload,
+				pluginEventTopicProcessState,
 				pluginEventTopicResourceChanged,
 				pluginEventTopicPluginLifecycle,
 			},

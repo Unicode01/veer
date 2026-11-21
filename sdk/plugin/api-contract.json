@@ -1,5 +1,5 @@
 {
-  "version": 16,
+  "version": 17,
   "runtime": {
     "api_version": "v1",
     "runtime_version": "1.0.0",
@@ -51,6 +51,7 @@
       "control.net_offloads.v1",
       "control.dns_client.v1",
       "control.net_events.v1",
+      "control.net_policy_events.v1",
       "control.net_leases.v1",
       "control.net_multipath.v1",
       "control.netns_provider.v1",
@@ -64,6 +65,7 @@
       "control.process_isolation.v1",
       "control.exec.v1",
       "control.process.v1",
+      "control.process_events.v1",
       "control.process_binaries.v1",
       "control.raw_l2",
       "control.resource_schema.v1",
@@ -197,6 +199,9 @@
       "net.addr",
       "net.neigh",
       "net.route",
+      "net.rule",
+      "net.offload",
+      "process.state",
       "resource.changed",
       "plugin.lifecycle"
     ]

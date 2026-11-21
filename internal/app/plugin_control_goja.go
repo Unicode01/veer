@@ -184,6 +184,8 @@ type gojaPluginControlRuntime struct {
 	ringPendingBytes     map[string]int64
 	circuitMu            sync.Mutex
 	controlCircuits      map[string]*pluginControlCircuitRuntime
+	enabledMu            sync.Mutex
+	enabledCache         map[string]pluginEnabledCacheEntry
 	logMu                sync.Mutex
 	pluginLogs           map[string]*pluginLogBuffer
 	pluginLogSequence    uint64
@@ -414,6 +416,9 @@ func newPluginControlRuntime(db *sql.DB, cfg *Config, mapController pluginEBPFMa
 		secretStoreErr:       secretStoreErr,
 	}
 	runtime.logPersistence = newPluginLogPersistence(db)
+	runtime.processRegistry.setStateNotifier(func(owner string, status pluginProcessStatus) {
+		runtime.publishPluginSystemEvent(pluginEventTopicProcessState, owner, status.ID, status.value())
+	})
 	return runtime
 }
 
@@ -994,19 +999,56 @@ func (rt *gojaPluginControlRuntime) resolvePluginForControlEvents(plugin LoadedP
 	return plugin
 }
 
+// pluginEnabledCacheTTL bounds how long a cached enabled state is trusted
+// without a write through store.SetPluginEnabled, which covers a write by a
+// process other than this daemon.
+const pluginEnabledCacheTTL = time.Minute
+
+type pluginEnabledCacheEntry struct {
+	enabled    bool
+	generation uint64
+	readAt     time.Time
+}
+
 func (rt *gojaPluginControlRuntime) requirePluginEnabledForControl(pluginID string) error {
 	if rt == nil || rt.db == nil {
 		return nil
 	}
-	state, err := store.PluginStateOrNil(rt.db, pluginID)
+	enabled, err := rt.pluginEnabledForControl(pluginID)
 	if err != nil {
 		return fmt.Errorf("plugin %s state lookup failed: %w", pluginID, err)
 	}
-	if state == nil || state.Enabled {
+	if enabled {
 		return nil
 	}
 	rt.deactivatePluginControl(pluginID)
 	return fmt.Errorf("%w: %s", errPluginControlDisabledByState, pluginID)
+}
+
+// pluginEnabledForControl reports whether the plugin's stored state allows
+// it to run (no state row counts as enabled). Every timer, action and event
+// asks, so the answer is kept until plugin_states is written again.
+func (rt *gojaPluginControlRuntime) pluginEnabledForControl(pluginID string) (bool, error) {
+	generation := store.PluginStateGeneration()
+	now := time.Now()
+	rt.enabledMu.Lock()
+	entry, ok := rt.enabledCache[pluginID]
+	rt.enabledMu.Unlock()
+	if ok && entry.generation == generation && now.Sub(entry.readAt) < pluginEnabledCacheTTL {
+		return entry.enabled, nil
+	}
+	state, err := store.PluginStateOrNil(rt.db, pluginID)
+	if err != nil {
+		return false, err
+	}
+	enabled := state == nil || state.Enabled
+	rt.enabledMu.Lock()
+	if rt.enabledCache == nil {
+		rt.enabledCache = make(map[string]pluginEnabledCacheEntry)
+	}
+	rt.enabledCache[pluginID] = pluginEnabledCacheEntry{enabled: enabled, generation: generation, readAt: now}
+	rt.enabledMu.Unlock()
+	return enabled, nil
 }
 
 func (rt *gojaPluginControlRuntime) deactivatePluginControl(pluginID string) {

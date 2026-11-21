@@ -275,6 +275,7 @@ func (adv *ipv6RouterAdvertiser) listenForRouterSolicitations() {
 				}
 				adv.mu.Unlock()
 			}()
+			var interfaces interfaceCheckGate
 			for {
 				select {
 				case <-adv.stopCh:
@@ -305,7 +306,7 @@ func (adv *ipv6RouterAdvertiser) listenForRouterSolicitations() {
 						continue
 					}
 					if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
-						if routerSolicitationSocketNeedsReopen(state) {
+						if interfaces.run(time.Now(), func() bool { return routerSolicitationSocketNeedsReopen(state) }) {
 							return
 						}
 						continue

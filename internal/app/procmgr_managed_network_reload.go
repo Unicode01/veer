@@ -455,6 +455,31 @@ func (pm *ProcessManager) shouldSkipManagedNetworkAddrReload(fingerprint string)
 	return pm.managedRuntimeReloadAppliedFingerprint != "" && pm.managedRuntimeReloadAppliedFingerprint == fingerprint
 }
 
+// managedRuntimeDriftCheckDue says whether the managed network drift check
+// runs now. Without netlink events it runs every
+// managedNetworkDriftCheckEvery; with them, at that pace only after a change
+// that can move the fingerprint, and otherwise every
+// managedNetworkDriftSafetyEvery.
+func managedRuntimeDriftCheckDue(lastCheckedAt, now time.Time, netlinkWatched, dirty bool) bool {
+	if lastCheckedAt.IsZero() {
+		return true
+	}
+	since := now.Sub(lastCheckedAt)
+	if since < managedNetworkDriftCheckEvery {
+		return false
+	}
+	return !netlinkWatched || dirty || since >= managedNetworkDriftSafetyEvery
+}
+
+// noteManagedRuntimeInputsChanged marks the managed network fingerprint for
+// a check: an interface or address changed, a plugin wrote a resource or ran
+// an action, or the plugin set was reconciled.
+func (pm *ProcessManager) noteManagedRuntimeInputsChanged() {
+	if pm != nil {
+		pm.managedRuntimeDriftDirty.Store(true)
+	}
+}
+
 func (pm *ProcessManager) detectManagedNetworkRuntimeDrift() {
 	if pm == nil || pm.db == nil {
 		return

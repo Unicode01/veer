@@ -94,6 +94,11 @@ const (
 	kernelUserspaceWarmupPoll             = 100 * time.Millisecond
 	managedNetworkReloadDebounce          = 1 * time.Second
 	managedNetworkDriftCheckEvery         = 10 * time.Second
+	// While the netlink monitor follows links and addresses, the drift check
+	// and the attachment check run after a change it saw and otherwise only
+	// as a safety net at these intervals.
+	managedNetworkDriftSafetyEvery        = 5 * time.Minute
+	kernelAttachmentSafetyEvery           = time.Minute
 	managedNetworkSelfEventSuppressFor    = 2 * time.Second
 	managedNetworkLinkChangeSuppressFor   = 10 * time.Second
 	managedNetworkReloadRetryMin          = 5 * time.Second
@@ -259,10 +264,18 @@ type ProcessManager struct {
 	dynamicEgressNATParents                        map[string]struct{}
 	managedRuntimeReloadAppliedFingerprint         string
 	managedRuntimeDriftCheckAt                     time.Time
+	// managedRuntimeDriftDirty is set by changes that can move the managed
+	// network fingerprint; netlinkInventoryWatched while the netlink monitor
+	// holds both its link and address subscriptions.
+	managedRuntimeDriftDirty atomic.Bool
+	netlinkInventoryWatched  atomic.Bool
 	pluginCatalogUpdateMu                          sync.Mutex
 	pluginCatalogScanCache                         pluginCatalogFingerprintCache // pluginCatalogUpdateMu
 	pluginCatalogComparedApplied                   string                        // pluginCatalogUpdateMu
 	pluginCatalogScanRunning                       bool                          // mu
+	pluginCatalogWatch                             *pluginCatalogWatcher         // mu
+	pluginCatalogWatchOpenAt                       time.Time                     // mu
+	pluginCatalogScanFull                          bool                          // mu
 	pluginPackageMu                                sync.Mutex
 	dataplaneReconcileMu                           sync.Mutex
 	pluginReconcileMu                              sync.Mutex
@@ -5019,6 +5032,7 @@ func scheduleKernelDegradedIdleRebuildCheck(lastCheckedAt, now time.Time, runtim
 
 func (pm *ProcessManager) monitorLoop() {
 	defer close(pm.monitorDone)
+	defer pm.closePluginCatalogWatch()
 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -5091,13 +5105,19 @@ func (pm *ProcessManager) monitorLoop() {
 			runKernelMaintenance = true
 			pm.kernelMaintenanceAt = now
 		}
-		if pm.kernelRuntime != nil && (pm.kernelAttachmentCheckAt.IsZero() || now.Sub(pm.kernelAttachmentCheckAt) >= kernelAttachmentCheckEvery) {
+		netlinkWatched := pm.netlinkInventoryWatched.Load()
+		attachmentEvery := kernelAttachmentCheckEvery
+		if netlinkWatched {
+			attachmentEvery = kernelAttachmentSafetyEvery
+		}
+		if pm.kernelRuntime != nil && (pm.kernelAttachmentCheckAt.IsZero() || now.Sub(pm.kernelAttachmentCheckAt) >= attachmentEvery) {
 			checkKernelAttachments = true
 			pm.kernelAttachmentCheckAt = now
 		}
-		if pm.managedRuntimeDriftCheckAt.IsZero() || now.Sub(pm.managedRuntimeDriftCheckAt) >= managedNetworkDriftCheckEvery {
+		if managedRuntimeDriftCheckDue(pm.managedRuntimeDriftCheckAt, now, netlinkWatched, pm.managedRuntimeDriftDirty.Load()) {
 			checkManagedRuntimeDrift = true
 			pm.managedRuntimeDriftCheckAt = now
+			pm.managedRuntimeDriftDirty.Store(false)
 		}
 		if pm.shouldCheckPluginCatalogDriftLocked(now) {
 			checkPluginCatalogDrift = true

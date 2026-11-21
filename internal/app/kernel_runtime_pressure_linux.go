@@ -11,6 +11,7 @@ import (
 
 const (
 	kernelRuntimePressureSampleTTL           = 5 * time.Second
+	kernelRuntimePressureIdleSampleTTL       = 20 * time.Second
 	kernelRuntimePressureHoldWatermarkPct    = 92
 	kernelRuntimePressureShedWatermarkPct    = 96
 	kernelRuntimePressureFullWatermarkPct    = 99
@@ -26,6 +27,49 @@ type kernelRuntimePressureState struct {
 	flowsCapacity int
 	natEntries    int
 	natCapacity   int
+	// sampleEvery is how long this sample is trusted; see
+	// kernelRuntimePressureSampleEvery.
+	sampleEvery time.Duration
+}
+
+// kernelRuntimePressureSampleEvery spaces pressure samples by headroom. Each
+// sample counts every flow and NAT entry, so while every map is under a
+// quarter full and would not reach the hold watermark within four idle
+// intervals at the rate it grew since the last sample, the next one waits
+// kernelRuntimePressureIdleSampleTTL instead of kernelRuntimePressureSampleTTL.
+func kernelRuntimePressureSampleEvery(previous, next kernelRuntimePressureState) time.Duration {
+	if next.active || next.level != kernelRuntimePressureLevelNone {
+		return kernelRuntimePressureSampleTTL
+	}
+	elapsed := next.sampledAt.Sub(previous.sampledAt).Seconds()
+	for _, usage := range [][3]int{
+		{next.flowsEntries, next.flowsCapacity, previous.flowsEntries},
+		{next.natEntries, next.natCapacity, previous.natEntries},
+	} {
+		entries, capacity, before := usage[0], usage[1], usage[2]
+		if capacity <= 0 {
+			continue
+		}
+		if entries*4 >= capacity {
+			return kernelRuntimePressureSampleTTL
+		}
+		if previous.sampledAt.IsZero() || elapsed <= 0 || entries <= before {
+			continue
+		}
+		perSecond := float64(entries-before) / elapsed
+		room := float64(capacity*kernelRuntimePressureHoldWatermarkPct/100 - entries)
+		if room/perSecond < 4*kernelRuntimePressureIdleSampleTTL.Seconds() {
+			return kernelRuntimePressureSampleTTL
+		}
+	}
+	return kernelRuntimePressureIdleSampleTTL
+}
+
+func (state kernelRuntimePressureState) trustedFor() time.Duration {
+	if state.sampleEvery > 0 {
+		return state.sampleEvery
+	}
+	return kernelRuntimePressureSampleTTL
 }
 
 type kernelRuntimePressureUsageSample struct {
@@ -145,7 +189,7 @@ func (rt *linuxKernelRuleRuntime) refreshPressureLockedWithForce(now time.Time, 
 		rt.observability.updatePressure(false, now)
 		return rt.pressureState
 	}
-	if !force && !rt.pressureState.sampledAt.IsZero() && now.Sub(rt.pressureState.sampledAt) < kernelRuntimePressureSampleTTL {
+	if !force && !rt.pressureState.sampledAt.IsZero() && now.Sub(rt.pressureState.sampledAt) < rt.pressureState.trustedFor() {
 		return rt.pressureState
 	}
 
@@ -156,6 +200,7 @@ func (rt *linuxKernelRuleRuntime) refreshPressureLockedWithForce(now time.Time, 
 	rt.runtimeMapCounts = counts
 	next := buildKernelRuntimePressureStateFromDetailedCounts(rt.pressureState.level, refs, counts, true)
 	next.sampledAt = now
+	next.sampleEvery = kernelRuntimePressureSampleEvery(rt.pressureState, next)
 	logKernelRuntimePressureTransition(kernelEngineTC, rt.pressureState, next)
 	rt.pressureState = next
 	rt.observability.updatePressure(next.active, now)
@@ -177,7 +222,7 @@ func (rt *xdpKernelRuleRuntime) refreshPressureLockedWithForce(now time.Time, fo
 		rt.observability.updatePressure(false, now)
 		return rt.pressureState
 	}
-	if !force && !rt.pressureState.sampledAt.IsZero() && now.Sub(rt.pressureState.sampledAt) < kernelRuntimePressureSampleTTL {
+	if !force && !rt.pressureState.sampledAt.IsZero() && now.Sub(rt.pressureState.sampledAt) < rt.pressureState.trustedFor() {
 		return rt.pressureState
 	}
 
@@ -189,6 +234,7 @@ func (rt *xdpKernelRuleRuntime) refreshPressureLockedWithForce(now time.Time, fo
 	rt.runtimeMapCounts = counts
 	next := buildKernelRuntimePressureStateFromDetailedCounts(rt.pressureState.level, refs, counts, includeNAT)
 	next.sampledAt = now
+	next.sampleEvery = kernelRuntimePressureSampleEvery(rt.pressureState, next)
 	logKernelRuntimePressureTransition(kernelEngineXDP, rt.pressureState, next)
 	rt.pressureState = next
 	rt.observability.updatePressure(next.active, now)

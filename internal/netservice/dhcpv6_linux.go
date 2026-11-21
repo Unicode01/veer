@@ -163,6 +163,7 @@ func (srv *ipv6DHCPv6Server) run() {
 				}
 				srv.mu.Unlock()
 			}()
+			var interfaces interfaceCheckGate
 			for {
 				select {
 				case <-srv.stopCh:
@@ -191,7 +192,7 @@ func (srv *ipv6DHCPv6Server) run() {
 						continue
 					}
 					if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
-						if dhcpv6SocketNeedsReopen(state) {
+						if interfaces.run(time.Now(), func() bool { return dhcpv6SocketNeedsReopen(state) }) {
 							return
 						}
 						continue

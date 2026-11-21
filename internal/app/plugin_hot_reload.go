@@ -29,8 +29,8 @@ type pluginCatalogFingerprintCache struct {
 	fullScanAt time.Time
 }
 
-func (cache *pluginCatalogFingerprintCache) fingerprint(root string, now time.Time) (string, error) {
-	full := cache.fullScanAt.IsZero() || now.Sub(cache.fullScanAt) >= pluginCatalogFullScanEvery
+func (cache *pluginCatalogFingerprintCache) fingerprint(root string, now time.Time, forceFull bool) (string, error) {
+	full := forceFull || cache.fullScanAt.IsZero() || now.Sub(cache.fullScanAt) >= pluginCatalogFullScanEvery
 	files := make(map[string]pluginCatalogCachedFile)
 	fingerprint, err := buildPluginDirectoryFingerprintWithHasher(root, nil, func(path string, info os.FileInfo) (string, error) {
 		if previous, ok := cache.files[path]; !full && ok && os.SameFile(previous.info, info) &&
@@ -661,6 +661,15 @@ func pluginCatalogConfigForProcess(pm *ProcessManager, fallback *Config) *Config
 	return cfg
 }
 
+// With a working directory watch the catalog is scanned after a change, at
+// most every pluginCatalogDriftCheckEvery, and otherwise only every
+// pluginCatalogDriftSafetyEvery. Without one it is scanned every
+// pluginCatalogDriftCheckEvery as before.
+const (
+	pluginCatalogDriftSafetyEvery = 5 * time.Minute
+	pluginCatalogWatchRetryEvery  = time.Minute
+)
+
 func (pm *ProcessManager) shouldCheckPluginCatalogDriftLocked(now time.Time) bool {
 	if pm == nil || pm.cfg == nil || !pm.cfg.PluginsEnabled() || pm.pluginCatalogScanRunning {
 		return false
@@ -668,7 +677,60 @@ func (pm *ProcessManager) shouldCheckPluginCatalogDriftLocked(now time.Time) boo
 	if now.IsZero() {
 		now = time.Now()
 	}
-	return pm.pluginCatalogCheckAt.IsZero() || now.Sub(pm.pluginCatalogCheckAt) >= pluginCatalogDriftCheckEvery
+	watch := pm.pluginCatalogWatchLocked(normalizePluginsDir(pm.cfg.PluginsDir), now)
+	if pm.pluginCatalogCheckAt.IsZero() {
+		_ = watch.takeChange()
+		return true
+	}
+	since := now.Sub(pm.pluginCatalogCheckAt)
+	if !watch.healthy() {
+		return since >= pluginCatalogDriftCheckEvery
+	}
+	if since < pluginCatalogDriftCheckEvery {
+		return false
+	}
+	if watch.takeChange() || since >= pluginCatalogDriftSafetyEvery {
+		// A watched change may keep a file's size and mtime (cp -p), which
+		// the incremental fingerprint would trust: hash everything.
+		pm.pluginCatalogScanFull = true
+		return true
+	}
+	return false
+}
+
+// pluginCatalogWatchLocked returns the watch on root, opening it when there
+// is none, it follows another directory, or it stopped seeing changes. An
+// open that fails is retried after pluginCatalogWatchRetryEvery.
+func (pm *ProcessManager) pluginCatalogWatchLocked(root string, now time.Time) *pluginCatalogWatcher {
+	watch := pm.pluginCatalogWatch
+	if watch != nil && watch.root == root && watch.healthy() {
+		return watch
+	}
+	if !pm.pluginCatalogWatchOpenAt.IsZero() && now.Sub(pm.pluginCatalogWatchOpenAt) < pluginCatalogWatchRetryEvery {
+		return watch
+	}
+	pm.pluginCatalogWatchOpenAt = now
+	if watch != nil {
+		watch.Close()
+		pm.pluginCatalogWatch = nil
+	}
+	opened, err := openPluginCatalogWatcher(root)
+	if err != nil {
+		return nil
+	}
+	pm.pluginCatalogWatch = opened
+	return opened
+}
+
+func (pm *ProcessManager) closePluginCatalogWatch() {
+	if pm == nil {
+		return
+	}
+	pm.mu.Lock()
+	watch := pm.pluginCatalogWatch
+	pm.pluginCatalogWatch = nil
+	pm.mu.Unlock()
+	watch.Close()
 }
 
 func (pm *ProcessManager) startPluginCatalogDriftCheck() {
@@ -701,12 +763,16 @@ func (pm *ProcessManager) detectPluginCatalogDrift() bool {
 	if stopping {
 		return false
 	}
+	pm.mu.Lock()
+	full := pm.pluginCatalogScanFull
+	pm.pluginCatalogScanFull = false
+	pm.mu.Unlock()
 	var next string
 	var err error
 	if pm.cfg == nil || !pm.cfg.PluginsEnabled() {
 		next = "plugins-disabled"
 	} else {
-		next, err = pm.pluginCatalogScanCache.fingerprint(normalizePluginsDir(pm.cfg.PluginsDir), time.Now())
+		next, err = pm.pluginCatalogScanCache.fingerprint(normalizePluginsDir(pm.cfg.PluginsDir), time.Now(), full)
 	}
 	now := time.Now()
 	checkResult := pluginCatalogHotReloadResultSuccess

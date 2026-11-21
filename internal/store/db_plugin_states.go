@@ -1,8 +1,19 @@
 package store
 
-import "database/sql"
+import (
+	"database/sql"
+	"sync/atomic"
+)
 
 const pluginStateColumns = `id, plugin_id, enabled, updated_at`
+
+// pluginStateGeneration counts writes to plugin_states, so a reader can keep
+// a plugin's enabled state and look it up again only after a write.
+var pluginStateGeneration atomic.Uint64
+
+// PluginStateGeneration returns the plugin_states write count. Read it before
+// the state it guards: a write after that read makes the cached state stale.
+func PluginStateGeneration() uint64 { return pluginStateGeneration.Load() }
 
 func scanPluginState(sc interface{ Scan(...interface{}) error }) (PluginState, error) {
 	var item PluginState
@@ -21,6 +32,7 @@ func SetPluginEnabled(db RuleStore, pluginID string, enabled bool) error {
 		   updated_at = `+pluginNowSQL,
 		pluginID, boolToInt(enabled),
 	)
+	pluginStateGeneration.Add(1)
 	return err
 }
 

@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dop251/goja"
@@ -60,6 +61,15 @@ type pluginProcessRegistry struct {
 	entries  map[string]*pluginManagedProcess
 	cfg      *Config
 	binaries *pluginBinaryStore
+	// notify receives every state a supervised process enters, so its
+	// plugin learns of an exit or restart without polling process.status.
+	notify atomic.Pointer[func(owner string, status pluginProcessStatus)]
+}
+
+func (r *pluginProcessRegistry) setStateNotifier(notify func(owner string, status pluginProcessStatus)) {
+	if r != nil {
+		r.notify.Store(&notify)
+	}
 }
 
 // newPluginProcessRegistry adopts any processes the previous daemon handed
@@ -93,6 +103,9 @@ type pluginManagedProcess struct {
 	adopted   bool
 	claims    chan pluginProcessClaim
 	handedOff bool
+	// owner and registry address state notifications.
+	owner    string
+	registry *pluginProcessRegistry
 	// restarts counts the restarts since the last run that lasted
 	// pluginProcessStableRun; only these count against maxRestarts.
 	restarts int
@@ -329,6 +342,16 @@ func (p *pluginManagedProcess) snapshot() pluginProcessStatus {
 
 func (p *pluginManagedProcess) close() { p.stopOnce.Do(func() { close(p.stop) }) }
 
+// publishState tells the owning plugin the state the process is in now.
+func (p *pluginManagedProcess) publishState() {
+	if p == nil || p.registry == nil || p.owner == "" {
+		return
+	}
+	if notify := p.registry.notify.Load(); notify != nil && *notify != nil {
+		(*notify)(p.owner, p.snapshot())
+	}
+}
+
 func (p *pluginManagedProcess) ownedBy() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -408,6 +431,7 @@ func (r *pluginProcessRegistry) Start(owner, generation string, req pluginProces
 		maxRestarts: req.MaxRestarts,
 		status:      pluginProcessStatus{ID: req.ID, State: "starting", ExitCode: -1},
 		limitOwner:  pluginManagedProcessLimitOwner(key), limitConfig: r.cfg,
+		owner:       owner, registry: r,
 	}
 	run, cleanup, err := p.launch(req, dir)
 	if err != nil {
@@ -471,6 +495,11 @@ func (r *pluginProcessRegistry) claim(p *pluginManagedProcess, generation string
 // processes are stopped after the deadline, so a removed or disabled plugin
 // cannot leave one running.
 func (r *pluginProcessRegistry) awaitClaim(key string, p *pluginManagedProcess, cleanup func(), deadline time.Duration) {
+	if owner, _, ok := strings.Cut(key, "/"); ok {
+		p.mu.Lock()
+		p.owner, p.registry = owner, r
+		p.mu.Unlock()
+	}
 	timer := time.NewTimer(deadline)
 	defer timer.Stop()
 	run := p.run
@@ -563,6 +592,7 @@ func (p *pluginManagedProcess) supervise(req pluginProcessRequest, dir string, r
 			p.restarts++
 		}
 		p.mu.Unlock()
+		p.publishState()
 		if !restart {
 			return
 		}
@@ -589,8 +619,10 @@ func (p *pluginManagedProcess) supervise(req pluginProcessRequest, dir string, r
 			p.mu.Lock()
 			p.status.State = "failed"
 			p.mu.Unlock()
+			p.publishState()
 			return
 		}
+		p.publishState()
 	}
 }
 

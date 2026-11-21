@@ -520,7 +520,7 @@ exports.onPPPoESession = function (ctx) {
 
 插件只能通过 `events.deadLetters()` 查看自己的死信，通过 `events.retry(deliveryId)` 把 dead 状态恢复为 pending，或通过 `events.discard(deliveryId)` 明确丢弃；不能删除仍在等待投递的 pending 事件。管理员可在插件管理页统一筛选、重试和确认丢弃所有插件死信，也可使用 `/api/plugin-event-dead-letters` 系列接口。重试复用原 `delivery_id`、payload 和幂等上下文，不会重新发布或生成第二条事件；handler 仍应使用 `ctx.event.delivery_id` 实现下游幂等。所有管理员变更都会写入插件审计日志。
 
-运行时同时校验 topic 命名空间和真实发布来源，不能通过伪造 `plugin.<其他插件>.*` 绕过授权。系统事件包括 `net.link`、`net.addr`、`net.neigh`、`net.route`、`resource.changed` 和 `plugin.lifecycle`。网络事件要求 `net.admin` 以及对应接口的 `net_access: link.read`；多路径路由只有在全部相关接口均获授权且接口解析完整时才会投递。
+运行时同时校验 topic 命名空间和真实发布来源，不能通过伪造 `plugin.<其他插件>.*` 绕过授权。系统事件包括 `net.link`、`net.addr`、`net.neigh`、`net.route`、`net.rule`、`net.offload`、`process.state`、`resource.changed` 和 `plugin.lifecycle`。网络事件要求 `net.admin` 以及对应接口的 `net_access: link.read`；多路径路由只有在全部相关接口均获授权且接口解析完整时才会投递。`net.rule` 是策略规则的增删（payload 含 `operation`、`family`、`table`、`priority`、`action`，规则带入出接口时另含 `iif`/`oif`），授权与写规则一致：带接口的规则要求对这些接口有 `rule.write`，不带接口的要求任一 `rule.write`。`net.offload` 是设备 offload 功能的变化（`interface`、`ifindex`），无论变化来自 ethtool、ioctl 还是宿主自己；它依赖内核的 ethtool netlink（Linux 5.6 起），更早的内核不会投递。两者对应 feature `control.net_policy_events.v1`。`process.state` 在插件托管进程进入新状态时投递给启动它的插件（`id`、`state`、`pid`、`starts`、`exit_code`、`started_at`），状态包括 `exited`、`backoff`、`running`、`stopped` 和 `failed`，对应 feature `control.process_events.v1`。订阅前可用 `plugin.host().available_features` 判断宿主是否提供；旧宿主会拒绝未知的系统 topic。
 
 ## WebUI 和插件通信
 
