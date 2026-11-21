@@ -36,6 +36,12 @@ func (pm *ProcessManager) startPluginNetEventMonitors(stop <-chan struct{}) {
 	go pm.runPluginNetEventMonitor(stop, "offload", openOffloadEventSocket, pm.handleOffloadEventMessages)
 }
 
+// pluginNetEventsLost is called when a monitor may have missed messages: the
+// socket overflowed or had to be opened again.
+func (pm *ProcessManager) pluginNetEventsLost(kind string) {
+	pm.publishPluginNetResync(kind + "_events_lost")
+}
+
 // runPluginNetEventMonitor reads one event socket until stop, opening it
 // again with backoff when it fails. A socket that cannot be opened at all
 // (no ethtool netlink in this kernel) ends the monitor.
@@ -57,6 +63,9 @@ func (pm *ProcessManager) runPluginNetEventMonitor(stop <-chan struct{}, kind st
 			backoff = min(2*backoff, pluginNetEventRetryMax)
 			continue
 		}
+		if opened {
+			pm.pluginNetEventsLost(kind)
+		}
 		opened, backoff = true, pluginNetEventRetryMin
 		closed := make(chan struct{})
 		go func() {
@@ -66,7 +75,7 @@ func (pm *ProcessManager) runPluginNetEventMonitor(stop <-chan struct{}, kind st
 			}
 			_ = file.Close()
 		}()
-		err = readPluginNetEvents(file, family, handle)
+		err = readPluginNetEvents(file, family, handle, func() { pm.pluginNetEventsLost(kind) })
 		close(closed)
 		select {
 		case <-stop:
@@ -77,13 +86,14 @@ func (pm *ProcessManager) runPluginNetEventMonitor(stop <-chan struct{}, kind st
 	}
 }
 
-func readPluginNetEvents(file *os.File, family uint16, handle func(uint16, []syscall.NetlinkMessage)) error {
+func readPluginNetEvents(file *os.File, family uint16, handle func(uint16, []syscall.NetlinkMessage), lost func()) error {
 	buf := make([]byte, 64<<10)
 	for {
 		n, err := file.Read(buf)
 		if err != nil {
 			if errors.Is(err, unix.ENOBUFS) {
 				// Messages were dropped; the socket itself is fine.
+				lost()
 				continue
 			}
 			return err

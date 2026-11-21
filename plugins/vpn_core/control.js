@@ -39,7 +39,8 @@ var SAFETY_REPAIR_MS = 300000, EVENT_REPAIR_DELAY_MS = 250, PENDING_RETRY_MS = 1
 // Per exit key: the adapter entries last written and the ifindexes they
 // belong to. Dropped whenever the entries are withdrawn on purpose.
 var expectedMaps = {};
-var RETRY_MIN_MS = 2000, RETRY_MAX_MS = 60000, retryDelay = 0;
+// Retry delay per exit key whose last repair failed.
+var RETRY_MIN_MS = 2000, RETRY_MAX_MS = 60000, retryDelays = {};
 plugin.capabilities(['vpn', 'wireguard', 'mihomo', 'sing_box', 'wan', 'tc_adapter', 'control']);
 events.subscribe({id: 'vpn_links', topic: 'net.link', worker: 'events', handler: 'onNetEvent', queue_size: 64});
 // Hosts before process.state learn of a core restart from its TUN going away.
@@ -176,7 +177,7 @@ exports.onReconcile = function () {
   });
   armRepair();
   if (errors.length) {
-    armRetry(true);
+    armRetry(errors.map(function (line) { return line.slice(0, line.indexOf(':')); }));
     throw new Error(errors.join('; '));
   }
 };
@@ -186,12 +187,12 @@ exports.onTimer = function (ctx) {
   if (name === MAP_TIMER) { checkMaps(); return; }
   // Stop timers this version no longer arms, such as wg_repair from 0.9.0.
   if (name !== REPAIR_TIMER && name !== EVENT_TIMER && name !== RETRY_TIMER) { if (name) timer.clear(name); return; }
-  var failed = false;
+  var failed = [];
   var leases = allLeases();
   chainOrder(leases).forEach(function (key) {
     var lease = leases[key];
     if (!lease.active || isLegacy(lease)) return;
-    if (lease.plan.driver && lease.plan.driver !== 'wireguard') { if (!repairTUN(key, lease)) failed = true; return; }
+    if (lease.plan.driver && lease.plan.driver !== 'wireguard') { if (!repairTUN(key, lease)) failed.push(key); return; }
     try {
       var p = lease.plan, wg = ownedLink(p, lease);
       var tunnelOK = !lease.pending && wg && (wg.flags || []).indexOf('UP') >= 0 && wg.mtu === p.mtu && wg.ifindex === lease.tunnel_ifindex;
@@ -201,7 +202,7 @@ exports.onTimer = function (ctx) {
         apply(key, lease.settings);
       } else repairMaps(p, wg, boundary);
     } catch (e) {
-      failed = true;
+      failed.push(key);
       delete expectedMaps[key];
       try { clearMaps(lease); } catch (cleanup) { log.error('Tunnel map cleanup failed: ' + String(cleanup.message || cleanup)); }
       resources.set('status', key, errorStatus(key, lease.plan, e), true);
@@ -210,14 +211,23 @@ exports.onTimer = function (ctx) {
   armRetry(failed);
 };
 // Runs in the events worker. The check that follows reads a few links per
-// exit, so any link change may arm it; a burst arms it once.
+// exit, so any link change (or a resync after lost events) may arm it. It is
+// armed once: later events of a burst, or a flapping interface elsewhere,
+// cannot keep postponing it.
 exports.onNetEvent = function () {
-  timer.setTimeout(EVENT_TIMER, EVENT_REPAIR_DELAY_MS, {});
+  armEventCheck();
 };
 exports.onProcessEvent = function (ctx) {
   var payload = (ctx.event && ctx.event.payload) || {};
-  if (String(payload.id || '').indexOf('vpn_') === 0) timer.setTimeout(EVENT_TIMER, EVENT_REPAIR_DELAY_MS, {});
+  if (String(payload.id || '').indexOf('vpn_') === 0) armEventCheck();
 };
+function armEventCheck() {
+  var timers = timer.list() || [];
+  for (var i = 0; i < timers.length; i++) {
+    if (timers[i] && timers[i].name === EVENT_TIMER) return;
+  }
+  timer.setTimeout(EVENT_TIMER, EVENT_REPAIR_DELAY_MS, {});
+}
 // Puts back an exit's adapter entries when they differ from what was last
 // written, as long as its lease still holds the same tunnel and boundary.
 function checkMaps() {
@@ -243,17 +253,19 @@ function hostFeature(name) {
   return (plugin.host().available_features || []).indexOf(name) >= 0;
 }
 // An exit still negotiating its TUN offloads is checked again soon; a failed
-// repair waits longer each time, since no event may follow it.
-function armRetry(failed) {
+// repair waits longer each time, since no event may follow it. Each exit
+// backs off on its own, so one that keeps failing does not delay the first
+// retry of another.
+function armRetry(failedKeys) {
   var leases = allLeases();
   var pending = Object.keys(leases).some(function (k) { return leases[k].active && leases[k].pending; });
-  if (failed) {
-    retryDelay = retryDelay ? Math.min(retryDelay * 2, RETRY_MAX_MS) : RETRY_MIN_MS;
-    timer.setTimeout(RETRY_TIMER, pending ? Math.min(retryDelay, PENDING_RETRY_MS) : retryDelay, {});
-    return;
-  }
-  retryDelay = 0;
-  if (pending) timer.setTimeout(RETRY_TIMER, PENDING_RETRY_MS, {});
+  var next = {}, delay = pending ? PENDING_RETRY_MS : 0;
+  (failedKeys || []).forEach(function (key) {
+    next[key] = retryDelays[key] ? Math.min(retryDelays[key] * 2, RETRY_MAX_MS) : RETRY_MIN_MS;
+    delay = delay ? Math.min(delay, next[key]) : next[key];
+  });
+  retryDelays = next;
+  if (delay) timer.setTimeout(RETRY_TIMER, delay, {});
   else timer.clear(RETRY_TIMER);
 }
 exports.onDeactivate = function () {

@@ -95,10 +95,10 @@ const (
 	managedNetworkReloadDebounce          = 1 * time.Second
 	managedNetworkDriftCheckEvery         = 10 * time.Second
 	// While the netlink monitor follows links and addresses, the drift check
-	// and the attachment check run after a change it saw and otherwise only
-	// as a safety net at these intervals.
+	// runs after a change it saw and otherwise only as a safety net at this
+	// interval. The attachment check keeps kernelAttachmentCheckEvery: a tcx
+	// link or clsact qdisc removed by hand sends no link event.
 	managedNetworkDriftSafetyEvery        = 5 * time.Minute
-	kernelAttachmentSafetyEvery           = time.Minute
 	managedNetworkSelfEventSuppressFor    = 2 * time.Second
 	managedNetworkLinkChangeSuppressFor   = 10 * time.Second
 	managedNetworkReloadRetryMin          = 5 * time.Second
@@ -275,7 +275,7 @@ type ProcessManager struct {
 	pluginCatalogScanRunning                       bool                          // mu
 	pluginCatalogWatch                             *pluginCatalogWatcher         // mu
 	pluginCatalogWatchOpenAt                       time.Time                     // mu
-	pluginCatalogScanFull                          bool                          // mu
+	pluginCatalogScanMode                          pluginCatalogScanMode         // mu
 	pluginPackageMu                                sync.Mutex
 	dataplaneReconcileMu                           sync.Mutex
 	pluginReconcileMu                              sync.Mutex
@@ -5106,11 +5106,7 @@ func (pm *ProcessManager) monitorLoop() {
 			pm.kernelMaintenanceAt = now
 		}
 		netlinkWatched := pm.netlinkInventoryWatched.Load()
-		attachmentEvery := kernelAttachmentCheckEvery
-		if netlinkWatched {
-			attachmentEvery = kernelAttachmentSafetyEvery
-		}
-		if pm.kernelRuntime != nil && (pm.kernelAttachmentCheckAt.IsZero() || now.Sub(pm.kernelAttachmentCheckAt) >= attachmentEvery) {
+		if pm.kernelRuntime != nil && (pm.kernelAttachmentCheckAt.IsZero() || now.Sub(pm.kernelAttachmentCheckAt) >= kernelAttachmentCheckEvery) {
 			checkKernelAttachments = true
 			pm.kernelAttachmentCheckAt = now
 		}

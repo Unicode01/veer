@@ -1086,6 +1086,10 @@ for(const driver of ['wireguard','mihomo']) test(driver+' exits are checked afte
   timers.delete('tunnel_event');
   h.host.emit('net.link',{name:'eth9',ifindex:99,operation:'update'});
   assert.equal(timers.get('tunnel_event')?.kind,'timeout');
+  // Later events, a resync among them, do not postpone it.
+  const armedAt=timers.get('tunnel_event').next_fire;
+  h.host.emit('net.link',{name:'eth9',ifindex:99,operation:'update'});h.host.emit('net.link',{operation:'resync',reason:'queue_overflow'});
+  assert.equal(timers.get('tunnel_event').next_fire,armedAt);
   const check=fire('tunnel_event');assert.ok(check.wan>0);assert.equal(check.maps,2);assert.equal(check.links,3);
   assert.equal(timers.has('tunnel_retry'),false,'a healthy exit arms no retry');
   // The map check reads the two adapter entries and nothing else, and puts back a lost one.

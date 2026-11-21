@@ -2,6 +2,9 @@ package app
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -149,5 +152,99 @@ func TestPluginEventSubscriptionsRequireTheirHostFeatures(t *testing.T) {
 		if !required[feature] {
 			t.Errorf("%s is not required by %v", feature, plugin.EventSubscriptions)
 		}
+	}
+}
+
+func TestPluginNetResyncReachesNetSubscribersWhenEventsAreLost(t *testing.T) {
+	plugin := LoadedPlugin{PluginManifest: PluginManifest{ID: "wan", Control: &PluginControl{
+		Permissions: []string{"net.admin", "event", "worker"},
+		NetAccess:   []PluginNetAccess{{Interfaces: []string{"veer*"}, Operations: []string{"link.read"}}},
+	}}}
+	resync := pluginControlBusEvent{Topic: pluginEventTopicNetLink, SourcePlugin: "veer", Payload: json.RawMessage(`{"operation":"resync","reason":"netlink_resubscribe"}`)}
+	if !pluginEventDeliveryAllowed(plugin, resync) {
+		t.Fatal("a resync names no interface and must reach every net.admin subscriber")
+	}
+	plain := plugin
+	plain.Control = &PluginControl{Permissions: []string{"event", "worker"}}
+	if pluginEventDeliveryAllowed(plain, resync) {
+		t.Fatal("a resync reached a plugin without net.admin")
+	}
+
+	rt := &gojaPluginControlRuntime{
+		plugins:            map[string]LoadedPlugin{"wan": plugin},
+		eventSubscriptions: map[string]*pluginControlEventSubscriptionRuntime{},
+	}
+	newSub := func(id, topic, match string) *pluginControlEventSubscriptionRuntime {
+		sub := &pluginControlEventSubscriptionRuntime{
+			pluginID: "wan", spec: PluginEventSubscription{ID: id, Topic: topic, Match: match, SchemaVersion: 1, QueueSize: 1},
+			queue: make(chan pluginControlBusEvent, 1), stop: make(chan struct{}), wake: make(chan struct{}, 1),
+		}
+		rt.eventSubscriptions["wan\x00"+id] = sub
+		return sub
+	}
+	prefix := newSub("all_net", "net", pluginEventMatchPrefix)
+	exact := newSub("routes", pluginEventTopicNetRoute, pluginEventMatchExact)
+	custom := newSub("custom", "plugin.wan.state", pluginEventMatchExact)
+
+	// A new network subscription starts with a resync, on its own topic.
+	for sub, topic := range map[*pluginControlEventSubscriptionRuntime]string{prefix: pluginEventTopicNetLink, exact: pluginEventTopicNetRoute} {
+		rt.queuePluginNetResync(sub, "subscription_started")
+		got := <-sub.queue
+		if got.Topic != topic || !strings.Contains(string(got.Payload), `"operation":"resync"`) || got.SourcePlugin != "veer" {
+			t.Fatalf("%s resync = %+v", sub.spec.ID, got)
+		}
+	}
+	rt.queuePluginNetResync(custom, "subscription_started")
+	if len(custom.queue) != 0 {
+		t.Fatal("a custom topic got a network resync")
+	}
+
+	// A network event that does not fit marks the subscription for a resync.
+	link := pluginControlEventPublication{Topic: pluginEventTopicNetLink, SourcePlugin: "veer", SchemaVersion: 1, Payload: json.RawMessage(`{"operation":"update","name":"veerwan0"}`)}
+	rt.publishPluginControlEvent(link)
+	if prefix.lost.Load() {
+		t.Fatal("an event that fitted marked the subscription")
+	}
+	rt.publishPluginControlEvent(link)
+	if !prefix.lost.Load() {
+		t.Fatal("a dropped network event did not mark the subscription for a resync")
+	}
+	// A full queue also defers the start-up resync instead of losing it.
+	exact.queue <- pluginControlBusEvent{}
+	rt.queuePluginNetResync(exact, "subscription_started")
+	if !exact.lost.Load() {
+		t.Fatal("a resync that did not fit was lost")
+	}
+}
+
+func TestPluginCatalogSafetyScanTrustsStatButAWatchedChangeHashes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plugin", "control.js")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Unix(1700000000, 0)
+	write := func(content string) {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("one")
+	cache := &pluginCatalogFingerprintCache{}
+	now := time.Now()
+	first, err := cache.fingerprint(dir, now, pluginCatalogScanFull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write("two") // same size, same mtime
+	later := now.Add(pluginCatalogDriftSafetyEvery)
+	if got, err := cache.fingerprint(dir, later, pluginCatalogScanTrustStat); err != nil || got != first {
+		t.Fatalf("safety scan rehashed an unchanged-looking file: %v", err)
+	}
+	if got, err := cache.fingerprint(dir, later, pluginCatalogScanFull); err != nil || got == first {
+		t.Fatalf("a watched change kept size and mtime and was missed: %v", err)
 	}
 }

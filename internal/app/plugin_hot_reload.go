@@ -29,8 +29,24 @@ type pluginCatalogFingerprintCache struct {
 	fullScanAt time.Time
 }
 
-func (cache *pluginCatalogFingerprintCache) fingerprint(root string, now time.Time, forceFull bool) (string, error) {
-	full := forceFull || cache.fullScanAt.IsZero() || now.Sub(cache.fullScanAt) >= pluginCatalogFullScanEvery
+// How a catalog scan treats files whose size and mtime did not change.
+type pluginCatalogScanMode int
+
+const (
+	// pluginCatalogScanAuto trusts them, hashing everything every
+	// pluginCatalogFullScanEvery; used while the tree is not watched.
+	pluginCatalogScanAuto pluginCatalogScanMode = iota
+	// pluginCatalogScanFull hashes everything: a watched change may keep a
+	// file's size and mtime (cp -p).
+	pluginCatalogScanFull
+	// pluginCatalogScanTrustStat trusts them: the safety scan of a watched
+	// tree, whose content changes the watch reports.
+	pluginCatalogScanTrustStat
+)
+
+func (cache *pluginCatalogFingerprintCache) fingerprint(root string, now time.Time, mode pluginCatalogScanMode) (string, error) {
+	full := mode == pluginCatalogScanFull || cache.fullScanAt.IsZero() ||
+		(mode == pluginCatalogScanAuto && now.Sub(cache.fullScanAt) >= pluginCatalogFullScanEvery)
 	files := make(map[string]pluginCatalogCachedFile)
 	fingerprint, err := buildPluginDirectoryFingerprintWithHasher(root, nil, func(path string, info os.FileInfo) (string, error) {
 		if previous, ok := cache.files[path]; !full && ok && os.SameFile(previous.info, info) &&
@@ -689,10 +705,14 @@ func (pm *ProcessManager) shouldCheckPluginCatalogDriftLocked(now time.Time) boo
 	if since < pluginCatalogDriftCheckEvery {
 		return false
 	}
-	if watch.takeChange() || since >= pluginCatalogDriftSafetyEvery {
+	if watch.takeChange() {
 		// A watched change may keep a file's size and mtime (cp -p), which
 		// the incremental fingerprint would trust: hash everything.
-		pm.pluginCatalogScanFull = true
+		pm.pluginCatalogScanMode = pluginCatalogScanFull
+		return true
+	}
+	if since >= pluginCatalogDriftSafetyEvery {
+		pm.pluginCatalogScanMode = pluginCatalogScanTrustStat
 		return true
 	}
 	return false
@@ -764,15 +784,15 @@ func (pm *ProcessManager) detectPluginCatalogDrift() bool {
 		return false
 	}
 	pm.mu.Lock()
-	full := pm.pluginCatalogScanFull
-	pm.pluginCatalogScanFull = false
+	mode := pm.pluginCatalogScanMode
+	pm.pluginCatalogScanMode = pluginCatalogScanAuto
 	pm.mu.Unlock()
 	var next string
 	var err error
 	if pm.cfg == nil || !pm.cfg.PluginsEnabled() {
 		next = "plugins-disabled"
 	} else {
-		next, err = pm.pluginCatalogScanCache.fingerprint(normalizePluginsDir(pm.cfg.PluginsDir), time.Now(), full)
+		next, err = pm.pluginCatalogScanCache.fingerprint(normalizePluginsDir(pm.cfg.PluginsDir), time.Now(), mode)
 	}
 	now := time.Now()
 	checkResult := pluginCatalogHotReloadResultSuccess

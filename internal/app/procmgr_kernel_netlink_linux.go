@@ -243,6 +243,7 @@ func (pm *ProcessManager) runKernelNetlinkMonitor(stop <-chan struct{}) {
 			pm.requestManagedNetworkRuntimeReloadWithSource(0, "netlink_resubscribe")
 			pm.noteManagedRuntimeInputsChanged()
 			noteNetserviceInterfaceChange()
+			pm.publishPluginNetResync("netlink_resubscribe")
 			watched()
 		}
 	}

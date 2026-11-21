@@ -464,7 +464,11 @@ func runVPNWireGuardTopology(t *testing.T) {
 	probe(direct, "192.0.2.1")
 	t.Log("fresh VPN plugin without bindings: ordinary TC TCP/UDP/ICMP passed")
 	api("POST", "/api/plugins/vpn_core/actions/set_key", map[string]any{"payload": map[string]any{"key": "default", "value": localPrivate}})
-	profile := map[string]any{"slot": 1, "listen_port": 51821, "addresses": []string{"10.77.0.1/32"},
+	// remoteRoute is a WireGuard remote route: WAN Core installs it in the main
+	// table, outside the adapter's fail-closed path, so a lost one must come
+	// back quickly.
+	const remoteRoute = "100.64.77.0/24"
+	profile := map[string]any{"slot": 1, "listen_port": 51821, "addresses": []string{"10.77.0.1/32"}, "remote_routes": []string{remoteRoute},
 		"peers": []any{map[string]any{"public_key": remotePublic, "endpoint": "192.0.2.2:51820", "allowed_ips": []string{"0.0.0.0/0"}}}}
 	if driver != "" {
 		core := os.Getenv("VEER_TEST_MIHOMO")
@@ -820,6 +824,41 @@ func runVPNWireGuardTopology(t *testing.T) {
 		probe(selected, selectedSource)
 		probe(direct, "192.0.2.1")
 		t.Log("ordinary NAT updates preserve adapter maps; injected map loss recovers without core/interface changes")
+		if driver == "" {
+			routeMissing := func() bool { return !strings.Contains(ip("route", "show", remoteRoute), wanInterface) }
+			waitRoute := func(after string) {
+				t.Helper()
+				deadline := time.Now().Add(5 * time.Second)
+				for routeMissing() {
+					if time.Now().After(deadline) {
+						t.Fatalf("WireGuard remote route %s was not restored after %s", remoteRoute, after)
+					}
+					time.Sleep(50 * time.Millisecond)
+				}
+			}
+			if routeMissing() {
+				t.Fatalf("WireGuard remote route %s was not installed: %s", remoteRoute, ip("route", "show"))
+			}
+			// Deleted while the daemon is stopped: the route event waits in
+			// the socket and is handled on resume.
+			if err := cmd.Process.Signal(syscall.SIGSTOP); err != nil {
+				t.Fatal(err)
+			}
+			ip("route", "del", remoteRoute, "dev", wanInterface)
+			if err := cmd.Process.Signal(syscall.SIGCONT); err != nil {
+				t.Fatal(err)
+			}
+			waitRoute("a deletion while the daemon was stopped")
+			// A boundary that goes down and up within 100 ms loses its IPv4
+			// routes without a route event; only the link events tell.
+			ip("link", "set", wanInterface, "down")
+			time.Sleep(50 * time.Millisecond)
+			ip("link", "set", wanInterface, "up")
+			waitRoute("a boundary flap")
+			probe(selected, selectedSource)
+			probe(direct, "192.0.2.1")
+			t.Log("a WireGuard remote route came back after a deletion while stopped and after a boundary flap")
+		}
 		probeHealth("/status", "unhealthy", "http_status")
 		configureHealth("/slow", false, 3000)
 		started := time.Now()

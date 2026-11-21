@@ -46,6 +46,9 @@ const (
 	pluginEventTopicNetRule            = "net.rule"
 	pluginEventTopicNetOffload         = "net.offload"
 	pluginEventTopicProcessState       = "process.state"
+	// pluginEventNetResync is the net.link operation that tells subscribers
+	// network events may have been lost: rebuild from the kernel state.
+	pluginEventNetResync = "resync"
 	pluginEventTopicResourceChanged    = "resource.changed"
 	pluginEventTopicPluginLifecycle    = "plugin.lifecycle"
 )
@@ -164,6 +167,9 @@ type pluginControlEventSubscriptionRuntime struct {
 	lastMu          sync.Mutex
 	lastEventAt     string
 	lastError       string
+	// lost is set when a network event could not be queued; a resync
+	// follows once the queue has drained.
+	lost atomic.Bool
 }
 
 func (h *pluginControlHost) eventSubscribe(call goja.FunctionCall) goja.Value {
@@ -585,7 +591,46 @@ func (rt *gojaPluginControlRuntime) reconcilePluginEventSubscriptions(plugins ma
 		if sub.spec.Delivery == pluginEventDeliveryDurable {
 			rt.initializeDurablePluginEventSubscription(sub)
 		}
+		// Changes made before the subscription existed (during start-up,
+		// reconcile or an upgrade) were never published to it.
+		rt.queuePluginNetResync(sub, "subscription_started")
 		go rt.runPluginEventSubscription(sub)
+	}
+}
+
+// pluginNetResyncEvent builds the resync event for a network subscription:
+// on its own topic when that names one, on net.link for a prefix.
+func (rt *gojaPluginControlRuntime) pluginNetResyncEvent(sub *pluginControlEventSubscriptionRuntime, reason string) (pluginControlBusEvent, bool) {
+	if sub == nil || !pluginEventTopicRequiresNetAdmin(sub.spec.Topic) {
+		return pluginControlBusEvent{}, false
+	}
+	topic := sub.spec.Topic
+	if sub.spec.Match != pluginEventMatchExact && !strings.HasPrefix(topic, "net.") {
+		topic = pluginEventTopicNetLink
+	}
+	payload, _ := json.Marshal(map[string]any{"operation": pluginEventNetResync, "reason": reason})
+	event := pluginControlBusEvent{
+		Topic: topic, Sequence: rt.nextPluginEventSequence(), PublishedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		SourcePlugin: "veer", SchemaVersion: 1, Payload: payload,
+	}
+	if validatePluginEventPayload(sub.spec, event) != nil {
+		return pluginControlBusEvent{}, false
+	}
+	return event, true
+}
+
+// queuePluginNetResync queues a resync for a network subscription, or marks
+// it for one after the queue drains when the queue is full.
+func (rt *gojaPluginControlRuntime) queuePluginNetResync(sub *pluginControlEventSubscriptionRuntime, reason string) {
+	event, ok := rt.pluginNetResyncEvent(sub, reason)
+	if !ok || sub.spec.Delivery == pluginEventDeliveryDurable {
+		return
+	}
+	select {
+	case sub.queue <- event:
+		sub.enqueued.Add(1)
+	default:
+		sub.lost.Store(true)
 	}
 }
 
@@ -618,6 +663,13 @@ func (rt *gojaPluginControlRuntime) runPluginEventSubscription(sub *pluginContro
 				return
 			}
 			rt.deliverPluginControlEvent(sub, event)
+			// Events were dropped while the queue was full: once it has
+			// drained, tell the subscriber to rebuild from the kernel.
+			if len(sub.queue) == 0 && sub.lost.Swap(false) {
+				if resync, ok := rt.pluginNetResyncEvent(sub, "queue_overflow"); ok {
+					rt.deliverPluginControlEvent(sub, resync)
+				}
+			}
 		}
 	}
 }
@@ -1022,6 +1074,9 @@ func (rt *gojaPluginControlRuntime) publishPluginControlEvent(publication plugin
 		default:
 			sub.dropped.Add(1)
 			result.Dropped++
+			if pluginEventTopicRequiresNetAdmin(event.Topic) {
+				sub.lost.Store(true)
+			}
 		}
 	}
 	if len(durable) == 0 {
@@ -1154,6 +1209,7 @@ func pluginEventRuleAccessAllowed(plugin LoadedPlugin, payload json.RawMessage) 
 
 func pluginEventNetAccessAllowed(plugin LoadedPlugin, payload json.RawMessage) bool {
 	var value struct {
+		Operation                   string   `json:"operation"`
 		Interface                   string   `json:"interface"`
 		Interfaces                  []string `json:"interfaces"`
 		InterfaceResolutionComplete *bool    `json:"interface_resolution_complete"`
@@ -1161,6 +1217,10 @@ func pluginEventNetAccessAllowed(plugin LoadedPlugin, payload json.RawMessage) b
 	}
 	if err := json.Unmarshal(payload, &value); err != nil {
 		return false
+	}
+	if value.Operation == pluginEventNetResync {
+		// Only the host publishes net topics; a resync names no interface.
+		return true
 	}
 	if value.InterfaceResolutionComplete != nil && !*value.InterfaceResolutionComplete {
 		return false
@@ -1320,6 +1380,14 @@ func (pm *ProcessManager) publishPluginSystemEvent(topic, targetPlugin, resource
 	if rt, ok := pm.pluginControlRuntime.(*gojaPluginControlRuntime); ok {
 		rt.publishPluginSystemEvent(topic, targetPlugin, resourceID, payload)
 	}
+}
+
+// publishPluginNetResync tells network subscribers that events may have been
+// lost, so they rebuild from the kernel state.
+func (pm *ProcessManager) publishPluginNetResync(reason string) {
+	pm.publishPluginSystemEventFor(pluginEventTopicNetLink, func() any {
+		return map[string]any{"operation": pluginEventNetResync, "reason": reason}
+	})
 }
 
 // publishPluginSystemEventFor publishes the payload built by build, calling

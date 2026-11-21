@@ -28,6 +28,8 @@ func TestPluginEventBusDeliversSystemEventToWorker(t *testing.T) {
 	writePluginControlScript(t, dir, "event_plugin", `
 events.subscribe({id: 'links', topic: 'net.link', worker: 'net_events', handler: 'onLink', queue_size: 4});
 exports.onLink = function (ctx) {
+  // A subscription starts with a resync; this test follows one link event.
+  if (ctx.event.payload.operation === 'resync') return;
   kv.set('last_link', {
     topic: ctx.event.topic,
     sequence: ctx.event.sequence,
@@ -60,8 +62,9 @@ exports.onLink = function (ctx) {
 			t.Fatalf("last_link data = %s, want %s", record.DataJSON, want)
 		}
 	}
+	// The subscription also received the resync it gets when it starts.
 	stats := rt.pluginEventBusSnapshot("event_plugin")
-	if stats.SubscriptionCount != 1 || stats.Delivered != 1 || stats.Errors != 0 || stats.Dropped != 0 {
+	if stats.SubscriptionCount != 1 || stats.Delivered != 2 || stats.Errors != 0 || stats.Dropped != 0 {
 		t.Fatalf("event stats = %+v", stats)
 	}
 }

@@ -34,7 +34,7 @@ function kernel() {
   k.adapters = {
     'net.link.get': name => info(need(name)),
     'net.link.ensureVeth': req => {
-      if (k.failEnsure) {
+      if (k.failEnsure === true || (typeof k.failEnsure === 'function' && k.failEnsure(req))) {
         k.failures++;
         throw new Error('temporary veth failure');
       }
@@ -138,16 +138,37 @@ test('nothing polls: the only interval is the five-minute safety repair', () => 
   assert.equal(h.timers().has('wan_retry'), false);
 });
 
-test('a link or address event on a stable boundary only reads it', () => {
-  for (const topic of ['net.link', 'net.addr']) {
+test('every network event but a dynamic neighbor runs a full apply', () => {
+  for (const topic of ['net.link', 'net.addr', 'net.route', 'net.rule', 'net.offload']) {
     const h = fixture();
-    assert.deepEqual(h.event(topic), ['wan_event'], topic);
-    assert.equal(h.writes(), 0, topic + ': ' + h.calls().join(','));
-    assert.deepEqual(h.calls().filter(api => api.startsWith('net.')), ['net.link.get', 'net.link.get'], topic);
+    assert.deepEqual(h.event(topic), ['wan_event_full'], topic);
+    assert.ok(h.calls().includes('net.route.replace'), topic + ': routes were not replayed');
+    assert.equal(h.status().phase, 'applied', topic);
   }
+  const h = fixture();
+  assert.deepEqual(h.event('net.link', {operation: 'resync', reason: 'netlink_resubscribe'}), ['wan_event_full'], 'resync');
 });
 
-test('the light check after a link event repairs boundary drift', () => {
+test('a link that went down and up gets its flushed routes back', () => {
+  const h = fixture();
+  const routes = h.k.routes.size;
+  // The kernel flushes a link's IPv4 routes on down without a route event;
+  // the link is healthy again by the time the repair runs.
+  h.k.routes.clear();
+  h.event('net.link', {interface: LOCAL, operation: 'update', admin_up: true});
+  assert.equal(h.k.routes.size, routes);
+});
+
+test('a burst of events arms the repair once and does not postpone it', () => {
+  const h = fixture();
+  h.host.emit('net.link', {interface: LOCAL});
+  const first = h.timers().get('wan_event_full');
+  assert.ok(first, 'the first event arms the repair');
+  for (let i = 0; i < 5; i++) h.host.emit('net.addr', {interface: LOCAL});
+  assert.equal(h.timers().get('wan_event_full').next_fire, first.next_fire, 'later events must not move it');
+});
+
+test('the full apply after a link event repairs boundary drift', () => {
   const drifts = {
     deleted: k => k.adapters['net.link.delete'](LOCAL),
     local_down: k => { k.links.get(LOCAL).up = false; },
@@ -175,9 +196,9 @@ test('the light check after a link event repairs boundary drift', () => {
     assert.ok(local.addresses.includes('192.0.2.2/32'), name);
     assert.equal(h.status().local_ifindex, local.ifindex, name);
     assert.equal(h.status().pipeline_ifindex, pipe.ifindex, name);
-    h.reset();
     h.event('net.link');
-    assert.equal(h.writes(), 0, name + ': the check after the repair only reads');
+    assert.equal(h.status().phase, 'applied', name + ': the repair after the repair keeps it applied');
+    assert.equal(h.status().local_ifindex, local.ifindex, name + ': and changes nothing');
   }
 });
 
@@ -252,11 +273,30 @@ test('a failed apply is retried with backoff until it succeeds', () => {
 test('direct boundaries check the single dummy', () => {
   const h = fixture({key: 'default', driver: 'wireguard', driver_plugin: 'vpn_core', state: 'up', usable: true,
     local_interface: LOCAL, handoff_mode: 'direct', ipv4: '10.77.0.1', addresses: ['10.77.0.1/32'], mtu: 1420});
-  h.event('net.link');
+  // A profile edit runs the light check: a direct boundary reads one link.
+  assert.deepEqual(h.event('resource.changed', {resource_id: 'profiles'}), ['wan_event']);
   assert.deepEqual(h.calls().filter(api => api.startsWith('net.')), ['net.link.get']);
   h.k.links.get(LOCAL).up = false;
   h.event('net.link');
   assert.equal(h.k.links.get(LOCAL).up, true);
+});
+
+test('each session backs off on its own', () => {
+  const h = fixture();
+  h.host.action('apply_session', {...session, key: 'second', local_interface: 'veerlocal1', pipeline_interface: 'veerpipe1'});
+  // The default session keeps failing: its retries back off.
+  h.k.failEnsure = req => req.host === LOCAL;
+  h.k.adapters['net.link.delete'](LOCAL);
+  h.event('net.link');
+  assert.equal(h.timers().get('wan_retry').delay_ms, 2000);
+  h.host.fireTimer('wan_retry');
+  h.host.fireTimer('wan_retry');
+  assert.equal(h.timers().get('wan_retry').delay_ms, 8000);
+  // A second session that starts failing is retried after 2 s, not 16 s.
+  h.k.failEnsure = () => true;
+  h.k.adapters['net.link.delete']('veerlocal1');
+  h.event('net.link');
+  assert.equal(h.timers().get('wan_retry').delay_ms, 2000);
 });
 
 test('an unfinished teardown keeps naming its driver, so the driver can retry it', () => {
