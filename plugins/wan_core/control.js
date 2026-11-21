@@ -3,6 +3,17 @@ var MAIN_ROUTE_TABLE = 254;
 var AUTO_ROUTE_TABLE_BASE = 12000;
 var AUTO_ROUTE_SLOT_COUNT = 8000;
 var AUTO_RULE_PRIORITY_BASE = 10000;
+// Each repair tick reads every session's boundary links and compares them
+// with its applied status: presence and identity, MTU, up and ARP state, GSO
+// limits and addresses. A full apply also replays routes, rules, neighbors
+// and offload flags (one ethtool run per interface); it runs for each session
+// about every FULL_REPAIR_TICKS ticks, staggered by key, and at once when the
+// light check finds a difference, the last apply did not succeed, or the
+// session, profile or status record changed since this VM last applied it.
+var REPAIR_INTERVAL_MS = 2000;
+var FULL_REPAIR_TICKS = 15;
+var repairTick = 0;
+var repairedRevisions = {};
 pipeline.handoff({
   id: 'wan0',
   description: 'Linux L3 boundary shared by the system stack, Veer Core and an optional segmented protocol pipeline.'
@@ -73,6 +84,7 @@ ui.register({
 
 exports.onReconcile = function () {
   applyStoredSessions();
+  rememberRepairRevisions(null);
   armRepairTimer();
 };
 
@@ -97,15 +109,165 @@ exports.onResourceApply = function (ctx) {
   try {
     applyRecords(records, true);
   } finally {
+    rememberRepairRevisions(storedRecordKeys(records));
     armRepairTimer(mergedSessionRecords(records));
   }
 };
 
 exports.onTimer = function (ctx) {
   if (!ctx.timer || ctx.timer.name !== 'wan_repair') return;
-  applyStoredSessions();
-  armRepairTimer();
+  var sessions = resources.list('sessions') || [];
+  repairSessions(sessions, repairTick++);
+  armRepairTimer(sessions);
 };
+
+function repairSessions(sessions, tick) {
+  var profiles = recordsByKey(resources.list('profiles') || []);
+  var statuses = recordsByKey(resources.list('status') || []);
+  var next = {};
+  for (var i = 0; i < sessions.length; i++) {
+    var record = sessions[i];
+    if (!record) continue;
+    var key = token(record.key || 'default');
+    var revisions = recordRevisions(record, profiles[key], statuses[key]);
+    var due = (tick + stableTokenHash(key)) % FULL_REPAIR_TICKS === 0;
+    if (!due && repairedRevisions[key] === revisions && sessionRepairHealthy(key, record, statuses[key])) {
+      next[key] = revisions;
+      continue;
+    }
+    applyRecords([record], false);
+    next[key] = recordRevisions(record, profiles[key], resources.get('status', key));
+  }
+  repairedRevisions = next;
+}
+
+// A full apply outside the timer (reconcile, resource apply) lets the next
+// ticks start with light checks. Only stored records count: a record the
+// caller supplied as is may differ from the stored one, which the next tick
+// then applies in full.
+function rememberRepairRevisions(keys) {
+  var sessions = resources.list('sessions') || [];
+  var profiles = recordsByKey(resources.list('profiles') || []);
+  var statuses = recordsByKey(resources.list('status') || []);
+  for (var i = 0; i < sessions.length; i++) {
+    if (!sessions[i]) continue;
+    var key = token(sessions[i].key || 'default');
+    if (keys && !keys[key]) continue;
+    repairedRevisions[key] = recordRevisions(sessions[i], profiles[key], statuses[key]);
+  }
+}
+
+function storedRecordKeys(records) {
+  var out = {};
+  for (var i = 0; i < records.length; i++) {
+    if (records[i] && records[i].revision > 0) out[token(records[i].key || 'default')] = true;
+  }
+  return out;
+}
+
+function recordsByKey(records) {
+  var out = {};
+  for (var i = 0; i < records.length; i++) {
+    if (records[i]) out[token(records[i].key || 'default')] = records[i];
+  }
+  return out;
+}
+
+function recordRevisions(session, profile, status) {
+  return [session, profile, status].map(function (record) {
+    return record ? [record.revision, record.enabled !== false, record.updated_at || ''].join('/') : '-';
+  }).join('|');
+}
+
+function sessionRepairHealthy(key, record, statusRecord) {
+  var status = statusRecord && statusRecord.data;
+  if (!status || (Array.isArray(status.cleanup_errors) && status.cleanup_errors.length)) return false;
+  if (record.enabled === false) return status.phase === 'disabled' || status.phase === 'deleted';
+  if (!sessionUsable(normalizeSession(key, record.data || {}))) return status.phase === 'skipped';
+  return status.phase === 'applied' && boundaryHealthy(status);
+}
+
+// Cheap link reads only: nothing here creates, changes or claims anything.
+function boundaryHealthy(status) {
+  var mode = previousHandoffMode(status);
+  var local = readLink(status.local_interface);
+  if (!local || local.ifindex !== status.local_ifindex || local.up !== true || local.mtu !== status.mtu) return false;
+  if (local.kind !== (mode === 'segmented_veth' ? 'veth' : mode === 'direct_gro' ? 'veerwan' : 'dummy')) return false;
+  if (status.noarp_ready === true && local.arp !== false) return false;
+  var gso = status.interface_preparation && status.interface_preparation.local_gso;
+  if (gso && (local.gso_max_size !== gso.max_size || local.gso_max_segs !== gso.max_segs)) return false;
+  if (!addressesPresent(local.addresses, status.addresses)) return false;
+  if (mode !== 'segmented_veth') return true;
+  var peer = readLink(status.pipeline_interface);
+  if (!peer || peer.ifindex !== status.pipeline_ifindex || peer.up !== true || peer.mtu !== status.mtu) return false;
+  return !local.peer_ifindex || local.peer_ifindex === peer.ifindex;
+}
+
+function readLink(name) {
+  name = safeIfaceName(name || '');
+  if (!name) return null;
+  try {
+    return net.link.get(name);
+  } catch (e) {
+    return null;
+  }
+}
+
+function addressesPresent(actual, wanted) {
+  var have = {};
+  for (var i = 0; i < (actual || []).length; i++) have[canonicalCIDR(actual[i])] = true;
+  var list = cidrList(wanted);
+  for (var j = 0; j < list.length; j++) {
+    if (!have[canonicalCIDR(list[j])]) return false;
+  }
+  return true;
+}
+
+// Matches Go's net.IPNet.String() for IPv4 and plain IPv6 addresses. A form
+// it does not recognize stays as written, so the check fails and a full
+// apply runs: slower, never wrong.
+function canonicalCIDR(value) {
+  value = lower(value);
+  var slash = value.indexOf('/');
+  if (slash < 0) return value;
+  var ip = value.slice(0, slash), bits = value.slice(slash + 1);
+  if (!/^\d{1,3}$/.test(bits)) return value;
+  bits = String(parseInt(bits, 10));
+  if (ipv4HostCIDR(ip)) return ip.split('.').map(function (part) { return String(parseInt(part, 10)); }).join('.') + '/' + bits;
+  var groups = expandIPv6(ip);
+  if (!groups) return value;
+  var bestStart = -1, bestLength = 0;
+  for (var i = 0; i < 8; i++) {
+    if (groups[i] !== 0) continue;
+    var end = i;
+    while (end < 8 && groups[end] === 0) end++;
+    if (end - i > bestLength) {
+      bestStart = i;
+      bestLength = end - i;
+    }
+    i = end;
+  }
+  var hex = groups.map(function (group) { return group.toString(16); });
+  if (bestLength < 2) return hex.join(':') + '/' + bits;
+  return hex.slice(0, bestStart).join(':') + '::' + hex.slice(bestStart + bestLength).join(':') + '/' + bits;
+}
+
+function expandIPv6(ip) {
+  if (ip.indexOf(':') < 0 || ip.indexOf('.') >= 0 || ip.indexOf('%') >= 0) return null;
+  var halves = ip.split('::');
+  if (halves.length > 2) return null;
+  var head = halves[0] ? halves[0].split(':') : [];
+  var tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  var missing = 8 - head.length - tail.length;
+  if (halves.length === 1 ? missing !== 0 : missing < 1) return null;
+  var parts = head.concat(new Array(halves.length === 2 ? missing : 0).fill('0'), tail);
+  var out = [];
+  for (var i = 0; i < parts.length; i++) {
+    if (!/^[0-9a-f]{1,4}$/.test(parts[i])) return null;
+    out.push(parseInt(parts[i], 16));
+  }
+  return out.length === 8 ? out : null;
+}
 
 exports.onAction = function (ctx) {
   var action = ctx.action && ctx.action.id;
@@ -192,7 +354,7 @@ function armRepairTimer(records) {
   var sessions = records || resources.list('sessions') || [];
   for (var i = 0; i < sessions.length; i++) {
     if (sessions[i] && sessions[i].enabled !== false) {
-      timer.setInterval('wan_repair', 2000, {});
+      timer.setInterval('wan_repair', REPAIR_INTERVAL_MS, {});
       return;
     }
   }

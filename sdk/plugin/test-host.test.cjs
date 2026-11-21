@@ -374,6 +374,20 @@ exports.onAction = function () {
   assert.throws(() => denied.action('apply'), /net_access route\.write for interface test1 is not declared/);
 });
 
+test('test host checks both ends of a veth pair', (t) => {
+  const manifest = testManifest('sdk_veth');
+  manifest.control.net_access = [{interfaces: ['test*'], operations: ['link.create']}];
+  const pluginDir = writePlugin(t, manifest, `
+plugin.action({id: 'apply', runtime_update: 'runtime_query'});
+exports.onAction = function (ctx) {
+  return net.link.ensureVeth({host: 'test0', peer: ctx.payload.peer, mtu: 1500, up: true});
+};
+`);
+  const host = createTestHost({pluginDir, adapters: {'net.link.ensureVeth': (request) => ({created: true, peer: request.peer})}});
+  assert.deepEqual(host.action('apply', {peer: 'test1'}), {created: true, peer: 'test1'});
+  assert.throws(() => host.action('apply', {peer: 'other1'}), /net_access link\.create for interface other1 is not declared/);
+});
+
 test('test host enforces namespace and TUN/TAP scopes', (t) => {
   const manifest = testManifest('sdk_tuntap');
   manifest.control.permissions.push('net.namespace', 'net.tuntap');

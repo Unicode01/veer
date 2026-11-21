@@ -752,7 +752,15 @@ class VeerPluginTestHost {
     const linkMethod = (name, operation) => (...args) => {
       this.#requirePermission('net.admin', `net.link.${name}`);
       scopedNamespaceFromArgs(args, `net.link.${name}`);
-      this.#requireNetAccess(operation, interfaceFromArgs(args), name === 'list');
+      if (name === 'ensureVeth') {
+        // A veth request names both ends; the host checks each against net_access.
+        const request = args[0] && typeof args[0] === 'object' ? args[0] : {};
+        for (const end of [request.host || request.host_name || request.name, request.peer || request.peer_name]) {
+          this.#requireNetAccess(operation, typeof end === 'string' ? end.trim() : '');
+        }
+      } else {
+        this.#requireNetAccess(operation, interfaceFromArgs(args), name === 'list');
+      }
       return this.#adapter(`net.link.${name}`, args);
     };
     const addrMethod = (name) => (request = {}) => {
