@@ -521,6 +521,9 @@ type fwsDaemonOptions struct {
 	RemoteInstall bool
 	// NoPlugins runs Veer with plugins switched off, as a reference.
 	NoPlugins bool
+	// HotRestartMarker, when set, is the marker file that makes a stop a hot
+	// restart: the next start takes over what the last one left.
+	HotRestartMarker string
 }
 
 type fwsDaemon struct {
@@ -577,6 +580,9 @@ func fwsStartDaemon(t *testing.T, opts fwsDaemonOptions) *fwsDaemon {
 	d.env = append(os.Environ(),
 		veerBPFStateDirEnv+"="+requireKernelHotRestartBPFStateRoot(t),
 		veerRuntimeStateDirEnv+"="+filepath.Join(work, "state"))
+	if opts.HotRestartMarker != "" {
+		d.env = append(d.env, veerHotRestartMarkerEnv+"="+opts.HotRestartMarker)
+	}
 	t.Cleanup(func() {
 		d.stop()
 		if t.Failed() {

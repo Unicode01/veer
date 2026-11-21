@@ -39,6 +39,8 @@
       display: grid; gap: 12px; padding: 16px; border: 1px solid var(--veer-border); border-radius: var(--veer-radius);
     }
     .fw-limit .fw-switch { justify-self: start; }
+    .fw-toggle { display: grid; gap: 4px; }
+    [hidden] { display: none !important; }
     .fw-state {
       display: inline-flex; align-items: center; gap: 8px; min-height: 22px; padding: 0 8px;
       border-radius: var(--veer-radius-pill); background: var(--veer-success-bg); color: var(--veer-success-text);
@@ -78,17 +80,22 @@
   var messages = {
     'zh-CN': {
       title: '防火墙',
-      desc: '按目标端口限制来源。规则在 XDP 中执行，排在 Veer 转发之前；保存的是草稿，点"应用"后生效。应用后页面会自动确认；如果新规则挡住了这个页面，截止时间一到就回滚到上一次确认的规则。',
+      desc: '按端口、ICMP 类型或协议限制来源，可开连接跟踪做"默认拒绝入站"。规则在 XDP 中执行，排在 Veer 转发之前；保存的是草稿，点"应用"后生效。应用后页面会自动确认；如果新规则挡住了这个页面，截止时间一到就回滚到上一次确认的规则。',
       apply: '应用', confirm: '确认保留', rollback: '立即回滚', refresh: '刷新',
       pendingTitle: '已应用，等待确认', pendingBody: '剩余 {{seconds}} 秒；不确认会回滚到上一次确认的规则。',
       draftChanged: '草稿与已应用的规则不同', draftSame: '草稿已应用',
       rolledBack: '上一次应用在 {{time}} 回滚（{{reason}}）。',
       reason_deadline: '确认超时', reason_manual: '手动', reason_restart: 'Veer 重启时未确认', reason_attach_failed: '挂载失败',
       settings: '设置', interfaces: '挂载接口', interfacesHint: '支持原生 XDP 的物理网卡在驱动收包、分配 skb 之前就丢包；网桥、VLAN 以及 r8169、e1000e 这类没有原生 XDP 的接口改在 TC 入口过滤，排在 Veer 核心之前，不复制数据包。首次启用和全部停用时，部分网卡会短暂断流。',
-      trusted: '信任来源（每行一个，始终放行）', timeout: '确认超时（秒）', saveSettings: '保存设置',
+      trusted: '信任来源（每行一个，始终放行，也不受黑名单和基线检查影响）', timeout: '确认超时（秒）', saveSettings: '保存设置',
       policies: '策略', newPolicy: '新建策略', edit: '编辑', remove: '删除', save: '保存', cancel: '取消',
       name: '名称', protocol: '协议', ports: '端口（逗号分隔，可写区间 1000-2000）', destinations: '目标地址（每行一个，留空表示任意）',
-      defaultAction: '未列出的来源', sources: '来源规则（每行"地址 allow|drop"）', enabled: '启用',
+      icmpTypes: 'ICMP 类型（逗号分隔，可写 8、3/4 或 echo-request；留空表示全部）', ipProtocols: 'IP 协议号（逗号分隔，可写 47 或 gre、esp）',
+      protoAny: '全部流量（其他策略不管的包）', protoICMP: 'ICMP', protoICMPv6: 'ICMPv6', protoIP: '其他 IP 协议',
+      anyHint: '没有其他策略匹配的包（任何端口、协议）都按这条策略判断，用来做"默认拒绝入站"。开连接跟踪后，本机和经 Veer 出站的连接，回包自动放行。PTB、邻居发现和 DHCP 回包始终放行。',
+      defaultAction: '未列出的来源', sources: '来源规则（每行"地址 allow|drop"，集合写"@集合名 allow|drop"；地址按最长前缀优先，其次按集合顺序）', enabled: '启用',
+      newOnly: 'TCP 只判新连接', newOnlyHint: '只拦 SYN（不带 ACK）；已建立连接的包和出站连接的回包都放行，不需要连接跟踪。注意：已经连着的会话不受新规则影响。',
+      addToSet: '丢弃的来源写入集合（诱捕）', addToSetHint: '被这条策略丢弃的来源（TCP 只算 SYN）写入集合；集合作为黑名单时，该来源在所有端口都被挡住。', addSet: '集合', addTimeout: '保留（秒，0 表示一直保留）', addPrefix: 'IPv6 按前缀写入',
       allow: '放行', drop: '丢弃', any: '任意',
       colName: '名称', colMatch: '匹配', colDefault: '默认', colSources: '来源', colCounters: '放行 / 丢弃 / 信任 / 封禁 / 限速', colEnabled: '状态',
       on: '启用', off: '停用', none: '还没有策略。',
@@ -105,25 +112,45 @@
       dropLog: '丢包日志（抽样）', dropLogHint: 'XDP 丢弃的包在 tcpdump 和 TC 观察插件里都看不到；在 TC 入口丢弃的包 tcpdump 能看到，但看不出被丢了。排查以这里的计数和日志为准。日志按每个 CPU 每秒限定条数抽样，只保存在内存里，Veer 重启后清空。',
       logEmpty: '还没有记录。', logRate: '丢包日志（每个 CPU 每秒最多条数，0 表示关闭）', logStats: '已记录 {{logged}} 条，ring 满丢失 {{lost}} 条',
       reasonDrop_acl: '规则丢弃', reasonDrop_ban: '封禁中', reasonDrop_rate: '超过新连接限制', reasonDrop_evasive: '规避解析',
+      reasonDrop_blocklist: '黑名单', reasonDrop_bogon: '保留地址来源', reasonDrop_urpf: '反向路径检查', reasonDrop_tcp_flags: '非法 TCP 标志', reasonDrop_fragment: '分片',
       colTime: '时间', colReason: '原因', colIface: '接口', colFrom: '来源', colTo: '目标',
       attachDriver: '已挂载（驱动模式）', attachGeneric: '已挂载（generic 模式）', attachTC: '已挂载（TC）', attachNone: '未挂载', attachError: '挂载失败：{{error}}', attachFailed: '挂载失败',
+      attachEgress: '，出向跟踪已挂载', attachEgressMissing: '，出向跟踪未挂载',
       corePinned: 'Veer 配置为优先使用 XDP 转发引擎；防火墙挂载期间，核心改走 TC 引擎。',
       corePrefersXDP: 'Veer 配置为优先使用 XDP 转发引擎；防火墙挂载到接口后，核心会改走 TC 引擎，直到防火墙不再挂载。',
-      saved: '已保存（草稿）。', rolledBackNow: '已回滚。', lastError: '最近错误'
+      saved: '已保存（草稿）。', rolledBackNow: '已回滚。', lastError: '最近错误',
+      tracking: '连接跟踪', trackingHint: '在挂载接口的 TC 出口记录本机和经 Veer 转发出去的连接（TCP 只记本侧发起的 SYN，UDP 只记不被 UDP 策略覆盖的本地端口，ICMP 记 echo 请求），它们的回包在所有策略之前放行，ICMP 差错报文按引用的连接放行。入站发起的连接仍然逐包按策略判断。每个出站 skb 多一次哈希查找。',
+      trackingUnavailable: '这个 Veer 不支持连接跟踪（缺少 dataplane.xdp_tc_egress.v1），请先升级 Veer。',
+      blocklists: '黑名单集合（来源在其中的包，任何端口、协议都丢弃；信任来源除外）',
+      baseline: '安全基线（对挂载接口上的所有入站包生效）', bogon: '保留地址来源', bogonOff: '不检查', bogonReserved: '保留地址（0/8、127/8、组播、文档地址等）', bogonAll: '保留地址 + 私有地址（10/8、172.16/12、192.168/16、100.64/10、169.254/16、fc00::/7）',
+      badFlags: '丢弃非法 TCP 标志组合（SYN+FIN、SYN+RST、无 ACK 的 FIN/PSH/URG、无标志）', dropFrags: '丢弃所有 IP 分片（会影响大 UDP 包，如 DNSSEC、部分 VPN）',
+      urpf: '反向路径检查（Veer 转发绕过了内核 rp_filter）', urpfOff: '不检查', urpfLoose: '宽松：来源没有可用路由时丢弃', urpfStrict: '严格：回到来源的路由不从该接口出去时也丢弃',
+      sets: '地址集合', newSet: '新建集合', setName: '集合名（小写字母、数字、- 和 _）', setElements: '静态元素（每行一个地址或网段，随"应用"生效）',
+      setsNone: '还没有集合。', colElements: '静态元素', colUsedBy: '引用', setRuntime: '运行时元素', setRuntimeHint: '经 set_add 动作或策略的"写入集合"加入，立即生效，不需要应用；带超时的到期自动删除。set_add 加入的在 Veer 冷重启后恢复，策略写入的不恢复。',
+      setAddElements: '加入元素（逗号或换行分隔）', setAddTimeout: '超时（秒，0 表示一直保留）', setAdd: '立即加入', setFlush: '清空运行时元素', setDel: '移除',
+      setNotApplied: '集合还没应用，应用后才能加入运行时元素。', setFlushConfirm: '清空集合 {{name}} 的全部运行时元素？', deleteSetConfirm: '删除集合 {{name}}？引用它的策略和黑名单需要一起改。',
+      kind_static: '静态', kind_api: 'API', kind_policy: '策略写入', usedBlocklist: '黑名单',
+      global: '全局计数', g_established: '回包放行', g_related: '相关 ICMP 放行', g_essential: '必放 ICMP/DHCP', g_blocklist: '黑名单丢弃', g_bogon: '保留地址丢弃', g_urpf: '反向路径丢弃',
+      g_tcp_flags: '非法标志丢弃', g_fragment: '分片丢弃', g_ct_new: '新记录的连接', g_ct_full: '连接表写入失败', g_ct_short: '出向未解析', g_set_add: '写入集合', g_set_full: '写入集合失败'
     },
     'en-US': {
       title: 'Firewall',
-      desc: 'Limits sources per destination port. Rules run in XDP ahead of Veer forwarding. Edits are drafts until you apply them. The page confirms an apply by itself; if the new rules cut this page off, the deadline restores the last confirmed rules.',
+      desc: 'Limits sources per port, ICMP type or protocol; with connection tracking it can deny inbound by default. Rules run in XDP ahead of Veer forwarding. Edits are drafts until you apply them. The page confirms an apply by itself; if the new rules cut this page off, the deadline restores the last confirmed rules.',
       apply: 'Apply', confirm: 'Keep', rollback: 'Roll back now', refresh: 'Refresh',
       pendingTitle: 'Applied, waiting for confirmation', pendingBody: '{{seconds}} s left; without confirmation the last confirmed rules come back.',
       draftChanged: 'The draft differs from the applied rules', draftSame: 'Draft applied',
       rolledBack: 'The last apply was rolled back at {{time}} ({{reason}}).',
       reason_deadline: 'not confirmed in time', reason_manual: 'manual', reason_restart: 'unconfirmed when Veer restarted', reason_attach_failed: 'attaching failed',
       settings: 'Settings', interfaces: 'Interfaces', interfacesHint: 'Physical NICs with native XDP drop packets in the driver, before any skb exists. Bridges, VLANs and NICs without native XDP (r8169, e1000e and the like) filter at TC ingress instead, ahead of the Veer core and without copying packets. Some NICs drop the link briefly when the first hook attaches or the last one leaves.',
-      trusted: 'Trusted sources (one per line, always pass)', timeout: 'Confirmation timeout (s)', saveSettings: 'Save settings',
+      trusted: 'Trusted sources (one per line, always pass, exempt from blocklists and baseline checks)', timeout: 'Confirmation timeout (s)', saveSettings: 'Save settings',
       policies: 'Policies', newPolicy: 'New policy', edit: 'Edit', remove: 'Delete', save: 'Save', cancel: 'Cancel',
       name: 'Name', protocol: 'Protocol', ports: 'Ports (comma separated, ranges like 1000-2000)', destinations: 'Destinations (one per line, empty means any)',
-      defaultAction: 'Unlisted sources', sources: 'Source rules (one "address allow|drop" per line)', enabled: 'Enabled',
+      icmpTypes: 'ICMP types (comma separated: 8, 3/4 or echo-request; empty means all)', ipProtocols: 'IP protocols (comma separated: 47, or names like gre, esp)',
+      protoAny: 'All traffic (what no other policy takes)', protoICMP: 'ICMP', protoICMPv6: 'ICMPv6', protoIP: 'Other IP protocol',
+      anyHint: 'Packets no other policy matches, on any port or protocol, are judged by this policy: a default-deny inbound. With connection tracking, replies to connections the host or Veer opens pass by themselves. Packet-too-big, neighbour discovery and DHCP replies always pass.',
+      defaultAction: 'Unlisted sources', sources: 'Source rules (one "address allow|drop" per line, "@set allow|drop" for a set; the longest prefix wins, then sets in order)', enabled: 'Enabled',
+      newOnly: 'TCP: new connections only', newOnlyHint: 'Only SYNs without ACK are judged; packets of open connections and replies to outbound ones pass, without connection tracking. Sessions already open are not affected by new rules.',
+      addToSet: 'Add dropped sources to a set (honeypot)', addToSetHint: 'Sources this policy drops (for TCP, SYNs only) go into the set; with the set as a blocklist they are cut off on every port.', addSet: 'Set', addTimeout: 'Keep (s, 0 for good)', addPrefix: 'IPv6 sources as prefix',
       allow: 'Allow', drop: 'Drop', any: 'any',
       colName: 'Name', colMatch: 'Match', colDefault: 'Default', colSources: 'Sources', colCounters: 'Pass / drop / trusted / banned / limited', colEnabled: 'State',
       on: 'On', off: 'Off', none: 'No policies yet.',
@@ -140,26 +167,50 @@
       dropLog: 'Drop log (sampled)', dropLogHint: 'Packets dropped in XDP never show up in tcpdump or TC observer plugins; those dropped at TC ingress do show up in tcpdump, with no sign that they were dropped. These counters and this log are the reliable trace. The log is sampled per CPU per second and kept in memory only, so a Veer restart clears it.',
       logEmpty: 'Nothing logged yet.', logRate: 'Drop log (events per CPU per second, 0 turns it off)', logStats: '{{logged}} logged, {{lost}} lost to a full ring',
       reasonDrop_acl: 'rule', reasonDrop_ban: 'banned', reasonDrop_rate: 'over the connection limit', reasonDrop_evasive: 'evading the parser',
+      reasonDrop_blocklist: 'blocklist', reasonDrop_bogon: 'bogon source', reasonDrop_urpf: 'reverse path', reasonDrop_tcp_flags: 'invalid TCP flags', reasonDrop_fragment: 'fragment',
       colTime: 'Time', colReason: 'Reason', colIface: 'Interface', colFrom: 'From', colTo: 'To',
       attachDriver: 'attached (driver mode)', attachGeneric: 'attached (generic mode)', attachTC: 'attached (TC)', attachNone: 'not attached', attachError: 'failed: {{error}}', attachFailed: 'Attaching failed',
+      attachEgress: ', egress tracking attached', attachEgressMissing: ', egress tracking not attached',
       corePinned: 'Veer prefers its XDP forwarding engine, but while the firewall is attached the core runs on its TC engine.',
       corePrefersXDP: 'Veer prefers its XDP forwarding engine; once the firewall attaches to an interface the core moves to its TC engine until the firewall detaches.',
-      saved: 'Saved (draft).', rolledBackNow: 'Rolled back.', lastError: 'Last error'
+      saved: 'Saved (draft).', rolledBackNow: 'Rolled back.', lastError: 'Last error',
+      tracking: 'Connection tracking', trackingHint: 'Records, at TC egress of the bound interfaces, the connections the host and Veer forwarding open (TCP: this side\'s SYNs; UDP: local ports no UDP policy covers; ICMP: echo requests). Their replies pass ahead of every policy, and ICMP errors pass for the connection they quote. Connections that come in are still judged packet by packet. Costs one hash lookup per outgoing skb.',
+      trackingUnavailable: 'This Veer cannot track connections (no dataplane.xdp_tc_egress.v1); upgrade Veer first.',
+      blocklists: 'Blocklist sets (packets from their sources drop on every port and protocol; trusted sources excepted)',
+      baseline: 'Security baseline (for every inbound packet on the bound interfaces)', bogon: 'Bogon sources', bogonOff: 'off', bogonReserved: 'reserved space (0/8, 127/8, multicast, documentation, ...)', bogonAll: 'reserved and private space (10/8, 172.16/12, 192.168/16, 100.64/10, 169.254/16, fc00::/7)',
+      badFlags: 'Drop invalid TCP flag combinations (SYN+FIN, SYN+RST, FIN/PSH/URG without ACK, no flags)', dropFrags: 'Drop every IP fragment (breaks large UDP, such as DNSSEC and some VPNs)',
+      urpf: 'Reverse-path check (Veer forwarding bypasses the kernel\'s rp_filter)', urpfOff: 'off', urpfLoose: 'loose: drop sources without a usable route', urpfStrict: 'strict: also drop sources whose route leaves elsewhere',
+      sets: 'Address sets', newSet: 'New set', setName: 'Set name (lowercase letters, digits, - and _)', setElements: 'Static elements (one address or prefix per line, applied with the rule set)',
+      setsNone: 'No sets yet.', colElements: 'Static elements', colUsedBy: 'Used by', setRuntime: 'Runtime elements', setRuntimeHint: 'Added by the set_add action or a policy\'s add-to-set; they take effect at once, no apply needed, and leave when their timeout runs out. set_add elements come back after a Veer cold start, policy-added ones do not.',
+      setAddElements: 'Add elements (comma or line separated)', setAddTimeout: 'Timeout (s, 0 for good)', setAdd: 'Add now', setFlush: 'Clear runtime elements', setDel: 'Remove',
+      setNotApplied: 'The set is not applied yet; apply it before adding runtime elements.', setFlushConfirm: 'Remove every runtime element of set {{name}}?', deleteSetConfirm: 'Delete set {{name}}? Policies and blocklists that name it must change too.',
+      kind_static: 'static', kind_api: 'API', kind_policy: 'policy', usedBlocklist: 'blocklist',
+      global: 'Global counters', g_established: 'replies passed', g_related: 'related ICMP passed', g_essential: 'essential ICMP/DHCP', g_blocklist: 'blocklist drops', g_bogon: 'bogon drops', g_urpf: 'reverse-path drops',
+      g_tcp_flags: 'invalid-flag drops', g_fragment: 'fragment drops', g_ct_new: 'connections recorded', g_ct_full: 'recording failed', g_ct_short: 'egress unparsed', g_set_add: 'set additions', g_set_full: 'set additions failed'
     }
   };
   function t(key, params) { return F.t(messages, key, params); }
 
   var root = F.h('div', {className: C.page});
   document.body.appendChild(root);
-  var state = {policies: [], settings: {}, status: null, check: null, interfaces: [], editing: null, bans: null, events: []};
+  var state = {policies: [], sets: [], settings: {}, status: null, check: null, interfaces: [], editing: null, editingSet: null,
+    setRuntime: {}, bans: null, events: []};
   var timerHandle = 0;
 
   function lines(text) { return String(text || '').split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean); }
+  function list(text) { return String(text || '').split(/[\s,]+/).map(function (s) { return s.trim(); }).filter(Boolean); }
   function field(label, input) { return F.h('label', {className: C.field}, [F.h('span', {text: label}), input]); }
   function input(value, attrs) { var el = F.h('input', {className: C.input, attrs: attrs || {}}); el.value = value == null ? '' : value; return el; }
   // Every textarea here holds addresses.
   function textarea(value) { var el = F.h('textarea', {className: C.input + ' veer-mono'}); el.value = value || ''; return el; }
   function mono(el) { el.classList.add('veer-mono'); return el; }
+  function checkbox(checked) { var el = F.h('input', {className: C.input, attrs: {type: 'checkbox'}}); el.checked = !!checked; return el; }
+  function toggle(box, label, hint) {
+    return F.h('div', {className: 'fw-toggle'}, [
+      F.h('label', {className: 'fw-switch'}, [box, F.h('span', {text: label})]),
+      hint ? F.h('div', {className: C.description, text: hint}) : null
+    ]);
+  }
   // Relative time, with the absolute time on hover (DESIGN.md §7).
   function timeCell(ms) {
     var locale = document.documentElement.lang === 'en-US' ? 'en-US' : 'zh-CN';
@@ -176,6 +227,7 @@
     el.value = value;
     return el;
   }
+  function setNames() { return state.sets.map(function (s) { return s.key; }); }
 
   async function load() {
     var results = await Promise.all([
@@ -185,7 +237,8 @@
       F.action('interfaces', {}).catch(function () { return {}; }),
       F.action('check', {}).catch(function () { return {}; }),
       F.action('bans', {limit: 100}).catch(function () { return {}; }),
-      F.action('events', {limit: 100}).catch(function () { return {}; })
+      F.action('events', {limit: 100}).catch(function () { return {}; }),
+      F.data.list('sets', {limit: 256}).catch(function () { return {}; })
     ]);
     state.policies = (results[0].records || []).sort(function (a, b) { return a.key < b.key ? -1 : 1; });
     var s = (results[1].records || [])[0];
@@ -195,6 +248,7 @@
     state.check = results[4].result || null;
     state.bans = results[5].result || null;
     state.events = results[6].result || [];
+    state.sets = (results[7].records || []).sort(function (a, b) { return a.key < b.key ? -1 : 1; });
     render();
   }
 
@@ -256,6 +310,8 @@
     await load();
   }
 
+  var GLOBAL_SHOWN = ['established', 'related', 'essential', 'blocklist', 'bogon', 'urpf', 'tcp_flags', 'fragment', 'ct_new', 'ct_full', 'ct_short', 'set_add', 'set_full'];
+
   function statusCard() {
     var st = state.status;
     var children = [];
@@ -295,16 +351,25 @@
       }
       if (!st.loaded) children.push(F.h('p', {className: C.muted, text: t('notLoaded')}));
       var at = st.attachments;
+      var tracking = st.connection_tracking && st.connection_tracking.enabled;
       if (at && at.error) children.push(F.h('p', {className: 'fw-error', text: t('attachFailed') + ': ' + at.error}));
       if (at && at.interfaces.length) {
         children.push(F.h('div', {className: 'fw-row fw-chips'}, at.interfaces.map(function (a) {
           var label = a.error ? t('attachError', {error: a.error}) : !a.attached ? t('attachNone') : a.mode === 'generic' ? t('attachGeneric') : a.mode === 'tc' ? t('attachTC') : t('attachDriver');
+          if (tracking && a.attached) label += a.egress ? t('attachEgress') : t('attachEgressMissing');
           return F.badge(a.interface + ': ' + label);
         })));
       }
       if (st.core && st.core.pinned_to_tc) children.push(F.h('p', {className: C.muted, text: t('corePinned')}));
       if (st.last_error) children.push(F.h('p', {className: 'fw-error', text: t('lastError') + ': ' + st.last_error}));
-      if (st.evasive_drops) children.push(F.h('div', {className: C.grid}, [F.stat(t('evasive'), st.evasive_drops)]));
+      var stats = [];
+      if (st.evasive_drops) stats.push(F.stat(t('evasive'), st.evasive_drops));
+      if (st.global) {
+        GLOBAL_SHOWN.forEach(function (name) {
+          if (st.global[name]) stats.push(F.stat(t('g_' + name), st.global[name]));
+        });
+      }
+      if (stats.length) children.push(F.h('div', {className: C.grid}, stats));
     }
     return F.card(children);
   }
@@ -314,8 +379,7 @@
     var chosen = {};
     (current.interfaces || []).forEach(function (n) { chosen[n] = true; });
     var boxes = state.interfaces.map(function (l) {
-      var box = F.h('input', {className: C.input, attrs: {type: 'checkbox'}});
-      box.checked = !!chosen[l.name];
+      var box = checkbox(chosen[l.name]);
       box.addEventListener('change', function () { chosen[l.name] = box.checked; });
       var note = [l.kind || 'device'];
       if (l.master) note.push('→ ' + l.master);
@@ -324,8 +388,7 @@
     });
     (current.interfaces || []).forEach(function (n) {
       if (!state.interfaces.some(function (l) { return l.name === n; })) {
-        var box = F.h('input', {className: C.input, attrs: {type: 'checkbox'}});
-        box.checked = true;
+        var box = checkbox(true);
         box.addEventListener('change', function () { chosen[n] = box.checked; });
         boxes.push(F.h('label', {className: 'fw-iface'}, [box, F.h('span', {className: 'fw-iface-name', text: n + ' (?)'})]));
       }
@@ -333,12 +396,37 @@
     var trusted = textarea((current.trusted_sources || []).join('\n'));
     var timeout = input(current.confirm_timeout_seconds || 120, {type: 'number', min: 30, max: 600});
     var logRate = input(current.log_per_second === undefined ? 10 : current.log_per_second, {type: 'number', min: 0, max: 1000});
+    var available = !state.status || !state.status.connection_tracking || state.status.connection_tracking.available;
+    var tracking = checkbox(current.connection_tracking === true);
+    tracking.disabled = !available && current.connection_tracking !== true;
+    var blocked = {};
+    (current.blocklists || []).forEach(function (n) { blocked[n] = true; });
+    var blockBoxes = setNames().map(function (name) {
+      var box = checkbox(blocked[name]);
+      box.addEventListener('change', function () { blocked[name] = box.checked; });
+      return F.h('label', {className: 'fw-iface'}, [box, F.h('span', {className: 'fw-iface-name', text: name})]);
+    });
+    (current.blocklists || []).forEach(function (name) {
+      if (setNames().indexOf(name) < 0) {
+        var box = checkbox(true);
+        box.addEventListener('change', function () { blocked[name] = box.checked; });
+        blockBoxes.push(F.h('label', {className: 'fw-iface'}, [box, F.h('span', {className: 'fw-iface-name', text: name + ' (?)'})]));
+      }
+    });
+    var base = current.baseline || {};
+    var bogon = select([['off', t('bogonOff')], ['reserved', t('bogonReserved')], ['all', t('bogonAll')]], base.bogon_sources || 'off');
+    var urpf = select([['off', t('urpfOff')], ['loose', t('urpfLoose')], ['strict', t('urpfStrict')]], base.urpf || 'off');
+    var badFlags = checkbox(base.invalid_tcp_flags === true);
+    var dropFrags = checkbox(base.drop_fragments === true);
     var save = F.button(t('saveSettings'), async function () {
       var data = {
         interfaces: Object.keys(chosen).filter(function (n) { return chosen[n]; }),
         trusted_sources: lines(trusted.value),
         confirm_timeout_seconds: Number(timeout.value) || 120,
-        log_per_second: Math.max(0, Math.min(1000, Math.floor(Number(logRate.value) || 0)))
+        log_per_second: Math.max(0, Math.min(1000, Math.floor(Number(logRate.value) || 0))),
+        connection_tracking: tracking.checked,
+        blocklists: Object.keys(blocked).filter(function (n) { return blocked[n]; }),
+        baseline: {bogon_sources: bogon.value, urpf: urpf.value, invalid_tcp_flags: badFlags.checked, drop_fragments: dropFrags.checked}
       };
       try { await F.data.upsert('settings', 'default', data); F.toast(t('saved')); await load(); } catch (e) { F.toastError(e); }
     }, true);
@@ -348,6 +436,16 @@
       state.status && state.status.core && state.status.core.prefers_xdp && !state.status.core.pinned_to_tc
         ? F.h('div', {className: C.description, text: t('corePrefersXDP')}) : null,
       field(t('interfaces'), F.h('div', {className: 'fw-ifaces'}, boxes)),
+      F.h('div', {className: 'fw-limit'}, [
+        toggle(tracking, t('tracking'), available ? t('trackingHint') : t('trackingUnavailable'))
+      ]),
+      blockBoxes.length ? field(t('blocklists'), F.h('div', {className: 'fw-ifaces'}, blockBoxes)) : null,
+      F.h('div', {className: 'fw-limit'}, [
+        F.h('strong', {text: t('baseline')}),
+        F.h('div', {className: 'fw-grid'}, [field(t('bogon'), bogon), field(t('urpf'), urpf)]),
+        toggle(badFlags, t('badFlags')),
+        toggle(dropFrags, t('dropFrags'))
+      ]),
       F.h('div', {className: 'fw-grid'}, [
         F.h('div', {className: 'fw-span'}, field(t('trusted'), trusted)),
         field(t('timeout'), timeout),
@@ -371,15 +469,25 @@
     return limit.ban_seconds ? text + ', ' + t('banShort', {ban: limit.ban_seconds}) : text;
   }
 
+  function matchText(d) {
+    var protocol = d.protocol || 'tcp';
+    var what;
+    if (protocol === 'any') what = t('protoAny');
+    else if (protocol === 'icmp' || protocol === 'icmpv6') what = protocol + ' ' + ((d.icmp_types || []).join(',') || t('any'));
+    else if (protocol === 'ip') what = 'ip ' + (d.ip_protocols || []).join(',');
+    else what = protocol + ' ' + (d.ports || []).join(',');
+    if (d.tcp_new_only) what += ' (SYN)';
+    return what + ((d.destinations || []).length ? ' → ' + d.destinations.join(', ') : '');
+  }
+
   function policyRow(record) {
     var d = record.data || {};
-    var match = (d.protocol || 'tcp') + ' ' + (d.ports || []).join(',') + ((d.destinations || []).length ? ' → ' + d.destinations.join(', ') : '');
     var allows = (d.sources || []).filter(function (s) { return s.action === 'allow'; }).length;
     var drops = (d.sources || []).length - allows;
     return [
       d.name || record.key,
-      F.h('span', {className: 'fw-mono', text: match}),
-      t(d.default_action === 'allow' ? 'allow' : 'drop'),
+      F.h('span', {className: 'fw-mono', text: matchText(d)}),
+      t(d.default_action === 'allow' ? 'allow' : 'drop') + (d.add_to_set ? ' → @' + d.add_to_set.set : ''),
       allows + ' ' + t('allow') + ', ' + drops + ' ' + t('drop'),
       limitText(d.syn_limit),
       F.h('span', {className: 'fw-counter', text: countersFor(record.key)}),
@@ -398,16 +506,18 @@
     var record = state.editing;
     var d = record.data || {};
     var name = input(d.name || '');
-    var protocol = select([['tcp', 'TCP'], ['udp', 'UDP'], ['tcp+udp', 'TCP + UDP']], d.protocol || 'tcp');
+    var protocol = select([['tcp', 'TCP'], ['udp', 'UDP'], ['tcp+udp', 'TCP + UDP'], ['icmp', t('protoICMP')], ['icmpv6', t('protoICMPv6')],
+      ['ip', t('protoIP')], ['any', t('protoAny')]], d.protocol || 'tcp');
     var ports = mono(input((d.ports || []).join(', ')));
+    var icmpTypes = mono(input((d.icmp_types || []).join(', ')));
+    var ipProtocols = mono(input((d.ip_protocols || []).join(', ')));
     var dsts = textarea((d.destinations || []).join('\n'));
     var def = select([['drop', t('drop')], ['allow', t('allow')]], d.default_action || 'drop');
-    var sources = textarea((d.sources || []).map(function (s) { return s.cidr + ' ' + s.action; }).join('\n'));
-    var enabled = F.h('input', {className: C.input, attrs: {type: 'checkbox'}});
-    enabled.checked = record.enabled !== false;
+    var sources = textarea((d.sources || []).map(function (s) { return (s.set ? '@' + s.set : s.cidr) + ' ' + s.action; }).join('\n'));
+    var enabled = checkbox(record.enabled !== false);
+    var newOnly = checkbox(d.tcp_new_only === true);
     var lim = d.syn_limit || {};
-    var limitOn = F.h('input', {className: C.input, attrs: {type: 'checkbox'}});
-    limitOn.checked = !!d.syn_limit;
+    var limitOn = checkbox(!!d.syn_limit);
     var maxNew = input(lim.max_new || 20, {type: 'number', min: 1, max: 1000000});
     var windowSeconds = input(lim.window_seconds || 10, {type: 'number', min: 1, max: 3600});
     var banSeconds = input(lim.ban_seconds === undefined ? 300 : lim.ban_seconds, {type: 'number', min: 0, max: 604800});
@@ -420,26 +530,65 @@
     ]);
     limitFields.hidden = !limitOn.checked;
     limitOn.addEventListener('change', function () { limitFields.hidden = !limitOn.checked; F.requestResize(); });
+    var add = d.add_to_set || {};
+    var addOn = checkbox(!!d.add_to_set);
+    var addSet = select(setNames().map(function (n) { return [n, n]; }), add.set || (setNames()[0] || ''));
+    var addTimeout = input(add.timeout_seconds === undefined ? 3600 : add.timeout_seconds, {type: 'number', min: 0, max: 2592000});
+    var addPrefix = input(add.ipv6_prefix || 64, {type: 'number', min: 32, max: 128});
+    var addFields = F.h('div', {className: 'fw-grid fw-grid-4'}, [field(t('addSet'), addSet), field(t('addTimeout'), addTimeout), field(t('addPrefix'), addPrefix)]);
+    addFields.hidden = !addOn.checked;
+    addOn.addEventListener('change', function () { addFields.hidden = !addOn.checked; F.requestResize(); });
+    var portsField = F.h('div', {className: 'fw-span'}, field(t('ports'), ports));
+    var icmpField = F.h('div', {className: 'fw-span'}, field(t('icmpTypes'), icmpTypes));
+    var ipField = F.h('div', {className: 'fw-span'}, field(t('ipProtocols'), ipProtocols));
+    var anyHint = F.h('div', {className: 'fw-span ' + C.description, text: t('anyHint')});
+    var newOnlyBlock = toggle(newOnly, t('newOnly'), t('newOnlyHint'));
+    var limitBlock = F.h('div', {className: 'fw-limit'}, [
+      F.h('label', {className: 'fw-switch'}, [limitOn, F.h('span', {text: t('synLimit')})]),
+      F.h('div', {className: C.description, text: t('synLimitHint')}),
+      limitFields
+    ]);
+    function showFor() {
+      var p = protocol.value;
+      var tcp = p === 'tcp' || p === 'tcp+udp' || p === 'any';
+      portsField.hidden = !(p === 'tcp' || p === 'udp' || p === 'tcp+udp');
+      icmpField.hidden = !(p === 'icmp' || p === 'icmpv6');
+      ipField.hidden = p !== 'ip';
+      anyHint.hidden = p !== 'any';
+      newOnlyBlock.hidden = !tcp;
+      limitBlock.hidden = !tcp;
+      F.requestResize();
+    }
+    protocol.addEventListener('change', showFor);
     var error = F.h('p', {className: 'fw-error'});
     var save = F.button(t('save'), async function () {
+      var p = protocol.value;
+      var tcp = p === 'tcp' || p === 'tcp+udp' || p === 'any';
       var data = {
         name: name.value.trim(),
-        protocol: protocol.value,
-        ports: ports.value.split(',').map(function (s) { return s.trim(); }).filter(Boolean),
+        protocol: p,
         destinations: lines(dsts.value),
         default_action: def.value,
         sources: lines(sources.value).map(function (line) {
           var parts = line.split(/\s+/);
-          return {cidr: parts[0], action: (parts[1] || 'allow').toLowerCase() === 'drop' ? 'drop' : 'allow'};
+          var action = (parts[1] || 'allow').toLowerCase() === 'drop' ? 'drop' : 'allow';
+          return parts[0].charAt(0) === '@' ? {set: parts[0].slice(1), action: action} : {cidr: parts[0], action: action};
         })
       };
-      if (limitOn.checked) {
+      if (p === 'tcp' || p === 'udp' || p === 'tcp+udp') data.ports = list(ports.value);
+      if (p === 'icmp' || p === 'icmpv6') data.icmp_types = list(icmpTypes.value);
+      if (p === 'ip') data.ip_protocols = list(ipProtocols.value);
+      if (tcp && newOnly.checked) data.tcp_new_only = true;
+      if (tcp && limitOn.checked) {
         data.syn_limit = {
           max_new: Math.floor(Number(maxNew.value)),
           window_seconds: Math.floor(Number(windowSeconds.value)),
           ban_seconds: Math.floor(Number(banSeconds.value) || 0),
           ipv6_prefix: Math.floor(Number(ipv6Prefix.value) || 64)
         };
+      }
+      if (addOn.checked && addSet.value) {
+        data.add_to_set = {set: addSet.value, timeout_seconds: Math.floor(Number(addTimeout.value) || 0), ipv6_prefix: Math.floor(Number(addPrefix.value) || 64)};
       }
       try {
         if (record.key) await F.data.update('policies', record.key, data, {enabled: enabled.checked});
@@ -452,25 +601,25 @@
         F.requestResize();
       }
     }, true);
-    return F.card([
+    var card = F.card([
       F.h('h3', {className: C.title, text: record.key ? t('edit') + ' ' + (d.name || record.key) : t('newPolicy')}),
       F.h('div', {className: 'fw-grid'}, [
         field(t('name'), name),
         field(t('protocol'), protocol),
-        F.h('div', {className: 'fw-span'}, field(t('ports'), ports)),
+        portsField, icmpField, ipField, anyHint,
         field(t('destinations'), dsts),
         field(t('sources'), sources),
         field(t('defaultAction'), def)
       ]),
-      F.h('div', {className: 'fw-limit'}, [
-        F.h('label', {className: 'fw-switch'}, [limitOn, F.h('span', {text: t('synLimit')})]),
-        F.h('div', {className: C.description, text: t('synLimitHint')}),
-        limitFields
-      ]),
+      newOnlyBlock,
+      limitBlock,
+      setNames().length ? F.h('div', {className: 'fw-limit'}, [toggle(addOn, t('addToSet'), t('addToSetHint')), addFields]) : null,
       F.h('label', {className: 'fw-switch'}, [enabled, F.h('span', {text: t('enabled')})]),
       error,
       F.h('div', {className: C.toolbar}, [F.button(t('cancel'), function () { state.editing = null; render(); }, true), save])
     ]);
+    showFor();
+    return card;
   }
 
   // F.table turns every cell into text; the policy rows hold elements too.
@@ -507,6 +656,131 @@
       ]),
       body
     ]);
+  }
+
+  // ------------------------------------------------------------------ sets
+
+  function setUsers(name) {
+    var users = state.policies.filter(function (p) {
+      var d = p.data || {};
+      return (d.sources || []).some(function (s) { return s.set === name; }) || (d.add_to_set && d.add_to_set.set === name);
+    }).map(function (p) { return (p.data && p.data.name) || p.key; });
+    if ((state.settings.blocklists || []).indexOf(name) >= 0) users.unshift(t('usedBlocklist'));
+    return users.join('、') || '—';
+  }
+
+  function setApplied(name) {
+    return !!(state.status && (state.status.sets || []).some(function (s) { return s.key === name; }));
+  }
+
+  async function loadRuntime(name) {
+    try {
+      var result = (await F.action('set_list', {set: name, limit: 256})).result || {items: []};
+      state.setRuntime[name] = result;
+    } catch (e) {
+      state.setRuntime[name] = {items: [], error: F.errorText(e)};
+    }
+    render();
+  }
+
+  function setsCard() {
+    var rows = state.sets.map(function (record) {
+      var d = record.data || {};
+      return [
+        F.h('span', {className: 'fw-mono', text: record.key}),
+        String((d.elements || []).length),
+        setUsers(record.key),
+        F.h('div', {className: 'fw-row fw-row-actions'}, [
+          F.button(t('edit'), function () { state.editingSet = record; if (setApplied(record.key)) loadRuntime(record.key); else render(); }, true),
+          F.button(t('remove'), async function () {
+            if (!(await F.confirm({title: t('remove'), message: t('deleteSetConfirm', {name: record.key}), danger: true}))) return;
+            try { await F.data.delete('sets', record.key); await load(); } catch (e) { F.toastError(e); }
+          }, true)
+        ])
+      ];
+    });
+    var body = rows.length
+      ? nodeTable([t('colName'), t('colElements'), t('colUsedBy'), ''], rows, [null, null, null, 'actions'])
+      : F.h('p', {className: C.muted + ' fw-empty', text: t('setsNone')});
+    return F.card([
+      F.h('div', {className: C.toolbar}, [
+        F.h('h3', {className: C.title, text: t('sets')}),
+        F.button(t('newSet'), function () { state.editingSet = {key: '', data: {elements: []}, enabled: true}; render(); }, true)
+      ]),
+      body
+    ]);
+  }
+
+  function setEditorCard() {
+    var record = state.editingSet;
+    var d = record.data || {};
+    var key = mono(input(record.key));
+    key.disabled = !!record.key;
+    var elements = textarea((d.elements || []).join('\n'));
+    var error = F.h('p', {className: 'fw-error'});
+    var save = F.button(t('save'), async function () {
+      var data = {elements: lines(elements.value)};
+      try {
+        if (record.key) await F.data.update('sets', record.key, data, {enabled: true});
+        else await F.data.upsert('sets', key.value.trim(), data);
+        state.editingSet = null;
+        F.toast(t('saved'));
+        await load();
+      } catch (e) {
+        error.textContent = F.errorText(e);
+        F.requestResize();
+      }
+    }, true);
+    var parts = [
+      F.h('h3', {className: C.title, text: record.key ? t('edit') + ' ' + record.key : t('newSet')}),
+      field(t('setName'), key),
+      field(t('setElements'), elements),
+      error,
+      F.h('div', {className: C.toolbar}, [F.button(t('cancel'), function () { state.editingSet = null; render(); }, true), save])
+    ];
+    if (record.key) parts.push(runtimeBlock(record.key));
+    return F.card(parts);
+  }
+
+  function runtimeBlock(name) {
+    var parts = [F.h('strong', {text: t('setRuntime')}), F.h('div', {className: C.description, text: t('setRuntimeHint')})];
+    if (!setApplied(name)) {
+      parts.push(F.h('p', {className: C.muted, text: t('setNotApplied')}));
+      return F.h('div', {className: 'fw-limit'}, parts);
+    }
+    var runtime = state.setRuntime[name] || {items: []};
+    var items = (runtime.items || []).filter(function (i) { return i.kind !== 'static'; });
+    if (runtime.error) parts.push(F.h('p', {className: 'fw-error', text: runtime.error}));
+    parts.push(items.length
+      ? nodeTable([t('colSource'), t('colReason'), t('colRemaining'), ''], items.map(function (i) {
+        return [
+          F.h('span', {className: 'fw-mono', text: i.cidr}),
+          t('kind_' + i.kind),
+          i.remaining_seconds === null ? '—' : t('remaining', {seconds: i.remaining_seconds}),
+          F.button(t('setDel'), async function () {
+            try { await F.action('set_del', {set: name, elements: [i.cidr]}); } catch (e) { F.toastError(e); }
+            await loadRuntime(name);
+          }, true)
+        ];
+      }), [null, null, null, 'actions'])
+      : F.h('p', {className: C.muted + ' fw-empty', text: t('logEmpty')}));
+    var addElements = textarea('');
+    var addTimeout = input(0, {type: 'number', min: 0, max: 2592000});
+    parts.push(F.h('div', {className: 'fw-grid'}, [field(t('setAddElements'), addElements), field(t('setAddTimeout'), addTimeout)]));
+    parts.push(F.h('div', {className: C.toolbar}, [
+      F.button(t('setFlush'), async function () {
+        if (!(await F.confirm({title: t('setFlush'), message: t('setFlushConfirm', {name: name}), danger: true}))) return;
+        try { await F.action('set_flush', {set: name}); } catch (e) { F.toastError(e); }
+        await loadRuntime(name);
+      }, true),
+      F.button(t('setAdd'), async function () {
+        try {
+          await F.action('set_add', {set: name, elements: list(addElements.value), timeout_seconds: Math.floor(Number(addTimeout.value) || 0)});
+        } catch (e) { F.toastError(e); }
+        await loadRuntime(name);
+      }, true)
+    ]));
+    return F.h('div', {className: 'fw-limit'}, parts);
   }
 
   async function unban(payload, question) {
@@ -548,6 +822,12 @@
     return (addr.indexOf(':') >= 0 ? '[' + addr + ']' : addr) + (port ? ':' + port : '');
   }
 
+  function eventTarget(e) {
+    if (e.protocol === 'icmp' || e.protocol === 'icmpv6') return e.protocol + ' ' + e.icmp_type + '/' + e.icmp_code + ' ' + endpoint(e.destination, 0);
+    if (e.protocol === 'ip') return 'ip ' + e.ip_protocol + ' ' + endpoint(e.destination, 0);
+    return (e.protocol ? e.protocol + ' ' : '') + endpoint(e.destination, e.port);
+  }
+
   function logCard() {
     var st = state.status;
     var parts = [F.h('h3', {className: C.title, text: t('dropLog')}), F.h('div', {className: C.description, text: t('dropLogHint')})];
@@ -560,8 +840,8 @@
           t('reasonDrop_' + e.reason),
           F.h('span', {className: 'fw-mono', text: e.interface || '—'}),
           F.h('span', {className: 'fw-mono', text: endpoint(e.source, e.source_port)}),
-          F.h('span', {className: 'fw-mono', text: (e.protocol ? e.protocol + ' ' : '') + endpoint(e.destination, e.port)}),
-          e.policy_name || e.policy || '—'
+          F.h('span', {className: 'fw-mono', text: eventTarget(e)}),
+          e.set ? '@' + e.set : (e.policy_name || e.policy || '—')
         ];
       }))
       : F.h('p', {className: C.muted + ' fw-empty', text: t('logEmpty')}));
@@ -572,7 +852,9 @@
     root.textContent = '';
     var parts = [statusCard()];
     if (state.editing) parts.push(editorCard());
-    parts.push(policiesCard(), bansCard(), logCard(), settingsCard());
+    parts.push(policiesCard());
+    if (state.editingSet) parts.push(setEditorCard());
+    parts.push(setsCard(), bansCard(), logCard(), settingsCard());
     root.appendChild(F.stack(parts));
     F.requestResize();
     scheduleTick();

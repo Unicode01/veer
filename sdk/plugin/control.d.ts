@@ -131,6 +131,13 @@ declare global {
      * Pass returns TC_ACT_UNSPEC (-1), drop TC_ACT_SHOT (2). Requires dataplane.xdp_tc_fallback.v1.
      */
     tc_fallback?: string;
+    /**
+     * XDP only: object:program of a tc program in the same object. The host attaches it at the head of
+     * TC egress on every interface the hook is bound to, whatever runs the hook at ingress, so the plugin
+     * sees what leaves those interfaces. It must return TC_ACT_UNSPEC (-1). A hook_bindings record with
+     * tc_egress: false leaves it off. Requires dataplane.xdp_tc_egress.v1.
+     */
+    tc_egress?: string;
     packet_metadata?: VeerPacketMetadataBinding[];
   }
 

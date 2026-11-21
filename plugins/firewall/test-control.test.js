@@ -21,6 +21,7 @@ function makeHost(resources, options = {}) {
     pluginDir: path.join(__dirname),
     fixtures: {resources},
     hostInfo: options.hostInfo,
+    availableFeatures: options.availableFeatures,
     adapters: {
       'net.link.get': (name) => LINKS[name],
       'net.link.list': () => Object.values(LINKS),
@@ -63,7 +64,7 @@ test('apply writes the inactive generation, binds the hook and waits for confirm
   host.action('apply', {});
   assert.deepEqual(cfg(host), {generation: 1, flags: 2 | 4});
   const bindings = host.snapshot().resources.hook_bindings['wan-filter'];
-  assert.deepEqual(bindings.data, {hook_id: 'wan-filter', interfaces: ['eth0']});
+  assert.deepEqual(bindings.data, {hook_id: 'wan-filter', interfaces: ['eth0'], tc_egress: false});
   assert.equal(bindings.enabled, true);
   assert.equal(keysOf(host, 'fw_ports', 1).length, 1);
   assert.deepEqual(keysOf(host, 'fw_src4', 1), ['3800000001000001c6336400', '4000000001000000c000020a']);
@@ -387,25 +388,32 @@ test('status reports how the hook sits on each interface and whether the core le
   host.action('apply', {});
   const st = host.action('status', {});
   assert.deepEqual(st.attachments, {error: '', reason: '', interfaces: [
-    {interface: 'eth0', attached: true, mode: 'driver', error: ''},
-    {interface: 'eth1', attached: false, mode: '', error: ''},
-    {interface: 'vmbr0', attached: true, mode: 'tc', error: ''},
-    {interface: 'wg0', attached: true, mode: 'generic', error: ''},
+    {interface: 'eth0', attached: true, mode: 'driver', error: '', egress: false},
+    {interface: 'eth1', attached: false, mode: '', error: '', egress: false},
+    {interface: 'vmbr0', attached: true, mode: 'tc', error: '', egress: false},
+    {interface: 'wg0', attached: true, mode: 'generic', error: '', egress: false},
   ]});
   assert.deepEqual(st.core, {engine_order: ['xdp', 'tc'], prefers_xdp: true, pinned_to_tc: true});
 });
 
-test('the hook carries a TC fallback from the same object', () => {
+test('the hook carries a TC fallback and, where the host has them, a TC egress program from the same object', () => {
   const host = makeHost({});
   const hook = host.surface.hooks.find((item) => item.id === 'wan-filter');
   assert.equal(hook.engine, 'xdp');
   assert.equal(hook.program, 'firewall:filter');
   assert.equal(hook.tc_fallback, 'firewall:filter_tc');
+  assert.equal(hook.tc_egress, 'firewall:track');
   const object = host.surface.objects.find((item) => item.id === 'firewall');
   assert.deepEqual(object.programs.map((p) => [p.id, p.section, p.type]), [
     ['filter', 'xdp/veer/firewall', 'xdp'],
     ['filter_tc', 'tc/veer/firewall', 'tc'],
+    ['track', 'tc/veer/firewall_egress', 'tc'],
   ]);
+  // An older host: no egress program on the hook, and connection tracking is refused.
+  const old = makeHost({settings: {default: {data: {interfaces: ['eth0'], connection_tracking: true}}}},
+    {availableFeatures: ['dataplane.xdp_pipeline.v1', 'dataplane.xdp_tc_fallback.v1']});
+  assert.equal(old.surface.hooks.find((item) => item.id === 'wan-filter').tc_egress, undefined);
+  assert.match(old.action('check', {}).errors.join(), /不支持连接跟踪/);
 });
 
 test('an apply the host cannot attach is undone; status passes the error on', () => {
@@ -426,6 +434,177 @@ test('an apply the host cannot attach is undone; status passes the error on', ()
   assert.equal(keysOf(host, 'fw_ports', cfg(host).generation).length, 1);
   const st = host.action('status', {});
   assert.equal(st.attachments.error, 'eth0 already runs another XDP program');
-  assert.deepEqual(st.attachments.interfaces, [{interface: 'eth0', attached: false, mode: '', error: ''}]);
+  assert.deepEqual(st.attachments.interfaces, [{interface: 'eth0', attached: false, mode: '', error: '', egress: false}]);
   assert.deepEqual(st.core, {engine_order: ['tc', 'xdp'], prefers_xdp: false, pinned_to_tc: false});
+});
+
+function setRecord(elements, extra = {}) {
+  return {data: {elements, ...extra}, enabled: true};
+}
+
+function setEntries(host) {
+  return [...map(host, 'fw_sets').entries()].map(([key, value]) => ({...c.decodeSetKey(key), kind: c.decodeSetValue(value).kind}))
+    .sort((a, b) => (a.id - b.id) || a.cidr.localeCompare(b.cidr));
+}
+
+test('sets reach fw_sets with apply; removed elements and sets leave after the flip', () => {
+  const host = makeHost({
+    policies: {ssh: policy({name: 'SSH', ports: ['22'], sources: [{set: 'office', action: 'allow'}]})},
+    sets: {office: setRecord(['203.0.113.0/24', '2001:db8::/32']), deny: setRecord(['198.51.100.7'])},
+    settings: {default: {data: {...SETTINGS.data, blocklists: ['deny']}}},
+  });
+  host.action('apply', {});
+  const ids = state(host).set_ids;
+  assert.deepEqual(Object.keys(ids).sort(), ['deny', 'office']);
+  assert.deepEqual(setEntries(host).map((e) => [e.id, e.cidr, e.kind]), [
+    [ids.deny, '198.51.100.7/32', 'static'],
+    [ids.office, '2001:db8::/32', 'static'],
+    [ids.office, '203.0.113.0/24', 'static'],
+  ].sort((a, b) => (a[0] - b[0]) || a[1].localeCompare(b[1])));
+  // The blocklist and the policy's source set are in the generation.
+  const gcfg = map(host, 'fw_gcfg').get(c.u32le(cfg(host).generation));
+  assert.equal(gcfg.substr(12, 2), '01');
+  assert.equal(gcfg.substr(16, 4), c.u16le(ids.deny));
+  const pext = map(host, 'fw_pext').get(c.u32le(cfg(host).generation * 256 + state(host).slots.ssh));
+  assert.equal(pext.substr(2, 2), '01');
+  host.action('confirm', {});
+
+  // Drop the IPv6 element and the deny set.
+  host.state.resources.get('sets').set('office', {key: 'office', data: {elements: ['203.0.113.0/24']}, enabled: true, revision: 2});
+  host.state.resources.get('sets').delete('deny');
+  host.state.resources.get('settings').set('default', {key: 'default', data: SETTINGS.data, enabled: true, revision: 2});
+  host.action('apply', {});
+  assert.deepEqual(setEntries(host).map((e) => [e.id, e.cidr]), [[ids.office, '203.0.113.0/24']]);
+  assert.equal(state(host).set_ids.office, ids.office, 'the set keeps its id');
+});
+
+test('a policy may not name a set the draft lacks, nor a blocklist', () => {
+  const host = makeHost({
+    policies: {ssh: policy({name: 'SSH', ports: ['22'], sources: [{set: 'office', action: 'allow'}]})},
+    settings: {default: {data: {...SETTINGS.data, blocklists: ['deny']}}},
+  });
+  const errors = host.action('check', {}).errors.join('；');
+  assert.match(errors, /引用的集合不存在: office/);
+  assert.match(errors, /黑名单引用的集合不存在: deny/);
+});
+
+test('set_add, set_list, set_del and set_flush change an applied set at once', () => {
+  let mono = 1000000;
+  const host = makeHost({policies: {ssh: SSH}, sets: {scanners: setRecord(['192.0.2.0/24'])}, settings: {default: SETTINGS}}, {
+    adapters: {'ebpf.monotonicMs': () => mono},
+  });
+  assert.throws(() => host.action('set_add', {set: 'scanners', elements: ['198.51.100.1']}), /已应用的集合/);
+  host.action('apply', {});
+  host.action('confirm', {});
+  assert.deepEqual(host.action('set_add', {set: 'scanners', elements: ['198.51.100.1', '192.0.2.0/24'], timeout_seconds: 60}), {added: 1});
+  assert.deepEqual(host.action('set_add', {set: 'scanners', elements: '2001:db8::5'}), {added: 1});
+  const list = host.action('set_list', {set: 'scanners'});
+  assert.deepEqual(list.items.map((i) => [i.cidr, i.kind, i.remaining_seconds]).sort(), [
+    ['192.0.2.0/24', 'static', null],
+    ['198.51.100.1/32', 'api', 60],
+    ['2001:db8::5/128', 'api', null],
+  ]);
+  // A cold start loses fw_sets; the next reconcile restores the set_add elements from KV.
+  host.state.maps.clear();
+  host.reconcile();
+  assert.deepEqual(setEntries(host).map((e) => [e.cidr, e.kind]).sort(), [
+    ['192.0.2.0/24', 'static'], ['198.51.100.1/32', 'api'], ['2001:db8::5/128', 'api'],
+  ]);
+  assert.deepEqual(host.action('set_del', {set: 'scanners', elements: ['2001:db8::5', '192.0.2.0/24']}), {removed: 1});
+  // Expired elements leave with the prune timer.
+  assert.ok(host.snapshot().timers.some((t) => t.name === 'set_prune'));
+  mono += 61000;
+  host.fireTimer('set_prune');
+  assert.deepEqual(setEntries(host).map((e) => e.cidr), ['192.0.2.0/24']);
+  host.action('set_add', {set: 'scanners', elements: ['198.51.100.2']});
+  assert.deepEqual(host.action('set_flush', {set: 'scanners'}), {removed: 1});
+  assert.deepEqual(setEntries(host).map((e) => e.cidr), ['192.0.2.0/24']);
+  assert.throws(() => host.action('set_add', {set: 'scanners', elements: ['1.2.3.4'], timeout_seconds: -1}), /timeout_seconds/);
+});
+
+test('connection tracking turns on the egress program and the generation flag, and needs it attached', () => {
+  let attachments = [
+    {hook_id: 'wan-filter', engine: 'xdp', attach: 'ingress', interface: 'eth0', status: 'attached', xdp_mode: 'driver'},
+  ];
+  const host = makeHost({
+    policies: {all: policy({name: 'all', protocol: 'any'})},
+    settings: {default: {data: {...SETTINGS.data, connection_tracking: true}}},
+  }, {adapters: {'plugin.attachments': () => ({attachments})}});
+  // Catch-all drop with tracking: only the lockout warning is left, and trusted sources clear it.
+  assert.deepEqual(host.action('check', {}).warnings, []);
+  assert.throws(() => host.action('apply', {}), /出向程序没挂上 eth0/);
+  assert.equal(state(host).rollback_reason, 'attach_failed');
+  // Nothing was confirmed yet: the rollback unbinds.
+  assert.deepEqual(host.state.resources.get('hook_bindings').get('wan-filter').data, {hook_id: 'wan-filter', interfaces: [], tc_egress: false});
+  attachments = attachments.concat([{hook_id: 'wan-filter', engine: 'xdp', attach: 'egress', interface: 'eth0', status: 'attached', xdp_mode: 'tc'}]);
+  host.action('apply', {});
+  assert.deepEqual(host.state.resources.get('hook_bindings').get('wan-filter').data, {hook_id: 'wan-filter', interfaces: ['eth0'], tc_egress: true});
+  const gcfg = map(host, 'fw_gcfg').get(c.u32le(cfg(host).generation));
+  assert.equal(parseInt(gcfg.substr(0, 2), 16) & 1, 1);
+  assert.notEqual(gcfg.substr(8, 4), '0000', 'the catch-all class');
+  const st = host.action('status', {});
+  assert.deepEqual(st.connection_tracking, {available: true, enabled: true});
+  assert.deepEqual(st.attachments.interfaces, [{interface: 'eth0', attached: true, mode: 'driver', error: '', egress: true}]);
+});
+
+test('a reconcile over kept maps fixes a 1.0 binding and leaves a pending prune alone', () => {
+  const host = makeHost({
+    policies: {ssh: policy({name: 'SSH', ports: ['22'], add_to_set: {set: 'scanners'}})},
+    sets: {scanners: setRecord([])},
+    settings: {default: SETTINGS},
+  });
+  host.action('apply', {});
+  host.action('confirm', {});
+  // 1.0 wrote no tc_egress, which the host takes as on.
+  host.state.resources.get('hook_bindings').set('wan-filter', {key: 'wan-filter', data: {hook_id: 'wan-filter', interfaces: ['eth0']}, enabled: true, revision: 1});
+  const prune = host.state.timers.get('set_prune');
+  assert.ok(prune, 'apply arms the prune timer');
+  prune.delay_ms = 1234; // tells a re-armed timer apart
+  host.reconcile();
+  assert.deepEqual(host.state.resources.get('hook_bindings').get('wan-filter').data, {hook_id: 'wan-filter', interfaces: ['eth0'], tc_egress: false});
+  assert.equal(host.state.timers.get('set_prune').delay_ms, 1234, 'a pending prune is not pushed back');
+  // A new process has no timers: the reconcile arms it again.
+  host.state.timers.clear();
+  host.reconcile();
+  assert.equal(host.state.timers.get('set_prune').delay_ms, 60000);
+});
+
+test('baseline settings set generation flags and write the bogon prefixes', () => {
+  const host = makeHost({policies: {ssh: SSH}, settings: {default: {data: {...SETTINGS.data,
+    baseline: {bogon_sources: 'all', invalid_tcp_flags: true, drop_fragments: true, urpf: 'strict'}}}}});
+  const checked = host.action('check', {});
+  assert.deepEqual(checked.warnings.map((w) => w.id), ['urpf_strict']);
+  host.action('apply', {accept_warnings: checked.token});
+  const gcfg = map(host, 'fw_gcfg').get(c.u32le(cfg(host).generation));
+  assert.equal(parseInt(gcfg.substr(0, 2), 16), 2 | 4 | 8 | 32);
+  const bogons = setEntries(host).filter((e) => e.id === c.SET_BOGON);
+  assert.equal(bogons.length, c.BOGONS_RESERVED.length + c.BOGONS_PRIVATE.length);
+  assert.ok(bogons.some((e) => e.cidr === '10.0.0.0/8'));
+  host.action('confirm', {});
+  // Back to reserved only: the private prefixes leave.
+  host.state.resources.get('settings').set('default', {key: 'default', data: {...SETTINGS.data, baseline: {bogon_sources: 'reserved'}}, enabled: true, revision: 2});
+  host.action('apply', {});
+  assert.equal(setEntries(host).filter((e) => e.id === c.SET_BOGON).length, c.BOGONS_RESERVED.length);
+});
+
+test('status reports the global counters', () => {
+  const host = makeHost({policies: {ssh: SSH}, settings: {default: SETTINGS}}, {
+    counters: (key) => [c.u32le(parseInt(key.substr(0, 2), 16) + 1) + '00000000'],
+  });
+  host.action('apply', {});
+  const st = host.action('status', {});
+  assert.equal(st.global.established, 1);
+  assert.equal(st.global.blocklist, 4);
+  assert.deepEqual(Object.keys(st.global), c.GCOUNTERS);
+});
+
+test('blocklist drops name their set', () => {
+  const host = makeHost({sets: {deny: setRecord(['198.51.100.7'])}, settings: {default: {data: {...SETTINGS.data, blocklists: ['deny']}}}});
+  host.action('apply', {});
+  const id = state(host).set_ids.deny;
+  host.ring('drop_log', [eventHex(id, 5, 2, 'c6336407')]);
+  const [event] = host.action('events', {});
+  assert.equal(event.reason, 'blocklist');
+  assert.equal(event.set, 'deny');
+  assert.equal(event.policy, null);
 });

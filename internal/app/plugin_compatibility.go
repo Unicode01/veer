@@ -62,6 +62,7 @@ var pluginRuntimeFeatures = []string{
 	"dataplane.hook_bindings.v1",
 	"dataplane.xdp_pipeline.v1",
 	"dataplane.xdp_tc_fallback.v1",
+	"dataplane.xdp_tc_egress.v1",
 	"dataplane.netfilter_pipeline.v1",
 	"dataplane.netfilter_skb_dynptr.v1",
 	"ebpf.bounded_reads.v1",

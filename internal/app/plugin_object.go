@@ -483,10 +483,15 @@ func validatePluginHookProgramRefs(plugin *LoadedPlugin) error {
 			return fmt.Errorf("hooks[%d]: program %q type = %q, want hook engine %q", i, programRef, program.Type, hook.Engine)
 		}
 		if _, mixed := objectsWithXDP[object.ID]; mixed && hook.Engine == kernelEngineTC {
-			return fmt.Errorf("hooks[%d]: object %q holds xdp programs; its tc programs can only serve as an xdp hook's tc_fallback", i, object.ID)
+			return fmt.Errorf("hooks[%d]: object %q holds xdp programs; its tc programs can only serve as an xdp hook's tc_fallback or tc_egress", i, object.ID)
 		}
 		if hook.TCFallback != "" {
 			if _, err := pluginHookTCFallbackProgram(hook, object, objects); err != nil {
+				return fmt.Errorf("hooks[%d]: %w", i, err)
+			}
+		}
+		if hook.TCEgress != "" {
+			if _, err := pluginHookTCEgressProgram(hook, object, objects); err != nil {
 				return fmt.Errorf("hooks[%d]: %w", i, err)
 			}
 		}
@@ -515,6 +520,27 @@ func pluginHookTCFallbackProgram(hook PluginHook, object PluginObject, objects m
 	}
 	if program.Type != kernelEngineTC {
 		return PluginObjectProgram{}, fmt.Errorf("tc_fallback program %q type = %q, want tc", programRef, program.Type)
+	}
+	return program, nil
+}
+
+// pluginHookTCEgressProgram resolves the tc_egress program of an xdp hook,
+// under the same rule as its tc_fallback: a tc program in the object of the
+// hook's xdp program, so that it shares that object's maps.
+func pluginHookTCEgressProgram(hook PluginHook, object PluginObject, objects map[string]PluginObject) (PluginObjectProgram, error) {
+	objectRef, programRef, ok := parsePluginProgramRef(hook.TCEgress)
+	if !ok {
+		return PluginObjectProgram{}, fmt.Errorf("tc_egress must use object:program")
+	}
+	if egressObject, ok := objects[objectRef]; !ok || egressObject.ID != object.ID {
+		return PluginObjectProgram{}, fmt.Errorf("tc_egress must name a program in object %q, the object of the xdp program", object.ID)
+	}
+	program, ok := pluginObjectProgramByRef(object, programRef)
+	if !ok {
+		return PluginObjectProgram{}, fmt.Errorf("tc_egress program %q not found in object %q", programRef, object.ID)
+	}
+	if program.Type != kernelEngineTC {
+		return PluginObjectProgram{}, fmt.Errorf("tc_egress program %q type = %q, want tc", programRef, program.Type)
 	}
 	return program, nil
 }

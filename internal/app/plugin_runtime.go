@@ -472,6 +472,10 @@ type PluginHook struct {
 	// Where native XDP is unavailable the host attaches it at TC ingress ahead
 	// of the Veer core instead of running the hook in generic XDP mode.
 	TCFallback string `json:"tc_fallback,omitempty"`
+	// TCEgress names a tc program in the same object that the host attaches
+	// at TC egress of every interface the xdp hook is bound to, whatever runs
+	// the hook at ingress. It observes what leaves; it never drops.
+	TCEgress string `json:"tc_egress,omitempty"`
 }
 
 type PluginPacketMetadataBinding struct {

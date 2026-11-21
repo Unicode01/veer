@@ -1538,3 +1538,137 @@ test('signing out and an expired session return to the sign-in form', async ({ p
   await expect(page.locator('#loginPassword')).toBeFocused();
   allowUnauthorizedResponses(page);
 });
+
+test('firewall page edits ICMP and catch-all policies, sets and connection tracking through the real UI', async ({ page }, testInfo) => {
+  test.setTimeout(60000);
+  await openDashboard(page, testInfo);
+  await page.evaluate(() => window.VeerApp.setLocale('zh-CN'));
+  const root = path.resolve(__dirname, '../../../plugins/firewall');
+  const vm = require('node:vm');
+  const source = fs.readFileSync(path.join(root, 'control.js'), 'utf8');
+  const ui = vm.runInNewContext('(' + source.match(/ui\.register\((\{[\s\S]*?\})\);/)[1] + ')', { crypto: { sha256File: () => '' } });
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'plugin.json'), 'utf8'));
+  const plugin = { ...manifest, status: 'active', enabled: true, ui, resources: ui.resources.map((entry) => ({ id: entry.resource, methods: entry.methods })),
+    actions: ui.actions.map((id) => ({ id })), asset_base_path: '/api/plugins/firewall/assets/', runtime: { mode: 'dataplane' } };
+  const resources = {
+    policies: {
+      all: { key: 'all', enabled: true, data: { name: 'inbound', protocol: 'any', default_action: 'drop' } },
+      ping: { key: 'ping', enabled: true, data: { name: 'ping', protocol: 'icmp', icmp_types: ['echo-request'], default_action: 'drop', sources: [{ set: 'office', action: 'allow' }] } },
+      ssh: { key: 'ssh', enabled: true, data: { name: 'SSH', protocol: 'tcp', ports: ['22'], default_action: 'drop', tcp_new_only: true, sources: [{ cidr: '192.0.2.0/24', action: 'allow' }] } },
+    },
+    sets: {
+      deny: { key: 'deny', enabled: true, data: { elements: [] } },
+      office: { key: 'office', enabled: true, data: { elements: ['203.0.113.0/24', '2001:db8::/32'] } },
+    },
+    settings: {
+      default: { key: 'default', enabled: true, data: { interfaces: ['eth0'], connection_tracking: true, blocklists: ['deny'], baseline: { bogon_sources: 'reserved', urpf: 'loose' } } },
+    },
+  };
+  const counters = (pass, drop) => ({ pass, drop, trusted: 0, banned: 0, rate_limited: 0 });
+  const status = {
+    generation: 1, loaded: true, pending: null, draft_changed: false, last_error: '', interfaces: ['eth0'],
+    policies: [{ key: 'all', counters: counters(0, 1200) }, { key: 'ping', counters: counters(3, 9) }, { key: 'ssh', counters: counters(40, 7) }],
+    sets: [{ key: 'deny', id: 2 }, { key: 'office', id: 1 }],
+    global: { established: 98321, related: 4, essential: 17, blocklist: 55, bogon: 3, urpf: 1, tcp_flags: 2, fragment: 0, ct_new: 812, ct_full: 0, ct_short: 0, set_add: 0, set_full: 0 },
+    connection_tracking: { available: true, enabled: true },
+    attachments: { error: '', reason: '', interfaces: [{ interface: 'eth0', attached: true, mode: 'driver', error: '', egress: true }] },
+    drop_log: { logged: 2, lost: 0 },
+  };
+  const events = [
+    { at_ms: Date.now() - 5000, reason: 'blocklist', interface: 'eth0', source: '198.51.100.7', source_port: 0, protocol: 'icmp', icmp_type: 8, icmp_code: 0, destination: '192.0.2.1', port: 0, set: 'deny' },
+    { at_ms: Date.now() - 9000, reason: 'acl', interface: 'eth0', source: '203.0.113.9', source_port: 40000, protocol: 'tcp', destination: '192.0.2.1', port: 22, policy: 'ssh', policy_name: 'SSH' },
+  ];
+  const writes = [];
+  const actions = [];
+  // The catalog fixture's nf_counter page is also called firewall.
+  const others = pluginCatalog.plugins.filter((item) => !(item.ui && item.ui.page === 'firewall'));
+  await page.route('**/api/plugins', (route) => route.fulfill({ json: { ...pluginCatalog, plugins: [...others, plugin] } }));
+  await page.route('**/api/plugins/firewall/**', (route) => {
+    const url = new URL(route.request().url());
+    const endpoint = url.pathname.split('/firewall/')[1];
+    const method = route.request().method();
+    if (endpoint.startsWith('assets/')) {
+      return route.fulfill({ contentType: 'text/html; charset=utf-8', body: fs.readFileSync(path.join(root, 'ui', endpoint.slice('assets/'.length)), 'utf8') });
+    }
+    const resource = /^resources\/([a-z_]+)(?:\/([^/]+))?$/.exec(endpoint);
+    if (resource) {
+      const [, id, key] = resource;
+      if (method === 'GET' && !key) return route.fulfill({ json: { records: Object.values(resources[id] || {}) } });
+      if (method === 'GET') return route.fulfill({ json: resources[id][key] });
+      const body = route.request().postDataJSON();
+      const recordKey = key || body.key || id + '-new';
+      writes.push({ method, resource: id, key: recordKey, data: body.data });
+      resources[id][recordKey] = { key: recordKey, enabled: body.enabled !== false, data: body.data };
+      return route.fulfill({ json: resources[id][recordKey] });
+    }
+    if (endpoint.startsWith('actions/')) {
+      const id = endpoint.split('/').pop();
+      const payload = route.request().postDataJSON().payload;
+      const results = {
+        status, check: { errors: [], warnings: [], token: '' }, interfaces: [{ name: 'eth0', kind: 'device', up: true, master: '', l3: false }],
+        bans: { items: [], cursor: '', done: true, clock: true }, events,
+        set_list: { items: [{ cidr: '203.0.113.0/24', kind: 'static', remaining_seconds: null }, { cidr: '198.51.100.7/32', kind: 'api', remaining_seconds: 60 }], cursor: '', done: true },
+      };
+      if (!(id in results)) actions.push({ id, payload });
+      return route.fulfill({ json: { status: 'completed', result: results[id] || {} } });
+    }
+    return route.fulfill({ status: 404, json: { error: 'unknown fixture' } });
+  });
+  await page.evaluate(async () => { await window.VeerApp.loadPlugins(); window.VeerApp.stopPolling(); });
+  await navigatePage(page, 'plugin-firewall');
+  const frame = page.frameLocator('#tab-plugin-firewall iframe');
+  await expect(frame.getByRole('heading', { name: '防火墙', exact: true })).toBeVisible();
+  // Policies read as what they match; the catch-all and ICMP ones included.
+  await expect(frame.locator('table').first()).toContainText('全部流量');
+  await expect(frame.locator('table').first()).toContainText('icmp echo-request');
+  await expect(frame.locator('table').first()).toContainText('tcp 22 (SYN)');
+  // Status: the egress program and the global counters.
+  await expect(frame.getByText('eth0: 已挂载（驱动模式），出向跟踪已挂载')).toBeVisible();
+  await expect(frame.getByText('回包放行')).toBeVisible();
+  await expect(frame.getByText('98321')).toBeVisible();
+  // The drop log names the blocklist set and the ICMP type.
+  await expect(frame.getByText('@deny')).toBeVisible();
+  await expect(frame.getByText('icmp 8/0 192.0.2.1')).toBeVisible();
+
+  // A new ICMP policy: the port field gives way to ICMP types.
+  await frame.getByRole('button', { name: '新建策略', exact: true }).click();
+  await frame.getByRole('combobox', { name: '协议', exact: true }).selectOption('icmp');
+  await expect(frame.getByLabel(/^端口/)).toBeHidden();
+  await frame.getByLabel(/^ICMP 类型/).fill('8, 3/4');
+  await expect(frame.getByText('TCP 只判新连接')).toBeHidden();
+  await frame.getByLabel('名称', { exact: true }).fill('icmp-in');
+  await frame.getByRole('button', { name: '保存', exact: true }).click();
+  await expect.poll(() => writes.filter((w) => w.resource === 'policies').length).toBe(1);
+  const created = writes.find((w) => w.resource === 'policies').data;
+  expect(created).toMatchObject({ name: 'icmp-in', protocol: 'icmp', icmp_types: ['8', '3/4'], default_action: 'drop' });
+  expect(created.ports).toBeUndefined();
+
+  // An applied set lists its runtime elements and adds more at once.
+  await frame.locator('table').nth(1).getByRole('button', { name: '编辑', exact: true }).last().click();
+  await expect(frame.getByText('198.51.100.7/32')).toBeVisible();
+  await frame.getByLabel(/^加入元素/).fill('198.51.100.8, 2001:db8:9::/48');
+  await frame.getByLabel(/^超时/).fill('600');
+  await frame.getByRole('button', { name: '立即加入', exact: true }).click();
+  await expect.poll(() => actions.filter((a) => a.id === 'set_add').length).toBe(1);
+  expect(actions.find((a) => a.id === 'set_add').payload).toEqual({ set: 'office', elements: ['198.51.100.8', '2001:db8:9::/48'], timeout_seconds: 600 });
+
+  // Settings keep tracking, the blocklist and the baseline.
+  await expect(frame.getByText('连接跟踪', { exact: true })).toBeVisible();
+  await frame.getByRole('combobox', { name: '反向路径检查（Veer 转发绕过了内核 rp_filter）', exact: true }).selectOption('strict');
+  await frame.getByRole('button', { name: '保存设置', exact: true }).click();
+  await expect.poll(() => writes.filter((w) => w.resource === 'settings').length).toBe(1);
+  expect(writes.find((w) => w.resource === 'settings').data).toMatchObject({
+    interfaces: ['eth0'], connection_tracking: true, blocklists: ['deny'],
+    baseline: { bogon_sources: 'reserved', urpf: 'strict', invalid_tcp_flags: false, drop_fragments: false },
+  });
+
+  await expect.poll(() => frame.locator('body').evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+  await expectNoPageOverflow(page);
+  for (const theme of ['dark', 'light']) {
+    await page.evaluate((theme) => window.VeerApp.setTheme(theme), theme);
+    await expect(frame.locator('html')).toHaveAttribute('data-theme', theme);
+    expect(await contrastIssues(frame.locator('body')), 'firewall ' + theme).toEqual([]);
+    if (theme === 'dark') expect(await brightDarkSurfaces(frame.locator('body')), 'firewall').toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath('firewall-' + theme + '.png'), fullPage: true });
+  }
+});

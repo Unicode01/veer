@@ -93,13 +93,13 @@ manifest 只承载静态契约：身份、入口、权限、兼容范围、依�
 
 Veer 在执行 Goja 或加载 eBPF 前检查宿主 runtime、控制 API ABI、TC pipeline ABI、操作系统、架构、内核、feature、依赖版本、禁用状态、冲突和循环依赖。必需依赖按拓扑顺序注册和 reconcile，并按反向顺序 deactivate；可选依赖缺失不会阻止插件。运行时可通过 `plugin.host()` 查询 `runtime_version`、`control_api_abi`、`tc_pipeline_abi`、`os`、`arch`、`kernel_release`、`core_priority`、`features`、`available_features` 和 `feature_status`。`features` 是当前 Veer 二进制实现的稳定 API 集合；`available_features` 才表示当前内核、权限和系统能力实际可用，`feature_status[name].reason` 给出不可用原因。manifest 仍必须声明硬依赖，不能用运行时分支替代。隔离、资源 schema、资源事务、宿主网络租约和批量网络事务分别使用 `control.process_isolation.v1`、`control.resource_schema.v1`、`control.resource_transactions.v1`、`control.net_leases.v1`、`control.net_transactions.v1` feature 标识。
 
-`plugin.attachments()` 只读返回调用插件自己的数据面挂载状态，无需权限，只能在 runtime handler（主 VM 和 Worker、进程内和隔离 Host 均可）中调用，注册、迁移和升级阶段会抛错。结果为 `{mode, attached, reason, error, attachments}`：`mode`、`reason`、`error` 与 catalog 中该插件的 `runtime` 一致，Dispatcher 挂载失败（例如接口上已有其他 XDP 程序）时 `attachments` 为空、原因在 `error`，跳过不存在接口等提示在 `reason`；`attachments` 每项含 `hook_id`、`engine`、`attach`、`stage`、`interface`、`program`、`status`、`error` 和 `xdp_mode`，XDP Hook 的 `xdp_mode` 是该 Hook 在这个接口上的实际运行方式：Dispatcher 的 `driver` 或 `generic` 模式，或者 `tc`（运行 Hook 的 `tc_fallback` 程序，见“XDP 数据面插件”），其他引擎为空串，Netfilter Hook 另含 `namespace`、`family`、`netfilter_hook`、`phase`。同一 feature `control.attachment_status.v1` 还给 `plugin.host()` 增加 `kernel_engine_order`（配置的核心引擎顺序）和 `core_engine_pinned_to_tc`（最近一次核心 reconcile 是否因存在可运行的 TC/XDP 插件 Hook 而只用 TC）；`kernel_engine_order[0] === 'xdp'` 且 `core_engine_pinned_to_tc` 为真时，插件可提示用户 XDP 核心因插件 Hook 退回 TC。非 Linux 宿主返回空列表、`['tc']` 和 `false`。
+`plugin.attachments()` 只读返回调用插件自己的数据面挂载状态，无需权限，只能在 runtime handler（主 VM 和 Worker、进程内和隔离 Host 均可）中调用，注册、迁移和升级阶段会抛错。结果为 `{mode, attached, reason, error, attachments}`：`mode`、`reason`、`error` 与 catalog 中该插件的 `runtime` 一致，Dispatcher 挂载失败（例如接口上已有其他 XDP 程序）时 `attachments` 为空、原因在 `error`，跳过不存在接口等提示在 `reason`；`attachments` 每项含 `hook_id`、`engine`、`attach`、`stage`、`interface`、`program`、`status`、`error` 和 `xdp_mode`，XDP Hook 的 `xdp_mode` 是该 Hook 在这个接口上的实际运行方式：Dispatcher 的 `driver` 或 `generic` 模式，或者 `tc`（运行 Hook 的 `tc_fallback` 程序，见“XDP 数据面插件”）；声明了 `tc_egress` 的 XDP Hook 在每个接口另有一条 `attach` 为 `egress`、`xdp_mode` 为 `tc` 的记录；其他引擎为空串，Netfilter Hook 另含 `namespace`、`family`、`netfilter_hook`、`phase`。同一 feature `control.attachment_status.v1` 还给 `plugin.host()` 增加 `kernel_engine_order`（配置的核心引擎顺序）和 `core_engine_pinned_to_tc`（最近一次核心 reconcile 是否因存在可运行的 TC/XDP 插件 Hook 而只用 TC）；`kernel_engine_order[0] === 'xdp'` 且 `core_engine_pinned_to_tc` 为真时，插件可提示用户 XDP 核心因插件 Hook 退回 TC。非 Linux 宿主返回空列表、`['tc']` 和 `false`。
 
 `ebpf.monotonicMs()` 以毫秒（可含小数）返回 `CLOCK_MONOTONIC`，与 eBPF 程序中 `bpf_ktime_get_ns() / 1e6` 同一时钟，便于控制脚本比较 map 中保存的 ktime 截止时间；无需权限，可在 runtime 与数据面状态迁移阶段使用，对应 feature `ebpf.monotonic_clock.v1`。非 Linux 宿主没有该时钟，只返回进程内单调递增的值，feature 标为不可用。SDK 测试宿主中两者都可由 `adapters['plugin.attachments']`、`adapters['ebpf.monotonicMs']` 提供，未提供时分别返回“未挂载”状态和 Node 单调时钟；`hostInfo.kernel_engine_order/core_engine_pinned_to_tc` 设置对应的 `plugin.host()` 字段。
 
 `plugin.host().resource_limits` 返回当前宿主实际采用的插件预算。宿主在加载 object 前按 program/map 数、指令数、map 类型、`max_entries` 和 possible CPU 数估算内核内存，并同时限制单 map、单插件与全局 map 占用；不受管理的 pinned map、Arena 和 StructOps map 会被拒绝。动态注册的 capability、resource、action、Hook、object 和逻辑接口也有数量上限。SQLite 写入在同一事务内检查单插件与全局字节预算，schema migration 超额会整体回滚。Linux 隔离进程共享插件级 cgroup，并受父级全局内存/PID 预算约束。配置项集中在 `plugins_resource_limits`，catalog 的 `resource_usage` 会显示已准入的估算 map 内存、数据库实际占用及超限告警。
 
-包 stage 会根据注册后的完整 surface 自动补充宿主要求：TC Hook 要求真实 `dataplane.tc_pipeline.v2`，XDP Hook 要求 `dataplane.xdp_pipeline.v1`（声明 `tc_fallback` 的再要求 `dataplane.xdp_tc_fallback.v1`），`state_maps` 要求 `ebpf.map_state.v1`，`net.admin/net.l2/net.tcp/net.udp` 权限分别触发 netlink、AF_PACKET 或 socket preflight，`net.namespace/net.tuntap` 还会检查 Linux namespace 与 `/dev/net/tun` provider，`net.*` 事件订阅会检查 link/address/neighbor/route netlink subscription。TC 探测复用 verifier/clsact 检测，XDP 探测检查 program type、prog-array 和接口枚举能力，bounded map read 还会检查 ring-buffer map；不满足时包在目录切换前被拒绝，而不是安装后才报错。
+包 stage 会根据注册后的完整 surface 自动补充宿主要求：TC Hook 要求真实 `dataplane.tc_pipeline.v2`，XDP Hook 要求 `dataplane.xdp_pipeline.v1`（声明 `tc_fallback` 的再要求 `dataplane.xdp_tc_fallback.v1`，声明 `tc_egress` 的再要求 `dataplane.xdp_tc_egress.v1`），`state_maps` 要求 `ebpf.map_state.v1`，`net.admin/net.l2/net.tcp/net.udp` 权限分别触发 netlink、AF_PACKET 或 socket preflight，`net.namespace/net.tuntap` 还会检查 Linux namespace 与 `/dev/net/tun` provider，`net.*` 事件订阅会检查 link/address/neighbor/route netlink subscription。TC 探测复用 verifier/clsact 检测，XDP 探测检查 program type、prog-array 和接口枚举能力，bounded map read 还会检查 ring-buffer map；不满足时包在目录切换前被拒绝，而不是安装后才报错。
 
 `control.js` 顶层负责注册运行时 surface：
 
@@ -873,13 +873,27 @@ generic XDP 要求 skb 线性并留出 XDP 头部空间，所以每个 GRO 聚�
 - `experimental_features` 中的 `xdp_plugin_no_tc_fallback` 关闭兜底，没有原生 XDP 的接口回到 generic 模式，用于排查和对比。
 - `plugin.attachments()` 按 Hook 和接口报告：在 TC 跑的是 `tc`，同一接口上留在 Dispatcher 里的 Hook 是 `generic`。使用此字段的插件要在 `compatibility.features` 声明 `dataplane.xdp_tc_fallback.v1`（包 stage 会自动补上）。
 
+### TC 出口程序（`tc_egress`）
+
+XDP Hook 只看得到进来的包。需要知道绑定接口上发出去了什么的插件（例如防火墙的连接跟踪：记下本机和 Veer 转发出去的连接，放行它们的回包），可以用 `tc_egress: "object:program"` 指定同一 object 里的另一个 tc 程序：
+
+- 宿主把它挂在 Hook 绑定的每个接口的 TC egress 最前面，不管 Hook 在入口是由 Dispatcher（driver 或 generic）还是 `tc_fallback` 执行。挂载方式与 `tc_fallback` 相同：tcx 列表头，或 cls_bpf 优先级 1–8（egress 与 ingress 各自一张过滤器表），排在核心可能挂的 egress 程序之前。
+- 它只观察：必须返回 `TC_ACT_UNSPEC`（-1），不丢包、不改包。看到的是离开接口时的包：Veer 核心转发（包括连接缓存快路径、`bpf_redirect_neigh`）、出向 NAT 之后的地址、本机协议栈发出的包都会经过；XDP_REDIRECT/XDP_TX、AF_XDP 和开启 `PACKET_QDISC_BYPASS` 的 AF_PACKET 发出的包不经过 TC egress，看不到。核心使用 XDP 转发引擎时它转发的包也看不到；只要有 XDP 插件 Hook 在运行，核心就固定走 TC，所以目前不受影响。
+- 本机 TCP 发出的 skb 是 clone：程序只读头部，不要 `bpf_skb_pull_data()`，那会复制一份。头部不在线性区时跳过即可。
+- 入口和出口成对：出口程序挂载失败等同 Hook 挂载失败，整次 reconcile 报错（与 `tc_fallback` 相同），不会出现只有入口在跑的状态。
+- `hook_bindings` 记录可以写 `tc_egress: false`，只在这次绑定里不挂出口程序（例如防火墙关闭连接跟踪时），不写或写 `true` 时挂载；没有绑定记录的 Hook 总是挂载。
+- `plugin.attachments()` 为每个接口多报一条 `attach: "egress"`、`xdp_mode: "tc"` 的记录。
+- 热重启与 `tc_fallback` 相同：tcx link 由旧进程 pin 住、cls_bpf filter 保持原位，新进程原地替换程序。**降级风险**：不认识出口位置的旧版本 Veer 接管时会忽略它们；tcx link 随 pin 释放，cls_bpf 内核（5.10/5.15/6.1）上则留下一个孤立的 egress 过滤器，直到接口删除或手动 `tc filter del`。降级前先在插件里关闭用到它的功能。
+- 不用的人零开销：没有 Hook 声明 `tc_egress` 时不挂任何东西；挂上后只有绑定接口的发送路径多一个程序，其他接口不受影响。
+- 需要宿主 feature `dataplane.xdp_tc_egress.v1`（SDK 契约 18）。插件可以先查 `plugin.host().available_features`，在旧宿主上不声明 `tc_egress`，照常以无出口的方式运行。
+
 没有 XDP Hook、插件被禁用或插件系统关闭时，Dispatcher 会从接口完全卸载，不给无插件热路径增加 lookup；上一个进程留下的 Dispatcher 也会在这时卸载。接口删除后，同名接口重建会按新 ifindex 重新挂载；崩溃恢复同时核对原进程 start-time 和 XDP program ID，绝不根据旧 ifindex 盲目删除其他程序。
 
 热更新（`deploy.sh` 热重启）时，旧进程不卸载 Dispatcher，而是 pin 住 `xdp_prog_chain` 并记录挂载点，旧插件链在进程交接期间继续处理每个包。新进程先在新 Dispatcher 中装好完整插件链，再用 `XDP_FLAGS_REPLACE` 按 program ID 原子替换旧 Dispatcher，最后释放 pin；替换中途失败会把已替换的接口恢复成旧 Dispatcher。原子替换需要 Linux 5.7+，更旧的内核仍在退出时卸载 Dispatcher，交接期间 XDP 插件不生效。对象内容更新可继承兼容的 `state_maps`，声明 `preserve` 的 map 也随热重启交给新进程（见上文 `state_maps`），新 Dispatcher 替换旧的那一刻规则已经在 map 里；Hook、模式、优先级或接口范围变化失败时不会隐形保留旧链。
 
 同一个 eBPF object 不能同时承载 TC、XDP 或 Netfilter 中的多个数据面引擎。跨引擎插件应按引擎拆分 object，使私有 map 的 ownership 和 Goja map API 目标保持唯一；需要同步配置时由控制面使用 map transaction 分别更新。
 
-`dataplane.xdp_pipeline.v1` 表示宿主具备 XDP program、prog-array 和接口枚举基础能力。它不保证每块网卡支持 native XDP，最终 attach mode 和冲突仍以运行时 attachment 状态为准。`dataplane.xdp_tc_fallback.v1` 表示宿主支持 XDP Hook 的 `tc_fallback`，额外要求 TC（clsact）可用。
+`dataplane.xdp_pipeline.v1` 表示宿主具备 XDP program、prog-array 和接口枚举基础能力。它不保证每块网卡支持 native XDP，最终 attach mode 和冲突仍以运行时 attachment 状态为准。`dataplane.xdp_tc_fallback.v1` 表示宿主支持 XDP Hook 的 `tc_fallback`，额外要求 TC（clsact）可用。`dataplane.xdp_tc_egress.v1` 表示宿主支持 XDP Hook 的 `tc_egress`，要求相同。
 
 ## Netfilter 数据面插件
 

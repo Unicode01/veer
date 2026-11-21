@@ -290,19 +290,25 @@ function normalizeHookBinding(item, api) {
   }
 }
 
-function normalizeHookTCFallback(item, api) {
-  if (item.tc_fallback == null || item.tc_fallback === '') {
-    delete item.tc_fallback;
+// tc_fallback and tc_egress name tc programs of an xdp hook's own object.
+function normalizeHookTCProgram(item, field, api) {
+  if (item[field] == null || item[field] === '') {
+    delete item[field];
     return;
   }
-  if (typeof item.tc_fallback !== 'string') throw new Error(`${api}.tc_fallback must be a string`);
-  if (item.engine !== 'xdp') throw new Error(`${api}.tc_fallback is only available to xdp hooks`);
-  const value = item.tc_fallback.trim();
+  if (typeof item[field] !== 'string') throw new Error(`${api}.${field} must be a string`);
+  if (item.engine !== 'xdp') throw new Error(`${api}.${field} is only available to xdp hooks`);
+  const value = item[field].trim();
   const index = value.lastIndexOf(':');
   if (value.length > 160 || value.includes('\0') || index <= 0 || index >= value.length - 1) {
-    throw new Error(`${api}.tc_fallback must use object:program`);
+    throw new Error(`${api}.${field} must use object:program`);
   }
-  item.tc_fallback = value;
+  item[field] = value;
+}
+
+function normalizeHookTCFallback(item, api) {
+  normalizeHookTCProgram(item, 'tc_fallback', api);
+  normalizeHookTCProgram(item, 'tc_egress', api);
 }
 
 function normalizeHookOrder(item, api) {

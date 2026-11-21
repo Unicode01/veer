@@ -1155,6 +1155,18 @@ func normalizePluginHook(hook *PluginHook) error {
 			return fmt.Errorf("tc_fallback must use object:program")
 		}
 	}
+	hook.TCEgress = strings.TrimSpace(hook.TCEgress)
+	if hook.TCEgress != "" {
+		if hook.Engine != kernelEngineXDP {
+			return fmt.Errorf("tc_egress is only available to xdp hooks")
+		}
+		if strings.Contains(hook.TCEgress, "\x00") || len(hook.TCEgress) > 160 {
+			return fmt.Errorf("tc_egress contains invalid characters")
+		}
+		if _, _, ok := parsePluginProgramRef(hook.TCEgress); !ok {
+			return fmt.Errorf("tc_egress must use object:program")
+		}
+	}
 	hook.Mode = strings.TrimSpace(strings.ToLower(hook.Mode))
 	if hook.Mode == "" {
 		if hook.Engine == "control" {

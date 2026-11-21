@@ -53,6 +53,7 @@ func currentPluginHostFeatureAvailability() pluginHostFeatureAvailability {
 			"dataplane.kfuncs.wan.v1",
 			"dataplane.xdp_pipeline.v1",
 			"dataplane.xdp_tc_fallback.v1",
+			"dataplane.xdp_tc_egress.v1",
 			"dataplane.netfilter_pipeline.v1",
 			"dataplane.netfilter_skb_dynptr.v1",
 			"ebpf.bounded_reads.v1",
@@ -76,6 +77,13 @@ func currentPluginHostFeatureAvailability() pluginHostFeatureAvailability {
 	)
 	status["dataplane.xdp_tc_fallback.v1"] = pluginHostFeatureStatusFromChecks(
 		"XDP plugin TC fallback",
+		caps.BPFXDP,
+		caps.BPFMapProgArray,
+		caps.Netlink.LinkList,
+		caps.TC,
+	)
+	status["dataplane.xdp_tc_egress.v1"] = pluginHostFeatureStatusFromChecks(
+		"XDP plugin TC egress programs",
 		caps.BPFXDP,
 		caps.BPFMapProgArray,
 		caps.Netlink.LinkList,
@@ -228,6 +236,9 @@ func pluginRequiredHostFeatures(plugin LoadedPlugin) []string {
 			required["dataplane.xdp_pipeline.v1"] = struct{}{}
 			if hook.TCFallback != "" {
 				required["dataplane.xdp_tc_fallback.v1"] = struct{}{}
+			}
+			if hook.TCEgress != "" {
+				required["dataplane.xdp_tc_egress.v1"] = struct{}{}
 			}
 		} else if hook.Engine == pluginEngineNetfilter {
 			required["dataplane.netfilter_pipeline.v1"] = struct{}{}

@@ -16,11 +16,15 @@ type pluginHookBindingRecordData struct {
 	Hook       string   `json:"hook"`
 	Interface  string   `json:"interface"`
 	Interfaces []string `json:"interfaces"`
+	// TCEgress false leaves an xdp hook's tc_egress program off the bound
+	// interfaces; absent or true attaches it.
+	TCEgress *bool `json:"tc_egress,omitempty"`
 }
 
 type pluginHookBindingSet struct {
 	Interfaces map[string][]string
 	Disabled   map[string]struct{}
+	NoTCEgress map[string]struct{}
 }
 
 func applyPluginHookBindingsFromDB(catalog PluginCatalog, db *sql.DB) PluginCatalog {
@@ -61,6 +65,9 @@ func applyPluginHookBindingsFromDB(catalog PluginCatalog, db *sql.DB) PluginCata
 			if bound && hook.Engine != pluginEngineNetfilter {
 				hook.Interfaces = interfaces
 			}
+			if _, off := bindings.NoTCEgress[hookID]; off && bound {
+				hook.TCEgress = ""
+			}
 			hooks = append(hooks, hook)
 		}
 		plugin.Hooks = hooks
@@ -81,6 +88,7 @@ func pluginHookBindingsFromRecords(pluginID string, records []store.PluginRecord
 	out := pluginHookBindingSet{
 		Interfaces: make(map[string][]string),
 		Disabled:   make(map[string]struct{}),
+		NoTCEgress: make(map[string]struct{}),
 	}
 	for _, record := range records {
 		var data pluginHookBindingRecordData
@@ -122,6 +130,11 @@ func pluginHookBindingsFromRecords(pluginID string, records []store.PluginRecord
 			continue
 		}
 		out.Interfaces[hookID] = interfaces
+		if data.TCEgress != nil && !*data.TCEgress {
+			out.NoTCEgress[hookID] = struct{}{}
+		} else {
+			delete(out.NoTCEgress, hookID)
+		}
 	}
 	return out
 }

@@ -2,10 +2,10 @@
   "api_version": "v1",
   "id": "firewall",
   "name": "Firewall",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "kind": "pipeline",
   "stability": "stable",
-  "description": "Stateless XDP source filter for TCP and UDP ports, ahead of the Veer dataplane. Applied rule sets need confirmation or roll back by themselves.",
+  "description": "XDP source filter for ports, ICMP and IP protocols, with address sets, a security baseline and optional connection tracking, ahead of the Veer dataplane. Applied rule sets need confirmation or roll back by themselves.",
   "compatibility": {
     "os": ["linux"],
     "runtime": ">=1.0.0 <2.0.0",
@@ -27,7 +27,7 @@
   },
   "control": {
     "main": "control.js",
-    "sha256": "8004c738c00e68e54b5b3dbcd9bd5f19526c43bd7cc691c5dbde01d3c3958505",
+    "sha256": "5f53a47a8d56e3e92706abcdeea17702184cabcf2a9cc1f6605ca9ce6c32ab0b",
     "permissions": [
       "crypto",
       "ebpf.load",
