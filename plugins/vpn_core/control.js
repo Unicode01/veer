@@ -328,10 +328,13 @@ function boundaryLinks(p, previousMode) {
   return {local: local, peer: peer};
 }
 function wanPayload(p, usable) {
+  // Kernel WireGuard segments GSO skbs itself, so its boundary keeps GSO on
+  // both the helper and the plain BPF path; segmenting at the WAN boundary
+  // would push every MTU-sized packet through the veth and TC separately.
   // A managed TUN must positively negotiate vnet headers and offloads before
   // accepting large skbs. Never carry a previous core generation's capability
   // into its prepared/restarting boundary.
-  var gso = (KFUNCS && (!p.driver || p.driver === 'wireguard')) || (usable && p.tun_gso === true);
+  var gso = (!p.driver || p.driver === 'wireguard') || (usable && p.tun_gso === true);
   return {wan_id: p.wan_id, key: p.wan_id, profile_key: p.key, driver: p.driver || 'wireguard', driver_plugin: 'vpn_core',
     state: usable ? 'up' : 'prepared', usable: usable, real_interface: p.interface, wan_interface: p.local,
     local_interface: p.local, pipeline_interface: wanPipeline(p), handoff_mode: p.handoff_mode || 'segmented_veth', mtu: p.mtu,

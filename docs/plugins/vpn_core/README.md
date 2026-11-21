@@ -152,7 +152,7 @@ JavaScript 负责配置和恢复，不参与逐包转发。无需关闭 Veer 快
 
 ## 安装
 
-默认使用基础 TC 适配器和 veth 分段边界。可选 [Veer 内核扩展](../../KERNEL.md) 支持接收注入时，插件自动选择 `tunnel_adapter-direct.o`，只创建 WAN local dummy 与实际 WG/TUN 两个接口；发送适配挂 local egress，回包补头后直接进入 local ingress。旧版 helper 使用 `tunnel_adapter-kfuncs.o` 与 veth，模块或对象不可用时保留兼容路径。切换能力后正常重载插件会迁移自有边界，保留 WAN 名称、源地址与配置；改变边界类型会中断该出口的既有连接。WireGuard 加密仍由内核 WG 完成。
+默认使用基础 TC 适配器和 veth 分段边界。0.10.0 起基础路径的 WG 边界也保留 GSO，大包整块交给内核 WireGuard 自行分段，不再在边界上逐个 MTU 小包经过 veth 和 TC；已应用的出口在下次应用后生效。可选 [Veer 内核扩展](../../KERNEL.md) 支持接收注入时，插件自动选择 `tunnel_adapter-direct.o`，只创建 WAN local dummy 与实际 WG/TUN 两个接口；发送适配挂 local egress，回包补头后直接进入 local ingress。旧版 helper 使用 `tunnel_adapter-kfuncs.o` 与 veth，模块或对象不可用时保留兼容路径。切换能力后正常重载插件会迁移自有边界，保留 WAN 名称、源地址与配置；改变边界类型会中断该出口的既有连接。WireGuard 加密仍由内核 WG 完成。
 
 `pipeline.node` / `pipeline.handoff` 只是逻辑定义，本身不创建 Linux 网卡。兼容路径的 pipeline veth 则是真实设备，属于插件内部实现，不出现在普通接口列表或规则出口选择中；诊断资源和 `/api/interfaces?include_internal=true` 仍可查看。隐藏前核验 WAN 所有权、boot ID、接口代际、MAC 与双端关系，不按名称前缀隐藏管理员的设备。
 

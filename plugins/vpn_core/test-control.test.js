@@ -103,7 +103,8 @@ test('WG publishes a segmented WAN, installs both TC directions and cleans/reapp
   assert.equal(result.egress_nat_interface,'veerwg1');assert.equal(result.tc_ready,true);
   const p=h.state.records.sessions.wg_default.data;
   assert.equal(p.egress_nat_redirect_mode,'prepared_l2');assert.equal(p.install_default_route,false);assert.equal(p.usable,true);
-  assert.equal(p.interface_preparation.local_offloads.gso,false);
+  // Kernel WireGuard segments GSO skbs itself: the plain BPF boundary keeps GSO too.
+  assert.equal(p.interface_preparation.local_offloads.gso,true);assert.equal(p.interface_preparation.local_gso.max_segs,65535);
   assert.equal([...h.maps().values()][0].size,2);
   assert.equal(h.state.calls.some(r=>r.args.some(a=>a.includes(PRIVATE))),false);assert.match(h.state.config,/PrivateKey = /);
   assert.equal(h.host.snapshot().secrets.private_default,'[REDACTED]');assert.equal(h.host.action('inspect',{}).public_key,PUBLIC);
@@ -235,7 +236,7 @@ test('WG legacy cleanup accepts only the owned top-level nft marker and never fl
 });
 
 
-test('WG selects a probed optional object and coordinates GSO, with missing-artifact fallback',t=>{
+test('WG selects a probed optional object and keeps GSO on both objects',t=>{
   const fs=require('node:fs'), os=require('node:os');
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'veer-wg-capability-'));
   t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
@@ -251,7 +252,9 @@ test('WG selects a probed optional object and coordinates GSO, with missing-arti
   fs.unlinkSync(path.join(dir,'tunnel_adapter-kfuncs.o'));
   const fallback=fixture(profile(),options);fallback.apply();
   assert.equal(fallback.host.snapshot().surface.objects[0].path,'tunnel_adapter.o');
-  assert.equal(fallback.state.records.sessions.wg_default.data.interface_preparation.local_offloads.gso,false);
+  const base=fallback.state.records.sessions.wg_default.data.interface_preparation;
+  assert.equal(base.local_offloads.gso,true);assert.equal(base.local_gso.max_segs,65535);assert.equal(base.pipeline_offloads.gro,true);
+  assert.equal(fallback.host.state.resources.get('status').get('default').data.dataplane,'bpf');
 });
 
 
