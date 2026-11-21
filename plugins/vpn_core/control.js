@@ -21,15 +21,26 @@ var IP = '/usr/sbin/ip', WG = '/usr/bin/wg', NFT = '/usr/sbin/nft', SYSCTL = '/u
 var MAX_CHAIN = 2;
 var PROTOCOL = '242'; // Used only when cleaning up leases from the old routing example.
 var OBJECT = 'tunnel_adapter', MAP = 'tunnel_links', REPAIR_TIMER = 'tunnel_repair';
+var EVENT_TIMER = 'tunnel_event', RETRY_TIMER = 'tunnel_retry';
 var HOOK_IN = 'tunnel-links', HOOK_DIRECT_OUT = 'tunnel-direct-out';
 var changing = false;
-// Every repair tick checks what a crash or restart changes first: the core
-// process and the tunnel. The WAN boundary (WAN Core repairs it itself) and
-// the TC map entries (lost only when the dataplane is rebuilt) are verified
-// about every FULL_CHECK_MS, or at once when the light check fails. The 5 s
-// WireGuard-only timer therefore still checks everything on each tick.
-var lastFullCheck = 0, FULL_CHECK_MS = 5000;
+// Exits are checked when something changes, not on a polling tick: a link
+// event (the tunnel, the WAN boundary or a chained front going away, down or
+// being replaced) or a core process changing state arms EVENT_TIMER, which
+// checks the core, the tunnel, the boundary and the TC map entries of every
+// exit and repairs what differs. An exit that is still negotiating its TUN
+// offloads is checked again every PENDING_RETRY_MS, a failed repair with
+// backoff from RETRY_MIN_MS to RETRY_MAX_MS, and REPAIR_TIMER checks
+// everything every SAFETY_REPAIR_MS in case an event was lost (the TC map
+// entries have no event).
+var SAFETY_REPAIR_MS = 300000, EVENT_REPAIR_DELAY_MS = 250, PENDING_RETRY_MS = 1000;
+var RETRY_MIN_MS = 2000, RETRY_MAX_MS = 60000, retryDelay = 0;
 plugin.capabilities(['vpn', 'wireguard', 'mihomo', 'sing_box', 'wan', 'tc_adapter', 'control']);
+events.subscribe({id: 'vpn_links', topic: 'net.link', worker: 'events', handler: 'onNetEvent', queue_size: 64});
+// Hosts before process.state learn of a core restart from its TUN going away.
+if (hostFeature('control.process_events.v1')) {
+  events.subscribe({id: 'vpn_processes', topic: 'process.state', worker: 'events', handler: 'onProcessEvent', queue_size: 16});
+}
 pipeline.node({id: 'vpn', description: 'VPN core attached to a WAN Core boundary.'});
 ebpf.loadObject({id: OBJECT, path: TUNNEL_OBJECT_PATH, sha256: crypto.sha256File(TUNNEL_OBJECT_PATH),
   programs: [{id: 'tc_adapter', section: 'tc/veer/pre_forward', type: 'tc'}]});
@@ -159,38 +170,68 @@ exports.onReconcile = function () {
     catch (e) { errors.push(key + ': ' + String(e.message || e)); resources.set('status', key, errorStatus(key, lease.plan, e), true); }
   });
   armRepair();
-  if (errors.length) throw new Error(errors.join('; '));
+  if (errors.length) {
+    armRetry(true);
+    throw new Error(errors.join('; '));
+  }
 };
 exports.onTimer = function (ctx) {
   var name = ctx.timer && ctx.timer.name;
   if (name === 'vpn_health') { health.tick(); return; }
   // Stop timers this version no longer arms, such as wg_repair from 0.9.0.
-  if (name !== REPAIR_TIMER) { if (name) timer.clear(name); return; }
-  var now = Date.now(), full = now - lastFullCheck >= FULL_CHECK_MS - 500;
-  if (full) lastFullCheck = now;
+  if (name !== REPAIR_TIMER && name !== EVENT_TIMER && name !== RETRY_TIMER) { if (name) timer.clear(name); return; }
+  var failed = false;
   var leases = allLeases();
   chainOrder(leases).forEach(function (key) {
     var lease = leases[key];
     if (!lease.active || isLegacy(lease)) return;
-    if (lease.plan.driver && lease.plan.driver !== 'wireguard') { repairTUN(key, lease, full); return; }
+    if (lease.plan.driver && lease.plan.driver !== 'wireguard') { if (!repairTUN(key, lease)) failed = true; return; }
     try {
       var p = lease.plan, wg = ownedLink(p, lease);
       var tunnelOK = !lease.pending && wg && (wg.flags || []).indexOf('UP') >= 0 && wg.mtu === p.mtu && wg.ifindex === lease.tunnel_ifindex;
-      if (tunnelOK && !full) return;
       var boundary = tunnelOK ? boundaryLinks(p) : null;
       if (!tunnelOK || !boundary || boundary.local.ifindex !== lease.local_ifindex || boundary.peer.ifindex !== lease.pipeline_ifindex) {
         clearMaps(lease);
         apply(key, lease.settings);
       } else repairMaps(p, wg, boundary);
     } catch (e) {
+      failed = true;
       try { clearMaps(lease); } catch (cleanup) { log.error('Tunnel map cleanup failed: ' + String(cleanup.message || cleanup)); }
       resources.set('status', key, errorStatus(key, lease.plan, e), true);
     }
   });
+  armRetry(failed);
 };
+// Runs in the events worker. The check that follows reads a few links per
+// exit, so any link change may arm it; a burst arms it once.
+exports.onNetEvent = function () {
+  timer.setTimeout(EVENT_TIMER, EVENT_REPAIR_DELAY_MS, {});
+};
+exports.onProcessEvent = function (ctx) {
+  var payload = (ctx.event && ctx.event.payload) || {};
+  if (String(payload.id || '').indexOf('vpn_') === 0) timer.setTimeout(EVENT_TIMER, EVENT_REPAIR_DELAY_MS, {});
+};
+function hostFeature(name) {
+  if (typeof plugin.host !== 'function') return false;
+  return (plugin.host().available_features || []).indexOf(name) >= 0;
+}
+// An exit still negotiating its TUN offloads is checked again soon; a failed
+// repair waits longer each time, since no event may follow it.
+function armRetry(failed) {
+  var leases = allLeases();
+  var pending = Object.keys(leases).some(function (k) { return leases[k].active && leases[k].pending; });
+  if (failed) {
+    retryDelay = retryDelay ? Math.min(retryDelay * 2, RETRY_MAX_MS) : RETRY_MIN_MS;
+    timer.setTimeout(RETRY_TIMER, pending ? Math.min(retryDelay, PENDING_RETRY_MS) : retryDelay, {});
+    return;
+  }
+  retryDelay = 0;
+  if (pending) timer.setTimeout(RETRY_TIMER, PENDING_RETRY_MS, {});
+  else timer.clear(RETRY_TIMER);
+}
 exports.onDeactivate = function () {
   health.stop();
-  timer.clear(REPAIR_TIMER);
+  [REPAIR_TIMER, EVENT_TIMER, RETRY_TIMER].forEach(function (name) { timer.clear(name); });
   var failures = [];
   // Chained exits first, so no core keeps dialing through a removed front.
   chainOrder(allLeases()).reverse().forEach(function (key) {
@@ -219,8 +260,14 @@ function allLeases() {
 function armRepair() {
   health.arm();
   var leases = allLeases(), keys = Object.keys(leases);
-  if (keys.some(function (k) { return leases[k].active; })) timer.setInterval(REPAIR_TIMER, keys.some(function (k) { return leases[k].active && leases[k].plan.driver && leases[k].plan.driver !== 'wireguard'; }) ? 1000 : 5000, {});
-  else timer.clear(REPAIR_TIMER);
+  if (keys.some(function (k) { return leases[k].active; })) {
+    timer.setInterval(REPAIR_TIMER, SAFETY_REPAIR_MS, {});
+    // Whatever was just applied gets one check soon: a TUN that is still
+    // negotiating or an apply that failed is then retried from there.
+    if (keys.some(function (k) { return leases[k].active && leases[k].pending; })) timer.setTimeout(RETRY_TIMER, PENDING_RETRY_MS, {});
+  } else {
+    [REPAIR_TIMER, EVENT_TIMER, RETRY_TIMER].forEach(function (name) { timer.clear(name); });
+  }
 }
 // Chained exits: a proxy exit's upstream_interface may be another applied
 // exit's WAN boundary. Its core binds every socket there (sing-box
@@ -1147,14 +1194,14 @@ function applyTUNProfile(key, raw, explicit) {
     armRepair(); throw e;
   }
 }
-function repairTUN(key, lease, full) {
+// Returns false when the exit could not be repaired.
+function repairTUN(key, lease) {
   try {
     var p = lease.plan, current = link(p.interface);
     var proc = p.driver === 'tun' ? null : process.status('vpn_' + key);
     var tunnelOK = !lease.pending && current && current.linkinfo && current.linkinfo.info_kind === 'tun' && current.ifalias === p.owner &&
       current.ifindex === lease.tunnel_ifindex && current.mtu === p.mtu && (current.flags || []).indexOf('UP') >= 0 &&
       !(proc && (proc.state !== 'running' || proc.started_at !== lease.process_started_at));
-    if (tunnelOK && full === false) return;
     // A chained exit also needs the same front boundary it bound to.
     if (tunnelOK && lease.upstream_ifindex != null) {
       var frontLink = link(p.upstream_interface);
@@ -1165,9 +1212,11 @@ function repairTUN(key, lease, full) {
       suspendTUN(p, lease);
       apply(key, lease.settings);
     } else repairMaps(p, current, boundary);
+    return true;
   } catch (e) {
     try { suspendTUN(lease.plan, lease); } catch (_) { log.error('VPN suspension failed'); }
     resources.set('status', key, errorStatus(key, lease.plan, e), true);
+    return false;
   }
 }
 function teardownTUN(key, lease) {
