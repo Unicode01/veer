@@ -795,9 +795,10 @@ function suspendTUN(p, lease) {
   if (wanRecord('status', p)) plugins.resources.set('wan_core', 'sessions', p.wan_id, wanPayload(p, false), false, true);
 }
 function tunGSO(p, current) {
-  // sing-box's Linux gVisor driver negotiates this itself. Other providers have
-  // different contracts and retain the segmented boundary until verified.
-  if (p.driver !== 'sing_box' || current.tun_vnet_hdr !== true) return {enabled: false};
+  // sing-box's Linux gVisor driver negotiates this itself and Mihomo does when
+  // its generated config sets gso. External TUN providers have their own
+  // contracts and retain the segmented boundary.
+  if ((p.driver !== 'sing_box' && p.driver !== 'mihomo') || current.tun_vnet_hdr !== true) return {enabled: false};
   try {
     var features = net.link.getOffloads(p.interface);
     var enabled = features.tx === true && features.sg === true && features.tso === true && features.gso === true;

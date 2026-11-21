@@ -548,7 +548,7 @@ func runVPNWireGuardTopology(t *testing.T) {
 			t.Fatalf("cannot read real TUN capabilities: %v", err)
 		}
 		features := parsePluginControlOffloadFeatures(run("", "ethtool", "-k", tunnelInterface))
-		want := driver == "sing_box" && links[0].LinkInfo.InfoData.VNetHeader && features["tx"] && features["sg"] && features["tso"] && features["gso"]
+		want := (driver == "sing_box" || driver == "mihomo") && links[0].LinkInfo.InfoData.VNetHeader && features["tx"] && features["sg"] && features["tso"] && features["gso"]
 		var response struct {
 			Result struct {
 				TUNGSO bool `json:"tun_gso"`

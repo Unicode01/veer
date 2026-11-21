@@ -622,7 +622,9 @@ for (const driver of ['mihomo','sing_box']) {
     assert.equal(result.phase,'applied');assert.equal(result.egress_nat_interface,'veervpn1');assert.equal(result.egress_nat_redirect_mode,'prepared_l2');
     assert.equal(h.host.action('inspect',{}).phase,'applied');
     assert.equal([...h.maps().values()][0].size,2);const config=JSON.parse(h.specs[0].config);
-    if(driver==='mihomo') {assert.equal(config.tun.stack,'gvisor');assert.equal(config.tun['auto-route'],false);assert.equal(config.tun['auto-redirect'],false);assert.equal(config['interface-name'],'eth0');}
+    if(driver==='mihomo') {assert.equal(config.tun.stack,'gvisor');assert.equal(config.tun['auto-route'],false);assert.equal(config.tun['auto-redirect'],false);assert.equal(config['interface-name'],'eth0');
+      // The plugin asks Mihomo for TUN offloads; the probe decides whether the WAN keeps them.
+      assert.equal(config.tun.gso,true);assert.equal(config.tun['gso-max-size'],65536);}
     else {assert.equal(config.inbounds[0].stack,'gvisor');assert.equal(config.inbounds[0].auto_route,false);assert.equal(config.route.default_interface,'eth0');}
     assert.ok(!JSON.stringify(h.host.snapshot().resources.status).includes('sensitive-core-password'));
     h.host.action('teardown',{});assert.equal(h.state.links.length,0);assert.deepEqual(h.procs,{});
@@ -710,14 +712,16 @@ for(const driver of ['wireguard','mihomo','sing_box','tun']) {
   });
 }
 
-test('VPN enables GSO only for a managed sing-box TUN with negotiated capabilities',()=>{
+test('VPN enables GSO only for a managed sing-box or Mihomo TUN with negotiated capabilities',()=>{
   const full={tx:true,sg:true,tso:true,gso:true};
   const cases=[
     {driver:'sing_box',vnetHeader:true,offloads:full,want:true},
     {driver:'sing_box',vnetHeader:false,offloads:full,want:false},
     ...Object.keys(full).map(k=>({driver:'sing_box',vnetHeader:true,offloads:{...full,[k]:false},want:false})),
     {driver:'sing_box',vnetHeader:true,offloads:{},want:false},
-    {driver:'mihomo',vnetHeader:true,offloads:full,want:false},
+    {driver:'mihomo',vnetHeader:true,offloads:full,want:true},
+    {driver:'mihomo',vnetHeader:false,offloads:full,want:false},
+    {driver:'mihomo',vnetHeader:true,offloads:{...full,tso:false},want:false},
     {driver:'sing_box',vnetHeader:true,offloads:full,legacyNetInfo:true,want:false}
   ];
   for(const c of cases){

@@ -41,9 +41,12 @@ exports.build = function (p, text) {
   }
   var tunAddress = '198.18.' + p.slot + '.1/30';
   if (p.driver === 'mihomo') {
+    // Mihomo negotiates TUN offloads only when asked (gso). The plugin keeps
+    // the segmented boundary unless the kernel then reports vnet headers and
+    // TSO/GSO on the TUN, so a core that ignores the option stays per-packet.
     config.tun = {enable: true, device: p.interface, stack: 'gvisor', mtu: p.mtu,
       'inet4-address': [tunAddress], 'auto-route': false, 'auto-redirect': false,
-      'auto-detect-interface': false, 'dns-mode': 'disabled',
+      'auto-detect-interface': false, 'dns-mode': 'disabled', gso: true, 'gso-max-size': 65536,
       'dns-hijack': config.tun && config.tun['dns-hijack'] || []};
     config['interface-name'] = p.upstream_interface;
     config['find-process-mode'] = 'off';

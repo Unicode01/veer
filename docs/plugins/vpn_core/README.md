@@ -115,7 +115,7 @@ sing-box 使用 `"driver":"sing_box"`。核心配置由 `set_core_config` 加密
 
 核心进程存在且自有 TUN 就绪后才发布可用 WAN；每秒检查状态、ifindex 和 MTU；启动后默认 30 秒仍未创建 TUN 则按同一预算重启，可用 startup_timeout_seconds 调整为 1–300 秒。失败时撤销 TC 映射和 WAN 可用状态，保留所选出口，不回退到直连。ready 只表示本机接入完成，不代表远端节点健康；核心重启会中断它持有的代理连接。WebUI 可按需读取核心日志的尾部，日志可能包含凭据，不会自动加入状态。
 
-健康轮询优先使用宿主原生接口查询，避免每秒为各出口启动多个 `ip` 子进程；旧宿主缺少 alias/TUN 元数据时仍按单接口调用 `ip` 并核验归属。受管理 sing-box 的 TUN 确认启用 vnet header、TX checksum、SG、TSO 和 GSO 后，WAN 边界保留 GSO/GRO，避免提前逐包分段；`inspect.tun_gso` 显示本代际的决定。TUN 刚创建而 offload 尚未协商完成时，间隔 1 秒最多探测 3 次，期间出口保持未就绪。探测失败或不支持时使用逐包边界，健康轮询不重复执行 `ethtool`；核心重启会重新探测。Mihomo 和外部 TUN 保持逐包边界。
+健康轮询优先使用宿主原生接口查询，避免每秒为各出口启动多个 `ip` 子进程；旧宿主缺少 alias/TUN 元数据时仍按单接口调用 `ip` 并核验归属。受管理 sing-box 和 Mihomo 的 TUN 确认启用 vnet header、TX checksum、SG、TSO 和 GSO 后，WAN 边界保留 GSO/GRO，避免提前逐包分段；`inspect.tun_gso` 显示本代际的决定。TUN 刚创建而 offload 尚未协商完成时，间隔 1 秒最多探测 3 次，期间出口保持未就绪。探测失败或不支持时使用逐包边界，健康轮询不重复执行 `ethtool`；核心重启会重新探测。sing-box 自行协商 offload；0.10.0 起生成的 Mihomo 配置写入 `gso: true` 和 `gso-max-size: 65536` 请求协商，不支持该项的核心照常使用逐包边界；已运行的 Mihomo 出口沿用应用时的配置，下次应用后生效。外部 TUN 保持逐包边界。
 
 slot 1 的出口接口为 `veervpn1`，源 IPv4 使用已发布 WAN 的地址（无冲突时自动分配 `10.78.1.1`），模式为 `prepared_l2`。IPv4 NAT 后核心无法直接区分原下游 IP，设备选择留给 Veer。DNS/fake-IP、UDP/ICMP 支持受核心和代理协议约束，不等同于任意 IP 协议的双向路由 VPN；宿主代发 DNS 不自动继承设备出口。
 
