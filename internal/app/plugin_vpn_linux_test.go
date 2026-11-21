@@ -858,6 +858,20 @@ func runVPNWireGuardTopology(t *testing.T) {
 			probe(selected, selectedSource)
 			probe(direct, "192.0.2.1")
 			t.Log("a WireGuard remote route came back after a deletion while stopped and after a boundary flap")
+			// The flap re-added the boundary's routes (IPv6 link-local ones
+			// after DAD): take the snapshot the health check is compared
+			// with again once the table has settled.
+			for settle := time.Now().Add(10 * time.Second); ; {
+				routes, links := ip("-j", "route", "show", "table", "all"), ip("-o", "link", "show")
+				time.Sleep(500 * time.Millisecond)
+				if routes == ip("-j", "route", "show", "table", "all") && links == ip("-o", "link", "show") {
+					routesBefore, interfacesBefore = routes, links
+					break
+				}
+				if time.Now().After(settle) {
+					t.Fatal("routes or links kept changing after the boundary flap")
+				}
+			}
 		}
 		probeHealth("/status", "unhealthy", "http_status")
 		configureHealth("/slow", false, 3000)
