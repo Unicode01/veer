@@ -1,5 +1,5 @@
 {
-  "version": 19,
+  "version": 20,
   "runtime": {
     "api_version": "v1",
     "runtime_version": "1.0.0",
@@ -3260,6 +3260,21 @@
     "worker.dispatch",
     "worker.list",
     "worker.stats"
+  ],
+  "worker_methods": [
+    "crypto.md5",
+    "crypto.randomBytes",
+    "net.l2.exchange",
+    "net.l2.exchangeMany",
+    "net.l2.recv",
+    "net.l2.recvMany",
+    "net.l2.send",
+    "net.link.get",
+    "net.link.getOffloads",
+    "net.link.list",
+    "net.udp.exchange",
+    "net.udp.recv",
+    "net.udp.send"
   ],
   "webui": {
     "version": 1,

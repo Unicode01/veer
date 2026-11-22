@@ -11,7 +11,7 @@ import (
 )
 
 // 19: native plugins only; the goja and module features are gone.
-const pluginSDKContractVersion = 19
+const pluginSDKContractVersion = 20
 
 type pluginSDKAPIContract struct {
 	Version           int                                 `json:"version"`
@@ -26,7 +26,10 @@ type pluginSDKAPIContract struct {
 	Operations        pluginSDKOperationContract          `json:"operations"`
 	Control           pluginSDKControlContract            `json:"control"`
 	ControlMethods    []string                            `json:"control_methods"`
-	WebUI             pluginSDKWebUIContract              `json:"webui"`
+	// WorkerMethods are the control methods a native plugin's worker serves
+	// in the plugin's own process (system calls only); the rest go to the host.
+	WorkerMethods []string               `json:"worker_methods"`
+	WebUI         pluginSDKWebUIContract `json:"webui"`
 }
 
 type pluginSDKWebUIContract struct {
@@ -166,6 +169,7 @@ func currentPluginSDKAPIContract() pluginSDKAPIContract {
 			Capabilities:     append([]pluginHostControlCapability(nil), pluginHostControlCapabilities...),
 		},
 		ControlMethods: append([]string(nil), pluginHostControlMethods...),
+		WorkerMethods:  append([]string(nil), pluginNativeWorkerMethods...),
 	}
 }
 

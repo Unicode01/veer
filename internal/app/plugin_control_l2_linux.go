@@ -19,6 +19,9 @@ func newPluginControlL2Transport() pluginControlL2Transport {
 
 type linuxPluginControlL2Transport struct{}
 
+// Raw frames are AF_PACKET calls the plugin worker makes itself.
+func (linuxPluginControlL2Transport) workerCanReplace() bool { return true }
+
 func (linuxPluginControlL2Transport) Send(req pluginControlL2SendRequest) error {
 	namespace := normalizePluginControlNamespace(req.Namespace)
 	if namespace != "host" {

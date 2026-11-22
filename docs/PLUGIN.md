@@ -142,11 +142,13 @@ let record = host.call("resources.get", json!(["profiles", "default"]))?; // 记
 
 返回值是方法结果的 JSON（无返回值的方法为 `null`）；宿主拒绝调用（权限、阶段、参数校验或方法自身失败）时返回错误，错误文本就是本文所说的“抛错”内容。所有方法都经过同一张方法表、同一套权限检查和参数校验，Rust SDK 的 `Host` 为常用方法提供了带类型的封装（`host.resources_get`、`host.kv_set` 等）。方法清单、每个方法要求的权限和可调用阶段见 `GET /api/plugin-sdk-contract` 或 [`sdk/plugin/api-contract.json`](../sdk/plugin/api-contract.json)。
 
+只是系统调用、背后没有宿主状态的方法由 worker 在插件进程内直接执行，不经过与宿主之间的连接：`net.link.get`、`net.link.list`、`net.link.getOffloads`（宿主网络命名空间内）、`net.l2.*`、`net.udp.*`、`crypto.md5` 和 `crypto.randomBytes`（清单见 contract 的 `worker_methods`）。它们的参数、返回值、错误文本、权限、阶段限制和 `net_access` 检查与宿主实现一致，等待时间同样受 handler 截止时间约束；PPPoE 这类拨号插件的发现、认证、LCP/IPCP 和 keepalive 帧因此完全在插件进程内收发。指定其他网络命名空间的查询仍由宿主执行，因为这些命名空间归宿主登记。其余方法经宿主执行：存储与跨插件协调（`resources`、`kv`、`secret`、`events`、`plugins.*` 等）、网络变更（需要宿主的所有权登记、跨插件锁和崩溃回滚日志）、eBPF map 读写（map 属于宿主加载、会随升级替换的 object）、`process.*`（托管进程与审计）、`net.socket.*`（宿主读取并把数据作为事件投递）以及 `net.http`/`net.dns`。定时器和事件同样由宿主投递，因为 handler 的串行执行和上下文由宿主组织。
+
 注册方法（`plugin.*`、`pipeline.*`、`ebpf.loadObject`、`hooks.attach`、`ui.register`、`events.subscribe` 等）只在宿主按 manifest 注册时使用，handler 中调用会被拒绝；`kv`、`resources`、`secret`、`blob`、`timer`、`worker`、`net.*` 和 `ebpf.mapPut/mapDelete/mapClear` 这类有副作用的 API 只能在 handler 中使用。
 
 ## 控制面生命周期
 
-控制面不进入 TC/XDP 热路径。插件库由 worker 进程（`veer-plugin-worker`，嵌在 veer 二进制中，启动时从内存文件执行）加载；每个插件在 worker 中有一个实例，实例在 handler 调用之间保持状态，同一插件的主控制事件串行执行。Veer 主进程是数据库、Secret、netlink、socket 和 eBPF capability 的唯一 broker：worker 不持有 Web Token、SQLite 句柄、netlink socket 或 eBPF map FD，插件只能调用 manifest 已授权且 contract 中存在的方法。
+控制面不进入 TC/XDP 热路径。插件库由 worker 进程（`veer-plugin-worker`，嵌在 veer 二进制中，启动时从内存文件执行）加载；每个插件在 worker 中有一个实例，实例在 handler 调用之间保持状态，同一插件的主控制事件串行执行。Veer 主进程持有数据库、Secret、网络对象的所有权与变更日志以及 eBPF object：worker 不持有 Web Token、SQLite 句柄或 eBPF map FD；只读网络查询和 L2/UDP 收发由 worker 用自己的 socket 完成（见上文）。插件只能调用 manifest 已授权且 contract 中存在的方法。
 
 handler 收到一条消息：handler 名（`onReconcile`、`onResourceApply`、`onAction`、`onTimer`、`onEvent`、事件订阅声明的 handler 等）和上下文 JSON（`ctx.action`、`ctx.payload`、`ctx.resource`、`ctx.records`、`ctx.timer`、`ctx.event`/`ctx.events` 等）。插件不处理的 handler 返回 `Outcome::Unhandled`；返回值用于 `runtime_query` 动作、Worker 调用、升级 snapshot 和迁移结果。事件订阅的投递是批量的：一次最多 64 个事件放在 `ctx.events`，`ctx.event` 是其中最后一个，插件应按批处理以减少每事件开销。
 
@@ -154,7 +156,7 @@ handler 收到一条消息：handler 名（`onReconcile`、`onResourceApply`、`
 
 worker 与主进程之间是有界的长度前缀帧：限制单帧大小、64 层 JSON 深度、单事件 4096 次 host call 和 20 秒执行时间；JSON 数字按 IEEE double 传递，需要精确表达超过 2^53 的计数或标识时应使用十进制字符串。插件 panic 由 SDK 在 ABI 边界捕获并作为错误返回，实例随后重建；handler 超时、worker 崩溃或协议错误会结束该实例（共享 worker 中的插件被降到独立 worker），不会自动重放失败事件，后续事件按 250 ms 到 30 s 的指数退避重建实例。`runtime.isolation` 报告承载插件实例的 worker 进程（PID、RSS）、重启次数与退避状态。
 
-原生插件运行在宿主授予的 worker 进程中，没有进程内沙箱：manifest 的权限、`net_access`、`resource_access` 等只约束经宿主的调用，库自身执行的系统调用不受它们限制。只安装来源可信、签名验证通过的插件包。
+原生插件运行在宿主授予的 worker 进程中，没有进程内沙箱：manifest 的权限、`net_access`、`resource_access` 等约束经宿主的调用和 worker 代为执行的方法；worker 的这层检查用于防止插件误操作，不构成安全边界，库自身直接执行的系统调用不受它们限制。只安装来源可信、签名验证通过的插件包。
 
 插件管理的外部进程（`process.start` 等）放在每插件 cgroup v2 中并受 `plugins_resource_limits` 约束；`plugins_min_sandbox_level=full`（默认）时无法建立这些限制会拒绝启动进程，旧内核或开发环境可降为 `partial`、`minimal` 或 `none`。
 

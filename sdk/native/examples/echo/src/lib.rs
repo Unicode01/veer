@@ -93,6 +93,16 @@ impl Echo {
                 host.call("timer.setTimeout", json!(["echo_timer", payload.u64_of("ms").max(10), {"from": "echo"}]))?;
                 Ok(Outcome::Done)
             }
+            "host_call" => {
+                // The raw result or error of any host method, so tests can
+                // compare the worker's own answers with the host's.
+                let method = payload.str_of("method");
+                let args = payload.field("args").clone();
+                Ok(Outcome::Value(match host.call(method, args) {
+                    Ok(value) => json!({"value": value}),
+                    Err(err) => json!({"error": err.message()}),
+                }))
+            }
             "call_from_thread" => {
                 let host = host.clone();
                 let result = std::thread::spawn(move || host.call("kv.get", json!(["value"])).err().map(|err| err.to_string()))

@@ -298,15 +298,29 @@ func (worker *pluginNativeWorker) load(plugin LoadedPlugin, hooks pluginNativeIn
 		conn:     conn,
 		reader:   newPluginNativeFrameReader(conn, pluginNativeMaxWorkerFrameBytes),
 	}
+	// The worker serves the plugin's system-call methods itself and checks
+	// them against the same declarations the host would.
+	var permissions []string
+	var netAccess []PluginNetAccess
+	var namespaceAccess []string
+	if plugin.Control != nil {
+		permissions = plugin.Control.Permissions
+		netAccess = plugin.Control.NetAccess
+		namespaceAccess = plugin.Control.NamespaceAccess
+	}
 	config, err := json.Marshal(map[string]any{
 		"plugin": map[string]any{
 			"id":      plugin.ID,
 			"name":    plugin.Name,
 			"version": plugin.Version,
 		},
-		"root":           plugin.rootDir,
-		"instance":       id,
-		"library_sha256": plugin.nativeLibrarySHA256,
+		"root":             plugin.rootDir,
+		"instance":         id,
+		"library_sha256":   plugin.nativeLibrarySHA256,
+		"permissions":      permissions,
+		"net_access":       netAccess,
+		"namespace_access": namespaceAccess,
+		"worker_methods":   hooks.localMethods,
 	})
 	if err != nil {
 		_ = conn.Close()
@@ -437,8 +451,14 @@ func (instance *pluginNativeInstance) exchange(kind uint32, handler string, payl
 	}
 	instance.nextID++
 	requestID := instance.nextID
+	// The worker bounds its own waits (raw frames, sockets) by the handler's
+	// deadline, which a MSG carries in its reference.
+	var deadlineMillis uint64
+	if !deadline.IsZero() {
+		deadlineMillis = uint64(deadline.UnixMilli())
+	}
 	if err := instance.write(pluginNativeFrame{
-		Type: pluginNativeFrameMsg, Instance: instance.id, ID: requestID,
+		Type: pluginNativeFrameMsg, Instance: instance.id, ID: requestID, Reference: deadlineMillis,
 		Status: int32(kind), Name: []byte(handler), Payload: payload,
 	}); err != nil {
 		instance.noteWorkerFailure("its worker failed while it was handling " + handler)

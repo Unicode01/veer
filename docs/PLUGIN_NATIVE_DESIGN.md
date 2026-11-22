@@ -5,6 +5,7 @@
 - 宿主测试仍用小型 JS 插件覆盖宿主 API（数百个用例），JS 引擎只编进测试二进制。
 - SDK 契约文件（`sdk/plugin/api-contract.json`）保留为语言无关的方法目录，契约版本升到 19。
 - `veer-plugin-test` 由 Rust SDK 的 `testing` feature（`FakeHost`、`Harness`）实现，不单独成包。
+- 只是系统调用的宿主方法（宿主命名空间内的链路读取、`net.l2.*`、`net.udp.*`、`crypto.md5/randomBytes`）由 worker 在插件进程内执行（contract 的 `worker_methods`，与宿主实现逐项对照测试）；定时器、事件、网络变更、eBPF map、托管进程、`net.socket`、`net.http/dns` 仍由宿主执行，理由见 [PLUGIN.md](PLUGIN.md) 的“宿主 API 的调用方式”。
 
 以下为原设计。
 

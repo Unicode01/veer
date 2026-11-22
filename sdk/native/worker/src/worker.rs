@@ -19,6 +19,7 @@ use veer_plugin::sys::*;
 use veer_plugin::Value;
 
 use crate::frame::{self, Frame};
+use crate::local::Local;
 
 const MAX_HOST_FRAME: usize = 72 << 20;
 const MAX_KEPT_REPLY_BUFFER: usize = 256 << 10;
@@ -264,17 +265,20 @@ impl Channel {
 }
 
 /// Per-instance state the host table points at. `channel`, `current_request`,
-/// `next_call`, `deferred` and `unloading` are only touched on the dispatch
-/// thread; log and post, which any thread may call, only use `control`.
+/// `current_kind`, `next_call`, `deferred`, `unloading` and `local` are only
+/// touched on the dispatch thread; log and post, which any thread may call,
+/// only use `control`.
 struct HostCtx {
     instance: u32,
     control: Arc<Control>,
     channel: std::cell::RefCell<Channel>,
     dispatch_thread: ThreadId,
     current_request: std::cell::Cell<u64>,
+    current_kind: std::cell::Cell<u32>,
     next_call: std::cell::Cell<u64>,
     deferred: std::cell::RefCell<VecDeque<Frame>>,
     unloading: std::cell::Cell<bool>,
+    local: Local,
 }
 
 unsafe impl Sync for HostCtx {}
@@ -341,6 +345,13 @@ unsafe extern "C" fn host_call(ctx: *mut c_void, method: veer_slice, arguments: 
     if ctx.unloading.get() {
         fill(reply, b"plugin instance is unloading");
         return VEER_ESHUTDOWN;
+    }
+    // Methods that are only system calls run here, without the host.
+    if let Ok(name) = std::str::from_utf8(method.as_bytes()) {
+        if let Some((status, bytes)) = ctx.local.call(ctx.current_kind.get(), name, arguments.as_bytes()) {
+            let filled = fill(reply, &bytes);
+            return if filled != VEER_OK { filled } else { status };
+        }
     }
     let call_id = ctx.next_call.get() + 1;
     ctx.next_call.set(call_id);
@@ -508,9 +519,11 @@ fn run_instance(load: Frame, socket: UnixStream, control: Arc<Control>, librarie
             channel: std::cell::RefCell::new(channel),
             dispatch_thread: thread::current().id(),
             current_request: std::cell::Cell::new(0),
+            current_kind: std::cell::Cell::new(0),
             next_call: std::cell::Cell::new(0),
             deferred: std::cell::RefCell::new(VecDeque::new()),
             unloading: std::cell::Cell::new(false),
+            local: Local::new(&config),
         },
     }));
     unsafe {
@@ -560,8 +573,13 @@ fn run_instance(load: Frame, socket: UnixStream, control: Arc<Control>, librarie
                 };
                 reply.len = 0;
                 ctx.current_request.set(incoming.id);
+                ctx.current_kind.set(message.kind);
+                // A MSG's ref carries the handler's deadline (Unix ms).
+                ctx.local.set_deadline_ms(incoming.reference);
                 let status = unsafe { handle(state, &message, &mut reply) };
                 ctx.current_request.set(0);
+                ctx.current_kind.set(0);
+                ctx.local.set_deadline_ms(0);
                 let bytes: &[u8] = if reply.data.is_null() || reply.len == 0 {
                     &[]
                 } else {

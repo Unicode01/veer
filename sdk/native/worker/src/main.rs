@@ -6,10 +6,12 @@
 //! the host never sends a second message to an instance before the first one
 //! returns.
 
-// frame builds everywhere so its tests run on any host; only the Linux
-// worker uses it.
+// frame and local build everywhere so their tests run on any host; only the
+// Linux worker uses them.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod frame;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod local;
 #[cfg(target_os = "linux")]
 mod worker;
 

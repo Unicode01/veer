@@ -3,10 +3,13 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -47,7 +50,8 @@ const nativeEchoActions = `[
   {"id": "sleep", "runtime_update": "runtime_apply"},
   {"id": "post", "runtime_update": "runtime_apply"},
   {"id": "timer", "runtime_update": "runtime_apply"},
-  {"id": "dispatch", "runtime_update": "runtime_apply"}
+  {"id": "dispatch", "runtime_update": "runtime_apply"},
+  {"id": "host_call", "runtime_update": "runtime_query"}
 ]`
 
 func writeNativeEchoPlugin(t *testing.T, pluginsDir, library, worker string) {
@@ -74,7 +78,11 @@ func writeNativeEchoPlugin(t *testing.T, pluginsDir, library, worker string) {
   "control": {
     "library": {"` + pluginNativeHostTriple() + `": {"path": "lib/libnative_echo.so"}},
     "worker": "` + worker + `",
-    "permissions": ["event", "kv", "plugin.register", "resource", "timer", "worker"],
+    "permissions": ["crypto", "event", "kv", "net.admin", "net.l2", "net.udp", "plugin.register", "resource", "timer", "worker"],
+    "net_access": [
+      {"interfaces": ["*"], "operations": ["link.read", "l2"]},
+      {"interfaces": ["lo"], "operations": ["udp"], "remote_cidrs": ["127.0.0.0/8"]}
+    ],
     "register": {
       "actions": ` + nativeEchoActions + `,
       "resources": [{"id": "items", "methods": ["list", "get"]}],
@@ -134,8 +142,124 @@ func waitForNativeEcho(t *testing.T, what string, check func() bool) {
 
 func TestNativePluginRegistersSurfaceFromManifest(t *testing.T) {
 	_, plugin, _ := newNativeEchoHarness(t, "shared")
-	if len(plugin.Actions) != 12 {
-		t.Fatalf("registered actions = %d, want 12: %+v (runtime %s: %s)", len(plugin.Actions), plugin.Actions, plugin.Runtime.Reason, plugin.Runtime.Error)
+	if len(plugin.Actions) != 13 {
+		t.Fatalf("registered actions = %d, want 13: %+v (runtime %s: %s)", len(plugin.Actions), plugin.Actions, plugin.Runtime.Reason, plugin.Runtime.Error)
+	}
+}
+
+// TestNativePluginLocalCallsMatchHost checks that the methods the worker
+// serves itself answer exactly as the host's own implementation does:
+// results, errors and their texts.
+func TestNativePluginLocalCallsMatchHost(t *testing.T) {
+	rt, plugin, _ := newNativeEchoHarness(t, "shared")
+	rt.mu.Lock()
+	vm := rt.controlVMs[plugin.ID]
+	rt.mu.Unlock()
+	if vm == nil {
+		t.Fatal("native_echo has no control VM")
+	}
+	host, err := vm.newControlHost(plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.registrationPhase = false
+	// Counters move between two reads of the same link.
+	scrub := func(value any) any {
+		var walk func(any) any
+		walk = func(value any) any {
+			switch typed := value.(type) {
+			case map[string]any:
+				delete(typed, "statistics")
+				for key, item := range typed {
+					typed[key] = walk(item)
+				}
+			case []any:
+				for i, item := range typed {
+					typed[i] = walk(item)
+				}
+			}
+			return value
+		}
+		return walk(value)
+	}
+	normalize := func(raw []byte) any {
+		var value any
+		if err := json.Unmarshal(raw, &value); err != nil {
+			t.Fatalf("decode %s: %v", raw, err)
+		}
+		return scrub(value)
+	}
+	for _, call := range []struct {
+		method string
+		args   []any
+	}{
+		{"net.link.get", []any{"lo"}},
+		{"net.link.get", []any{"lo", "host"}},
+		{"net.link.get", []any{"veer-nosuch0"}},
+		{"net.link.get", []any{}},
+		{"net.link.get", []any{"bad/name"}},
+		{"net.link.list", []any{}},
+		{"net.link.getOffloads", []any{"lo"}},
+		{"net.link.getOffloads", []any{"veer-nosuch0"}},
+		{"crypto.md5", []any{"abc", map[string]any{"hex": "01:02"}, []any{3, 4}}},
+		{"crypto.md5", []any{}},
+		{"crypto.randomBytes", []any{0}},
+		{"net.l2.send", []any{map[string]any{}}},
+		{"net.l2.send", []any{"text"}},
+		{"net.l2.send", []any{map[string]any{"interface": "veer-nosuch0", "ethertype": "0x88b5", "dst_mac": "ff:ff:ff:ff:ff:ff"}}},
+		{"net.l2.send", []any{map[string]any{"interface": "lo", "ethertype": "0x88b5", "dst_mac": "ff:ff:ff:ff:ff:ff"}}},
+		{"net.l2.send", []any{map[string]any{"interface": "lo", "ethertype": 0, "dst_mac": "ff:ff:ff:ff:ff:ff"}}},
+		{"net.l2.send", []any{map[string]any{"interface": "lo", "ethertype": "0x88b5", "dst_mac": "zz"}}},
+		{"net.l2.send", []any{map[string]any{"interface": "lo", "ethertype": "0x88b5", "dst_mac": "ff:ff:ff:ff:ff:ff", "payload": "abc"}}},
+		{"net.l2.recv", []any{map[string]any{"interface": "lo", "ethertype": "0x88b5", "timeout_ms": 20}}},
+		{"net.l2.recv", []any{map[string]any{"interface": "lo", "ethertype": "0x88b5", "timeout_ms": 0}}},
+		{"net.l2.recv", []any{map[string]any{"interface": "lo", "ethertype": "0x8863", "pppoe_code": 300}}},
+		{"net.l2.recvMany", []any{map[string]any{"interface": "lo", "ethertype": "0x88b5", "timeout_ms": 20}}},
+		{"net.l2.recvMany", []any{map[string]any{"interface": "lo", "ethertype": "0x88b5", "max_frames": 65}}},
+		{"net.l2.exchange", []any{map[string]any{"interface": "lo", "ethertype": "0x88b5", "dst_mac": "ff:ff:ff:ff:ff:ff", "src_mac": "02:00:00:00:00:01", "recv_ethertype": "x"}}},
+		{"net.l2.exchangeMany", []any{map[string]any{"interface": "veer-nosuch0", "ethertype": "0x88b5", "dst_mac": "ff:ff:ff:ff:ff:ff"}}},
+		{"net.udp.send", []any{map[string]any{"interface": "lo", "remote_port": 9}}},
+		{"net.udp.send", []any{map[string]any{"interface": "lo", "remote_ip": "10.0.0.1", "remote_port": 9}}},
+		{"net.udp.send", []any{map[string]any{"interface": "eth9", "remote_ip": "127.0.0.1", "remote_port": 9}}},
+		{"net.udp.send", []any{map[string]any{"interface": "lo", "remote_ip": "127.0.0.1", "remote_port": 70000}}},
+		{"net.udp.send", []any{map[string]any{"interface": "lo", "remote_ip": "127.0.0.1", "remote_port": 9, "timeout_ms": 0}}},
+		{"net.udp.recv", []any{map[string]any{"interface": "lo"}}},
+		{"net.udp.recv", []any{map[string]any{"interface": "lo", "local_port": 40391, "timeout_ms": 20}}},
+		{"net.udp.recv", []any{map[string]any{"interface": "lo", "local_port": 40391, "max_bytes": 0}}},
+		{"net.udp.exchange", []any{map[string]any{"interface": "lo", "remote_ip": "127.0.0.1", "remote_port": 9, "timeout_ms": 20}}},
+	} {
+		name := call.method + fmt.Sprint(call.args)
+		payload, _ := json.Marshal(map[string]any{"method": call.method, "args": call.args})
+		worker, err := rt.QueryPluginAction(plugin, nativeEchoAction(t, plugin, "host_call"), payload)
+		if err != nil {
+			t.Fatalf("%s through the worker: %v", name, err)
+		}
+		workerJSON, _ := json.Marshal(worker)
+		value, _, hostErr := host.callPluginHostMethod(call.method, call.args)
+		want := map[string]any{"value": value}
+		if hostErr != nil {
+			want = map[string]any{"error": boundedPluginHostError(hostErr.Error())}
+		}
+		wantJSON, _ := json.Marshal(want)
+		got, expected := normalize(workerJSON), normalize(wantJSON)
+		gotText, _ := json.Marshal(got)
+		expectedText, _ := json.Marshal(expected)
+		if string(gotText) != string(expectedText) {
+			t.Errorf("%s:\n worker %s\n host   %s", name, gotText, expectedText)
+		}
+	}
+	// The worker answered every one of them itself.
+	for _, method := range []string{"net.link.get", "net.link.list", "net.link.getOffloads", "crypto.md5", "crypto.randomBytes",
+		"net.l2.send", "net.l2.recv", "net.l2.recvMany", "net.l2.exchange", "net.l2.exchangeMany", "net.udp.send", "net.udp.recv", "net.udp.exchange"} {
+		if count := rt.nativeHostCallCount(plugin.ID, method); count != 0 {
+			t.Errorf("%s reached the host %d times; the worker should serve it", method, count)
+		}
+	}
+	if _, err := rt.QueryPluginAction(plugin, nativeEchoAction(t, plugin, "kv"), json.RawMessage(`{"counted":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if rt.nativeHostCallCount(plugin.ID, "kv.set") == 0 {
+		t.Fatal("kv.set is not counted: the host call counter is not wired")
 	}
 }
 
@@ -414,4 +538,133 @@ func TestNativePluginEventLatency(t *testing.T) {
 		t.Fatalf("plugin counted %d events, want at least %d", got, single+rounds*burst)
 	}
 	t.Logf("native event delivery: one at a time %s (CPU %s); in bursts of %d %s (CPU %s) per event", perEvent, cpuSingle, burst, perBurstEvent, cpuBurst)
+}
+
+// TestNativePluginLocalL2FramesMatchHost moves frames over a veth pair: the
+// worker's net.l2.recv must report a frame exactly as the host's does, and
+// the host must receive what the worker's net.l2.send puts on the wire.
+func TestNativePluginLocalL2FramesMatchHost(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("root is required for a veth pair and raw frames")
+	}
+	rt, plugin, _ := newNativeEchoHarness(t, "shared")
+	rt.mu.Lock()
+	vm := rt.controlVMs[plugin.ID]
+	rt.mu.Unlock()
+	host, err := vm.newControlHost(plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.registrationPhase = false
+	a, b := "veerl2a"+strconv.Itoa(os.Getpid()%1000), "veerl2b"+strconv.Itoa(os.Getpid()%1000)
+	_ = exec.Command("ip", "link", "del", a).Run()
+	if out, err := exec.Command("ip", "link", "add", a, "type", "veth", "peer", "name", b).CombinedOutput(); err != nil {
+		t.Fatalf("add veth pair: %v: %s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("ip", "link", "del", a).Run() })
+	for _, name := range []string{a, b} {
+		if out, err := exec.Command("ip", "link", "set", name, "up").CombinedOutput(); err != nil {
+			t.Fatalf("set %s up: %v: %s", name, err, out)
+		}
+	}
+	transport := newPluginControlL2Transport()
+	sendLater := func(payload byte) {
+		go func() {
+			time.Sleep(150 * time.Millisecond)
+			_ = transport.Send(pluginControlL2SendRequest{Interface: a, EtherType: 0x88b5, DstMAC: [6]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, Payload: []byte{payload, 2, 3}})
+		}()
+	}
+	recvRequest := map[string]any{"interface": b, "ethertype": "0x88b5", "timeout_ms": 2000}
+
+	sendLater(1)
+	payload, _ := json.Marshal(map[string]any{"method": "net.l2.recv", "args": []any{recvRequest}})
+	worker, err := rt.QueryPluginAction(plugin, nativeEchoAction(t, plugin, "host_call"), payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sendLater(1)
+	value, _, err := host.callPluginHostMethod("net.l2.recv", []any{recvRequest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerJSON, _ := json.Marshal(worker)
+	hostJSON, _ := json.Marshal(map[string]any{"value": value})
+	if string(workerJSON) != string(hostJSON) || !strings.Contains(string(workerJSON), `"payload_hex":"010203"`) {
+		t.Fatalf("net.l2.recv:\n worker %s\n host   %s", workerJSON, hostJSON)
+	}
+
+	received := make(chan pluginControlL2Frame, 1)
+	go func() {
+		frame, err := transport.Recv(pluginControlL2RecvRequest{Interface: a, EtherType: 0x88b5, Timeout: 2 * time.Second, MaxBytes: 2048})
+		if err == nil {
+			received <- frame
+		}
+		close(received)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	payload, _ = json.Marshal(map[string]any{"method": "net.l2.send", "args": []any{map[string]any{"interface": b, "ethertype": "0x88b5", "dst_mac": "ff:ff:ff:ff:ff:ff", "payload": "0a0b"}}})
+	if _, err := rt.QueryPluginAction(plugin, nativeEchoAction(t, plugin, "host_call"), payload); err != nil {
+		t.Fatal(err)
+	}
+	frame, ok := <-received
+	if !ok || !bytes.Equal(frame.Payload, []byte{0x0a, 0x0b}) {
+		t.Fatalf("host did not receive the worker's frame: %+v ok=%t", frame, ok)
+	}
+}
+
+// TestNativePluginLocalUDPMatchesHost receives one datagram on the loopback
+// through the worker and one through the host: both must read the same.
+func TestNativePluginLocalUDPMatchesHost(t *testing.T) {
+	rt, plugin, _ := newNativeEchoHarness(t, "shared")
+	rt.mu.Lock()
+	vm := rt.controlVMs[plugin.ID]
+	rt.mu.Unlock()
+	host, err := vm.newControlHost(plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.registrationPhase = false
+	sender, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40392})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sender.Close()
+	sendLater := func() {
+		go func() {
+			time.Sleep(150 * time.Millisecond)
+			_, _ = sender.WriteToUDP([]byte{1, 2, 3}, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40393})
+		}()
+	}
+	request := map[string]any{"interface": "lo", "local_ip": "127.0.0.1", "local_port": 40393, "timeout_ms": 2000}
+	sendLater()
+	payload, _ := json.Marshal(map[string]any{"method": "net.udp.recv", "args": []any{request}})
+	worker, err := rt.QueryPluginAction(plugin, nativeEchoAction(t, plugin, "host_call"), payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sendLater()
+	value, _, err := host.callPluginHostMethod("net.udp.recv", []any{request})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerJSON, _ := json.Marshal(worker)
+	hostJSON, _ := json.Marshal(map[string]any{"value": value})
+	if string(workerJSON) != string(hostJSON) || !strings.Contains(string(workerJSON), `"remote_addr":"127.0.0.1:40392"`) {
+		t.Fatalf("net.udp.recv:\n worker %s\n host   %s", workerJSON, hostJSON)
+	}
+	// A send reports the same shape, apart from the kernel's source port.
+	payload, _ = json.Marshal(map[string]any{"method": "net.udp.send", "args": []any{map[string]any{"interface": "lo", "remote_ip": "127.0.0.1", "remote_port": 40392, "payload": "0a"}}})
+	worker, err = rt.QueryPluginAction(plugin, nativeEchoAction(t, plugin, "host_call"), payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerJSON, _ = json.Marshal(worker)
+	if !strings.Contains(string(workerJSON), `"bytes":1`) || !strings.Contains(string(workerJSON), `"remote_addr":"127.0.0.1:40392"`) || !strings.Contains(string(workerJSON), `"local_ip":"0.0.0.0"`) {
+		t.Fatalf("net.udp.send through the worker = %s", workerJSON)
+	}
+	buffer := make([]byte, 16)
+	_ = sender.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if n, _, err := sender.ReadFromUDP(buffer); err != nil || n != 1 || buffer[0] != 0x0a {
+		t.Fatalf("the worker's datagram did not arrive: n=%d err=%v", n, err)
+	}
 }

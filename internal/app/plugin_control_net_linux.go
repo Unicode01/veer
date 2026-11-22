@@ -34,6 +34,10 @@ func newPluginControlNetAdmin() pluginControlNetAdmin {
 	return &linuxPluginControlNetAdmin{provider: newLinuxPluginNetworkProvider()}
 }
 
+// Its link reads are plain netlink and ethtool queries the plugin worker
+// makes itself.
+func (*linuxPluginControlNetAdmin) workerCanReplace() bool { return true }
+
 type linuxPluginControlNetAdmin struct {
 	provider *linuxPluginNetworkProvider
 }

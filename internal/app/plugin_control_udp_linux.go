@@ -18,6 +18,9 @@ func newPluginControlUDPTransport() pluginControlUDPTransport {
 
 type linuxPluginControlUDPTransport struct{}
 
+// Datagrams are socket calls the plugin worker makes itself.
+func (linuxPluginControlUDPTransport) workerCanReplace() bool { return true }
+
 func (linuxPluginControlUDPTransport) Send(req pluginControlUDPSendRequest) (pluginControlUDPResult, error) {
 	namespace := normalizePluginControlNamespace(req.Namespace)
 	if namespace != "host" {

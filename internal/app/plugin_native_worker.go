@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,6 +18,26 @@ const (
 )
 
 var errPluginNativeUnsupported = errors.New("native plugins are not supported on this platform")
+
+// pluginNativeWorkerMethods are the host methods veer-plugin-worker answers
+// in the plugin's process, with the same checks and results as the host:
+// they are system calls with no host state behind them. The list must match
+// the method table in sdk/native/worker/src/local/mod.rs.
+var pluginNativeWorkerMethods = []string{
+	"crypto.md5",
+	"crypto.randomBytes",
+	"net.l2.exchange",
+	"net.l2.exchangeMany",
+	"net.l2.recv",
+	"net.l2.recvMany",
+	"net.l2.send",
+	"net.link.get",
+	"net.link.getOffloads",
+	"net.link.list",
+	"net.udp.exchange",
+	"net.udp.recv",
+	"net.udp.send",
+}
 
 // pluginNativeWorkerPool runs the worker processes that load native plugins.
 // Plugins that declare worker "shared" share one process; "dedicated"
@@ -185,4 +206,47 @@ type pluginNativeInstanceHooks struct {
 	post func(payload []byte)
 	// log receives a log line from the plugin.
 	log func(level int32, message string)
+	// localMethods are the methods the worker may serve itself; the rest
+	// come to the host.
+	localMethods []string
+}
+
+// pluginWorkerReplaceable marks a host implementation that only makes the
+// system calls the worker can make itself: while the host uses it, the worker
+// may serve its methods without the host. A test double or any other
+// implementation keeps them on the host.
+type pluginWorkerReplaceable interface {
+	workerCanReplace() bool
+}
+
+func pluginWorkerCanReplace(implementation any) bool {
+	replaceable, ok := implementation.(pluginWorkerReplaceable)
+	return ok && replaceable.workerCanReplace()
+}
+
+// nativeWorkerLocalMethods lists the worker methods this host lets the worker
+// serve: those whose host implementation is the plain system one.
+func (rt *pluginControlManager) nativeWorkerLocalMethods() []string {
+	netReads := pluginWorkerCanReplace(rt.netAdmin)
+	l2 := pluginWorkerCanReplace(rt.l2Transport)
+	udp := pluginWorkerCanReplace(rt.udpTransport)
+	out := make([]string, 0, len(pluginNativeWorkerMethods))
+	for _, method := range pluginNativeWorkerMethods {
+		switch {
+		case strings.HasPrefix(method, "net.link."):
+			if !netReads {
+				continue
+			}
+		case strings.HasPrefix(method, "net.l2."):
+			if !l2 {
+				continue
+			}
+		case strings.HasPrefix(method, "net.udp."):
+			if !udp {
+				continue
+			}
+		}
+		out = append(out, method)
+	}
+	return out
 }

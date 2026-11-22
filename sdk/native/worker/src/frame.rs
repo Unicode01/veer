@@ -6,7 +6,8 @@
 //! u8  type      u8 flags (unused, 0)   u16 reserved
 //! u32 instance
 //! u64 id        request or call id chosen by the sender
-//! u64 ref       the id this frame answers or belongs to
+//! u64 ref       the id this frame answers or belongs to; on MSG, the
+//!               handler's deadline (Unix ms, 0: none)
 //! i32 status    status code, message kind or log level
 //! u32 name_len
 //! name bytes, then payload bytes (the rest of the frame)

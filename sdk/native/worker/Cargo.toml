@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Loads Veer native plugins and connects them to the Veer host"
 
-# The worker only does anything on Linux; elsewhere it builds for its tests.
-[target.'cfg(target_os = "linux")'.dependencies]
+[dependencies]
 veer-plugin = { path = "../rust/veer-plugin" }
+md-5 = "0.10"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

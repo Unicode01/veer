@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -147,8 +148,9 @@ func (vm *pluginControlVM) nativeInstanceFor(plugin LoadedPlugin, deadline time.
 	pluginID := plugin.ID
 	rt := vm.rt
 	instance, err := rt.nativePool.load(plugin, pluginNativeInstanceHooks{
-		post: func(payload []byte) { rt.dispatchNativeWake(pluginID, payload) },
-		log:  func(level int32, message string) { rt.appendNativePluginLog(pluginID, level, message) },
+		post:         func(payload []byte) { rt.dispatchNativeWake(pluginID, payload) },
+		log:          func(level int32, message string) { rt.appendNativePluginLog(pluginID, level, message) },
+		localMethods: rt.nativeWorkerLocalMethods(),
 	}, deadline)
 	if err != nil {
 		vm.notePluginHostFailure(err)
@@ -175,6 +177,9 @@ func (vm *pluginControlVM) dropNativeInstance() {
 // method dispatch, permission checks and validation as every other plugin.
 func (h *pluginControlHost) nativeCallHandler() pluginNativeCallHandler {
 	return func(method string, arguments []byte) (int32, []byte) {
+		if h.runtime != nil {
+			h.runtime.countNativeHostCall(h.plugin.ID, method)
+		}
 		if !pluginHostMethodAllowed(method) {
 			return pluginNativeStatusInvalid, []byte(fmt.Sprintf("unknown host method %q", method))
 		}
@@ -201,6 +206,25 @@ func (h *pluginControlHost) nativeCallHandler() pluginNativeCallHandler {
 		}
 		return pluginNativeStatusOK, data
 	}
+}
+
+func (rt *pluginControlManager) countNativeHostCall(pluginID, method string) {
+	key := pluginID + ":" + method
+	counter, ok := rt.nativeHostCalls.Load(key)
+	if !ok {
+		counter, _ = rt.nativeHostCalls.LoadOrStore(key, new(atomic.Uint64))
+	}
+	counter.(*atomic.Uint64).Add(1)
+}
+
+// nativeHostCallCount reports how often a native plugin called method on the
+// host (not counting the calls its worker served).
+func (rt *pluginControlManager) nativeHostCallCount(pluginID, method string) uint64 {
+	counter, ok := rt.nativeHostCalls.Load(pluginID + ":" + method)
+	if !ok {
+		return 0
+	}
+	return counter.(*atomic.Uint64).Load()
 }
 
 func (rt *pluginControlManager) dispatchNativeWake(pluginID string, payload []byte) {

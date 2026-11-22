@@ -154,8 +154,11 @@ type pluginControlRingReconciler interface {
 }
 
 type pluginControlManager struct {
-	mu                   sync.Mutex
-	reconcileMu          sync.Mutex
+	mu          sync.Mutex
+	reconcileMu sync.Mutex
+	// nativeHostCalls counts the host calls native plugins make, by
+	// "plugin:method": the methods a worker serves itself never appear.
+	nativeHostCalls      sync.Map
 	db                   *sql.DB
 	cfg                  *Config
 	executionTimeout     time.Duration
