@@ -1705,21 +1705,21 @@ install_zig() {
 # Rust already on the host is left alone: a toolchain that is too old or
 # lacks a target is shadowed by a temporary one.
 install_rust_toolchain() {
-    local missing=" ${FORWARD_RUST_MISSING} "
+    local wanted=" ${FORWARD_RUST_MISSING} "
     local left=""
 
     (( FORWARD_RUST_INSTALL == 1 )) || return 0
     mkdir -p "${FORWARD_RUST_ROOT}"
-    if [[ "${missing}" == *" rust "* || "${missing}" == *" target:"* ]]; then
+    if [[ "${wanted}" == *" rust "* || "${wanted}" == *" target:"* ]]; then
         install_rustup_toolchain
     fi
-    if [[ "${missing}" == *" cargo-zigbuild "* ]]; then
+    if [[ "${wanted}" == *" cargo-zigbuild "* ]]; then
         info "编译安装 cargo-zigbuild ${FORWARD_CARGO_ZIGBUILD_VERSION}..."
         cargo install --locked --root "${FORWARD_RUST_ROOT}/tools" --version "${FORWARD_CARGO_ZIGBUILD_VERSION}" cargo-zigbuild ||
             fail "安装 cargo-zigbuild 失败"
         export PATH="${FORWARD_RUST_ROOT}/tools/bin:${PATH}"
     fi
-    if [[ "${missing}" == *" zig "* ]]; then
+    if [[ "${wanted}" == *" zig "* ]]; then
         install_zig
     fi
     left="$(missing_rust_tools)"
