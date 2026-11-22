@@ -681,7 +681,18 @@ impl<'a> Ctx<'a> {
         }
         let ac_mac = js::string(&pads_frame["src_mac"]);
         let local_mac = js::string(&pads_frame["dst_mac"]);
-        let frames = self.run_session_probe(profile, &ac_mac, pads.session_id, &local_mac)?;
+        let frames = match self.run_session_probe(profile, &ac_mac, pads.session_id, &local_mac) {
+            Ok(frames) => frames,
+            Err(err) => {
+                // PADS allocated the session: release it, or the AC keeps it
+                // until its LCP gives up (about 30 s with pppd defaults) and
+                // a single-session AC refuses the next dial meanwhile.
+                if let Err(padt_err) = self.send_padt(profile, &ac_mac, pads.session_id, 0.0) {
+                    self.info(&format!("pppoe PADT after a failed session probe skipped: {}", error_message(&padt_err)));
+                }
+                return Err(err);
+            }
+        };
         let mut tunnel = Value::Null;
         if flag(profile, "install_tunnel") {
             let installed = (|| -> Result<Value> {

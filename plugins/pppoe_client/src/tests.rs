@@ -97,6 +97,8 @@ struct Opts {
     lost_peer_ipcp_request: bool,
     terminate_on_padt: bool,
     pads_timeout: bool,
+    // Fails PPP session frame exchanges (after PADS) with this error.
+    session_exchange_error: &'static str,
     resource_set_error: &'static str,
     plugin_resource_error: &'static str,
     link_get_error: String,
@@ -263,6 +265,13 @@ impl World {
         }
         self.plugin_records.insert(format!("wan_core/status/{key}"), json!({"data": status, "enabled": false}));
         Ok(status)
+    }
+
+    fn session_exchange_error(&self, req: &Value) -> Result<(), String> {
+        if !self.o.session_exchange_error.is_empty() && js::text(&req["ethertype"]) == SESS {
+            return Err(self.o.session_exchange_error.to_string());
+        }
+        Ok(())
     }
 
     fn send(&mut self, req: &Value) {
@@ -600,10 +609,12 @@ const HOST: &[(&str, HostFn)] = &[
     }),
     ("net.l2.exchange", |w, a| {
         w.l2_exchanges.push(arg(a, 0));
+        w.session_exchange_error(&arg(a, 0))?;
         Ok(first_or_null(w.exchange(&arg(a, 0))))
     }),
     ("net.l2.exchangeMany", |w, a| {
         w.l2_exchanges.push(arg(a, 0));
+        w.session_exchange_error(&arg(a, 0))?;
         Ok(Value::Array(w.exchange(&arg(a, 0))))
     }),
     ("net.l2.recv", |w, a| {
@@ -1869,6 +1880,22 @@ fn traffic_probe_timeout_fails_closed() {
     let session = t.data("sessions", "last");
     assert_eq!(session["phase"], "timeout");
     assert_eq!(session["message"], "PADS timeout");
+    assert!(!t.has("tunnel_configs", "active"), "failed traffic_probe must not persist tunnel config");
+}
+
+#[test]
+fn traffic_probe_error_after_pads_releases_the_session() {
+    // PADS allocated a session at the AC; an error in the session probe must
+    // send PADT, or a single-session AC refuses the next dial until its LCP
+    // gives up.
+    let mut t = T::new(Opts { session_exchange_error: "network is down", ..auth("pap") });
+    let err = t.fails("traffic_probe", json!({
+        "interface": "eth0", "username": "user", "password": "pass", "auth": "pap", "timeout_ms": 50, "control_ack_timeout_ms": 10,
+        "control_idle_timeout_ms": 1, "max_frames": 4, "negotiate_ipv4": true, "negotiate_ipv6": false, "send_padt": false,
+        "post_session_control_ms": 0, "local_interface": "veerlocal0", "wan_core_sync": false,
+    }));
+    assert!(err.contains("network is down"), "{err}");
+    assert!(t.padt_sent(), "a session probe error after PADS must send PADT");
     assert!(!t.has("tunnel_configs", "active"), "failed traffic_probe must not persist tunnel config");
 }
 

@@ -239,12 +239,17 @@ disable_offloads() {
 }
 
 start_pppoe_server() {
+	# A probe that fails after PADS without PADT (it missed PADS on a slow
+	# runner) leaves the single session open until the server's LCP gives up:
+	# about 30 s with pppd's default timers, about 6 s with these.
 	cat >"$work_dir/pppoe-server-options" <<'EOF'
 noauth
 mtu 1492
 mru 1492
 lcp-echo-interval 2
 lcp-echo-failure 30
+lcp-restart 1
+lcp-max-configure 5
 nodefaultroute
 noipdefault
 debug
@@ -473,14 +478,18 @@ wait_for_session_disconnected() {
 	exit 1
 }
 
+# Waits for the server to drop the session: at once after PADT, or when its
+# LCP gives up (start_pppoe_server) if the client could not send one.
 wait_for_server_session_release() {
-	for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+	release_tries=0
+	while [ "$release_tries" -lt 60 ]; do
 		if ! ip netns exec "$server_ns" ip -o link show 2>/dev/null | grep -Eq 'ppp[0-9]+:'; then
 			return
 		fi
+		release_tries=$((release_tries + 1))
 		sleep 0.25
 	done
-	echo "PPPoE server did not release the previous session after PADT" >&2
+	echo "PPPoE server did not release the previous session within 15 s" >&2
 	ip netns exec "$server_ns" ip -d link show >&2 || true
 	dump_dataplane_state
 	exit 1
@@ -496,6 +505,8 @@ post_traffic_probe() {
 			cp "$work_dir/$probe_name-$attempt.json" "$work_dir/$probe_name.json"
 			return
 		fi
+		printf 'traffic probe attempt %s failed: %s\n' "$attempt" \
+			"$(grep -o '"last_error":"[^"]*"' "$work_dir/$probe_name-$attempt.json" | head -n 1)" >&2
 		wait_for_server_session_release
 		sleep 1
 	done
