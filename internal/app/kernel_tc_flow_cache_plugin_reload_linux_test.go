@@ -57,7 +57,7 @@ func testEgressNATTCFlowCacheYieldsToHookAddedMidStream(t *testing.T, global, le
 	pluginDir := copyPacketObserverPluginForPipelineTest(t, pluginsRoot)
 	// The bridge serves no rule, so a hook there leaves the rule's
 	// interfaces to the cache while keeping the plugin pipeline up.
-	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.BridgeIF)
+	setPipelineAttachInterfacesForTest(t, pluginDir, topology.BridgeIF)
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
 	enabled := true
 	rt := newTCKernelRuleRuntime(pluginsEnabledTestConfig(&Config{
@@ -147,9 +147,9 @@ func testEgressNATTCFlowCacheYieldsToHookAddedMidStream(t *testing.T, global, le
 	waitForChildRecords("before the hook", stream)
 
 	if global {
-		setControlScriptInterfacesForPipelineTest(t, pluginDir)
+		setPipelineAttachInterfacesForTest(t, pluginDir)
 	} else {
-		setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.ChildHostIF)
+		setPipelineAttachInterfacesForTest(t, pluginDir, topology.ChildHostIF)
 	}
 	reconcile("adding the hook")
 	expectNoCacheProgram("after adding the hook")
@@ -189,7 +189,7 @@ func testEgressNATTCFlowCacheYieldsToHookAddedMidStream(t *testing.T, global, le
 		t.Fatalf("hook saw %d IPv4 packets while %s received %d forwarded IPv4 packets, want the hook to see all of them", hookSeen, topology.ChildHostIF, received)
 	}
 
-	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.BridgeIF)
+	setPipelineAttachInterfacesForTest(t, pluginDir, topology.BridgeIF)
 	reconcile("removing the hook")
 	expectNoCacheProgram("after removing the hook")
 	waitForChildRecords("after the hook was removed", stream)

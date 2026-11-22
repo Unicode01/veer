@@ -1881,7 +1881,7 @@ func TestKernelPluginPipelineRuntimeChainsPreForwardPlugin(t *testing.T) {
 		t.Fatalf("initial plugin attachment metrics = %+v, want observed IPv4 packets", metricAttachment.Metrics)
 	}
 
-	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.ClientHostIF)
+	setPipelineAttachInterfacesForTest(t, pluginDir, topology.ClientHostIF)
 	results, err = rt.Reconcile([]Rule{rule})
 	if err != nil {
 		t.Fatalf("Reconcile(scoped hot update) error = %v", err)
@@ -2437,7 +2437,7 @@ func TestKernelPluginPipelineRuntimeAttachesExplicitInterfaceWithoutRules(t *tes
 	topology := setupDataplanePerfTopology(t)
 	pluginsRoot := t.TempDir()
 	pluginDir := copyPacketObserverPluginForPipelineTest(t, pluginsRoot)
-	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.ClientHostIF)
+	setPipelineAttachInterfacesForTest(t, pluginDir, topology.ClientHostIF)
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
 
 	enabled := true
@@ -2558,8 +2558,8 @@ func TestKernelPluginPipelineRuntimeAttachesExplicitEgressInterfaceWithoutRules(
 	topology := setupDataplanePerfTopology(t)
 	pluginsRoot := t.TempDir()
 	pluginDir := copyPacketObserverPluginForPipelineTest(t, pluginsRoot)
-	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.ClientHostIF)
-	setControlScriptAttachForPipelineTest(t, pluginDir, "egress")
+	setPipelineAttachInterfacesForTest(t, pluginDir, topology.ClientHostIF)
+	setPipelineAttachModeForTest(t, pluginDir, "egress")
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
 
 	enabled := true
@@ -2626,7 +2626,7 @@ func TestKernelPluginPipelineRuntimeReconcilePluginsBootstrapsExplicitInterfaceW
 	topology := setupDataplanePerfTopology(t)
 	pluginsRoot := t.TempDir()
 	pluginDir := copyPacketObserverPluginForPipelineTest(t, pluginsRoot)
-	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.ClientHostIF)
+	setPipelineAttachInterfacesForTest(t, pluginDir, topology.ClientHostIF)
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
 
 	enabled := true
@@ -2656,7 +2656,7 @@ func TestKernelPluginPipelineRuntimeReconcilePluginsBootstrapsExplicitInterfaceW
 		t.Fatalf("plugin state = %+v, want one chained dataplane attachment", state)
 	}
 
-	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.ClientHostIF, topology.BackendHostIF)
+	setPipelineAttachInterfacesForTest(t, pluginDir, topology.ClientHostIF, topology.BackendHostIF)
 	snapshot = rt.ReconcilePlugins(loadPluginCatalog(cfg))
 	if len(rt.attachments) < 2 {
 		t.Fatalf("attachments = %d, want ReconcilePlugins to add the second explicit interface", len(rt.attachments))
@@ -2868,7 +2868,7 @@ func TestKernelPluginPipelineRuntimeScopesHooksPerInterface(t *testing.T) {
 
 	pluginsRoot := t.TempDir()
 	observerDir := copyPacketObserverPluginForPipelineTest(t, pluginsRoot)
-	setControlScriptInterfacesForPipelineTest(t, observerDir, topology.BackendHostIF)
+	setPipelineAttachInterfacesForTest(t, observerDir, topology.BackendHostIF)
 	compileBPFObjectFromSource(t, filepath.Join(observerDir, "packet_observer.bpf.c"), filepath.Join(observerDir, "packet_observer.o"))
 	dropDir := filepath.Join(pluginsRoot, "drop_core")
 	if err := os.MkdirAll(dropDir, 0o755); err != nil {
@@ -3453,49 +3453,75 @@ func setDataplanePerfProcFilesForTest(t *testing.T, paths []string, value string
 	}
 }
 
-func setControlScriptInterfacesForPipelineTest(t *testing.T, pluginDir string, ifNames ...string) {
+// setPipelineAttachInterfacesForTest scopes the first pipeline attachment
+// in a plugin's manifest to ifNames (none: every interface), the way a
+// plugin update with a new plugin.json would.
+func setPipelineAttachInterfacesForTest(t *testing.T, pluginDir string, ifNames ...string) {
 	t.Helper()
-
-	controlPath := filepath.Join(pluginDir, "control.js")
-	data, err := os.ReadFile(controlPath)
-	if err != nil {
-		t.Fatalf("ReadFile(control.js) error = %v", err)
-	}
-	lines := strings.Split(string(data), "\n")
-	replaced := false
-	for i, line := range lines {
-		if !strings.Contains(line, "interfaces:") {
-			continue
+	editPipelineAttachForTest(t, pluginDir, func(entries []any) bool {
+		entry, ok := firstPipelineAttachForTest(entries)
+		if !ok {
+			return false
 		}
-		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-		lines[i] = indent + "interfaces: " + jsStringListForPipelineTest(ifNames...) + ","
-		replaced = true
-		break
-	}
-	if !replaced {
-		t.Fatalf("control.js does not contain an interfaces field")
-	}
-	if err := os.WriteFile(controlPath, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
-		t.Fatalf("WriteFile(control.js) error = %v", err)
-	}
+		interfaces := make([]any, 0, len(ifNames))
+		for _, name := range ifNames {
+			interfaces = append(interfaces, name)
+		}
+		entry["interfaces"] = interfaces
+		return true
+	})
 }
 
-func setControlScriptAttachForPipelineTest(t *testing.T, pluginDir string, attach string) {
+// setPipelineAttachModeForTest sets attach (such as "egress") on the first
+// forward pipeline attachment in a plugin's manifest.
+func setPipelineAttachModeForTest(t *testing.T, pluginDir string, attach string) {
 	t.Helper()
+	editPipelineAttachForTest(t, pluginDir, func(entries []any) bool {
+		for _, raw := range entries {
+			if entry, ok := raw.(map[string]any); ok && entry["direction"] == "forward" {
+				entry["attach"] = attach
+				return true
+			}
+		}
+		return false
+	})
+}
 
-	controlPath := filepath.Join(pluginDir, "control.js")
-	data, err := os.ReadFile(controlPath)
+func firstPipelineAttachForTest(entries []any) (map[string]any, bool) {
+	if len(entries) == 0 {
+		return nil, false
+	}
+	entry, ok := entries[0].(map[string]any)
+	return entry, ok
+}
+
+// editPipelineAttachForTest rewrites control.register.pipeline_attach in a
+// plugin's manifest.
+func editPipelineAttachForTest(t *testing.T, pluginDir string, edit func([]any) bool) {
+	t.Helper()
+	path := filepath.Join(pluginDir, pluginManifestFile)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("ReadFile(control.js) error = %v", err)
+		t.Fatalf("ReadFile(%s) error = %v", path, err)
 	}
-	needle := "  direction: 'forward',\n"
-	replacement := needle + fmt.Sprintf("  attach: %q,\n", attach)
-	updated := strings.Replace(string(data), needle, replacement, 1)
-	if updated == string(data) {
-		t.Fatal("control.js does not contain a forward pipeline direction")
+	var manifest map[string]any
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&manifest); err != nil {
+		t.Fatalf("decode %s: %v", path, err)
 	}
-	if err := os.WriteFile(controlPath, []byte(updated), 0o644); err != nil {
-		t.Fatalf("WriteFile(control.js) error = %v", err)
+	control, _ := manifest["control"].(map[string]any)
+	register, _ := control["register"].(map[string]any)
+	entries, _ := register["pipeline_attach"].([]any)
+	if !edit(entries) {
+		t.Fatalf("%s declares no pipeline attachment to edit", path)
+	}
+	encoded, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatalf("encode %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, append(encoded, '\n'), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", path, err)
 	}
 }
 
