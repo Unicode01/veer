@@ -2,6 +2,8 @@
 set -eu
 
 ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+# shellcheck source=/dev/null
+. "$ROOT_DIR/scripts/rust-env.sh"
 PROFILE=${1:-portable}
 TMP_DIR=
 PACKAGE_DIR=

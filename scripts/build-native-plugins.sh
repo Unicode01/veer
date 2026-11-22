@@ -18,6 +18,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=/dev/null
+. "$ROOT/scripts/rust-env.sh"
 PROFILE="${VEER_NATIVE_PROFILE:-release}"
 TRIPLES=("$@")
 if [ "${#TRIPLES[@]}" -eq 0 ]; then

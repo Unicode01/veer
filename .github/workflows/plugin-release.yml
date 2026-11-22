@@ -203,12 +203,19 @@ jobs:
           cache: true
       - name: Install VM and eBPF build dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage clang llvm linux-libc-dev
+      - name: Install the musl plugin toolchain
+        # The Alpine guest runs the musl plugin worker; cargo-zigbuild links
+        # it dynamically, as release builds do.
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          python3 -m pip install --user ziglang cargo-zigbuild
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Build guest binaries
         run: |
-          sh scripts/build-all-ebpf.sh
+          VEER_NATIVE_TRIPLES="x86_64-linux-gnu x86_64-linux-musl" sh scripts/build-all-ebpf.sh
           CGO_ENABLED=0 go build -trimpath -o /tmp/veer-vm-binary .
           CGO_ENABLED=0 go test -c -o /tmp/veer-vm.test ./internal/app
-      - name: Verify stock kernel, deployment, sandbox and reboot
+      - name: Verify stock kernel, deployment, plugin worker and reboot
         run: |
           # The runner user cannot normally open /dev/kvm; use the available KVM device.
           sudo python3 scripts/verify-qemu-platform.py "${{ matrix.profile }}" \

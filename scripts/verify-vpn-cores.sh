@@ -2,6 +2,8 @@
 set -eu
 
 ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+# shellcheck source=/dev/null
+. "$ROOT_DIR/scripts/rust-env.sh"
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/veer-vpn-cores.XXXXXX")
 trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
 

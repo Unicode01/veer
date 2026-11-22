@@ -225,7 +225,8 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   const methods = ['list','get','create','update'];
   const coreActions = ['core_status','core_install','core_select','core_rollback','core_remove'];
   const healthActions=['health_status','health_settings','health_check'], healthRequests=[], healthValues={};
-  const healthDefaults=require('../../../plugins/vpn_core/health-check').settings();
+  // What settings() in plugins/vpn_core/src/health.rs returns for a WAN with none.
+  const healthDefaults={enabled:false,url:'https://www.gstatic.com/generate_204',resolver_ip:'1.1.1.1',interval_seconds:60,timeout_ms:5000,expected_status:204};
   let healthFailure=false, healthPolls=0;
   const cores = {id:'mihomo', directory:'/opt/veer/plugins.veer-state/cores/vpn_core/mihomo/linux-amd64', versions:[]};
   let installationPolls=0;
@@ -883,12 +884,10 @@ test('Patchbay preserves every resource editor and isolates network leases and d
 });
 
 test('bundled plugin pages share host actions and themes at desktop and 375px', async ({ page }, testInfo) => {
-  const vm = require('node:vm');
   const plugins = ['router_wizard', 'wan_core', 'lan_core', 'pppoe_client', 'vtolocal', 'packet_observer'].map((id) => {
     const root = path.resolve(__dirname, '../../../plugins', id);
     const manifest = JSON.parse(fs.readFileSync(path.join(root, 'plugin.json'), 'utf8'));
-    const source = fs.readFileSync(path.join(root, 'control.js'), 'utf8');
-    const ui = vm.runInNewContext('(' + source.match(/ui\.register\((\{[\s\S]*?\})\);/)[1] + ')', { crypto: { sha256File: () => '' } });
+    const ui = manifest.control.register.ui;
     return { ...manifest, status: 'active', enabled: true, ui, resources: ui.resources.map((entry) => ({ id: entry.resource, methods: entry.methods })), actions: ui.actions.map((id) => ({ id })), control: { ...manifest.control, resource_access: ui.resource_access }, asset_base_path: '/api/plugins/' + id + '/assets/', runtime: { mode: 'control' } };
   });
   await openDashboard(page, testInfo);
@@ -1544,10 +1543,8 @@ test('firewall page edits ICMP and catch-all policies, sets and connection track
   await openDashboard(page, testInfo);
   await page.evaluate(() => window.VeerApp.setLocale('zh-CN'));
   const root = path.resolve(__dirname, '../../../plugins/firewall');
-  const vm = require('node:vm');
-  const source = fs.readFileSync(path.join(root, 'control.js'), 'utf8');
-  const ui = vm.runInNewContext('(' + source.match(/ui\.register\((\{[\s\S]*?\})\);/)[1] + ')', { crypto: { sha256File: () => '' } });
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'plugin.json'), 'utf8'));
+  const ui = manifest.control.register.ui;
   const plugin = { ...manifest, status: 'active', enabled: true, ui, resources: ui.resources.map((entry) => ({ id: entry.resource, methods: entry.methods })),
     actions: ui.actions.map((id) => ({ id })), asset_base_path: '/api/plugins/firewall/assets/', runtime: { mode: 'dataplane' } };
   const resources = {
