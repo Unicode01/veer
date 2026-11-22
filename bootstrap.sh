@@ -76,8 +76,24 @@ usage() {
                         失败时保留临时目录，默认 1
   VEER_SKIP_DEPS       设为 1 时跳过系统依赖安装
   VEER_SKIP_GO         设为 1 时跳过 Go 安装检查
-  VEER_INSTALL_PLUGINS 设为 1 时安装 bundled stable 插件，默认 0；源码构建时需要 Rust 与 cargo-zigbuild
+  VEER_INSTALL_PLUGINS 设为 1 时安装 bundled stable 插件，默认 0
+  VEER_ALLOW_INCOMPATIBLE_PLUGINS
+                        设为 1 时，已安装插件无法在新版本运行也继续部署，默认 0
+  VEER_INSTALL_RUST    源码构建缺少 Rust 工具链时: ask 在终端询问（默认），
+                        1 直接临时安装，0 不安装；没有终端时 ask 按 0 处理
+  VEER_ZIG_VERSION     临时安装的 zig 版本，默认 0.15.2；其他版本需同时设置 VEER_ZIG_SHA256
+  VEER_ZIG_BASE_URL    设置后只从 <地址>/<版本>/<文件> 下载 zig；默认依次尝试官方站点与
+                        社区镜像（中国大陆网络优先国内镜像），都按固定 SHA-256 校验
   VEER_SERVICE_MANAGER 服务管理器，auto/systemd/openrc，默认 auto
+
+插件:
+  插件是原生库，由 veer 内置的插件 worker 运行。release 包自带 worker 与插件包。
+  源码构建需要 Rust (1.88+)、对应架构的 rustup 目标、cargo-zigbuild 与 zig，否则
+  构建出的 veer 不能运行插件；缺少时 bootstrap 列出缺少的部分，询问后把它们临时
+  安装到工作目录（部署结束后随工作目录删除，不改动系统中已有的 Rust）。本机已安装
+  并启用插件而不安装工具链时，bootstrap 在构建前停止；装了插件时同时构建插件包。
+  每次部署都把已安装、且插件包里有的插件更新为插件包中的版本（已安装版本更新的除外）；
+  插件包里没有、新版本又无法运行的插件会让部署在改动任何文件前停止。
 
 兼容性:
   main 已发布的同名 FORWARD_* 变量仍可使用；同时设置时 VEER_* 优先。
@@ -146,6 +162,18 @@ if [[ -z "${FORWARD_SKIP_DEPS}" ]]; then
 fi
 FORWARD_SKIP_GO="${VEER_SKIP_GO:-${FORWARD_SKIP_GO:-0}}"
 FORWARD_INSTALL_PLUGINS="${VEER_INSTALL_PLUGINS:-0}"
+FORWARD_INSTALL_RUST="${VEER_INSTALL_RUST:-ask}"
+# cargo-zigbuild 0.24 needs Rust 1.88.
+FORWARD_RUST_MIN_VERSION="1.88.0"
+FORWARD_CARGO_ZIGBUILD_VERSION="0.24.1"
+FORWARD_ZIG_VERSION="${VEER_ZIG_VERSION:-0.15.2}"
+FORWARD_ZIG_SHA256="${VEER_ZIG_SHA256:-}"
+FORWARD_ZIG_BASE_URL="${VEER_ZIG_BASE_URL:-}"
+FORWARD_RUST_ROOT="${FORWARD_WORKDIR}/rust"
+# Set by check_source_build_plugins: the Rust tools a source build lacks and
+# whether to install them.
+FORWARD_RUST_MISSING=""
+FORWARD_RUST_INSTALL=0
 FORWARD_REPO_DIR="${FORWARD_WORKDIR}/repo"
 FORWARD_RELEASE_DIR="${FORWARD_WORKDIR}/release"
 FORWARD_DEPLOY_DIR=""
@@ -156,9 +184,19 @@ DEPLOY_ARGS=("$@")
 
 case "${FORWARD_INSTALL_PLUGINS}" in
     0|1)
+        # A source build also makes the plugin bundle when deploy.sh needs it
+        # to replace installed plugins (check_source_build_plugins).
+        FORWARD_BUILD_PLUGIN_BUNDLE="${FORWARD_INSTALL_PLUGINS}"
         ;;
     *)
         fail "VEER_INSTALL_PLUGINS 仅支持 0 或 1，当前值: ${FORWARD_INSTALL_PLUGINS}"
+        ;;
+esac
+case "${FORWARD_INSTALL_RUST}" in
+    ask|0|1)
+        ;;
+    *)
+        fail "VEER_INSTALL_RUST 仅支持 ask、0 或 1，当前值: ${FORWARD_INSTALL_RUST}"
         ;;
 esac
 case "${FORWARD_INSTALL_MODE}" in
@@ -262,6 +300,7 @@ safe_remove_bootstrap_path() {
 }
 
 initialize_bootstrap_workdir "${FORWARD_WORKDIR}"
+FORWARD_RUST_ROOT="${FORWARD_WORKDIR}/rust"
 FORWARD_REPO_DIR="${FORWARD_WORKDIR}/repo"
 FORWARD_RELEASE_DIR="${FORWARD_WORKDIR}/release"
 FORWARD_GO_ROOT="${FORWARD_WORKDIR}/go"
@@ -569,14 +608,14 @@ install_system_deps() {
     case "${package_manager}" in
         apt)
             packages=(ca-certificates bash coreutils curl ethtool findutils iproute2 iptables nftables procps python3 util-linux xz-utils tar)
-            [[ "${scope}" == runtime ]] || packages+=(git clang llvm linux-libc-dev)
+            [[ "${scope}" == runtime ]] || packages+=(git clang llvm linux-libc-dev gcc libc6-dev)
             export DEBIAN_FRONTEND=noninteractive
             run_with_retry 3 3 "apt-get update" apt-get update
             run_with_retry 3 3 "安装系统依赖" apt-get install -y --no-install-recommends "${packages[@]}"
             ;;
         dnf|yum)
             packages=(ca-certificates bash "${rpm_coreutils_package}" "${rpm_curl_package}" ethtool findutils iproute iptables nftables policycoreutils procps-ng python3 util-linux xz tar)
-            [[ "${scope}" == runtime ]] || packages+=(git clang llvm kernel-headers)
+            [[ "${scope}" == runtime ]] || packages+=(git clang llvm kernel-headers gcc glibc-devel)
             if [[ "${package_manager}" == dnf ]]; then
                 run_with_retry 3 3 "刷新 dnf 元数据" dnf -y makecache --refresh
             else
@@ -586,7 +625,7 @@ install_system_deps() {
             ;;
         apk)
             packages=(bash ca-certificates coreutils curl ethtool findutils gawk grep iproute2 iptables nftables openrc procps python3 sed tar util-linux xz)
-            [[ "${scope}" == runtime ]] || packages+=(clang git linux-headers llvm musl-dev)
+            [[ "${scope}" == runtime ]] || packages+=(clang gcc git linux-headers llvm musl-dev)
             run_with_retry 3 3 "安装 Alpine 系统依赖" apk add --no-cache "${packages[@]}"
             ;;
         *)
@@ -1297,7 +1336,7 @@ clone_repo() {
 
 build_release() {
     cd "${FORWARD_REPO_DIR}"
-    VEER_BUILD_PLUGIN_BUNDLE="${FORWARD_INSTALL_PLUGINS}" bash ./release.sh "${GOARCH}"
+    VEER_BUILD_PLUGIN_BUNDLE="${FORWARD_BUILD_PLUGIN_BUNDLE}" bash ./release.sh "${GOARCH}"
     FORWARD_DEPLOY_DIR="${FORWARD_REPO_DIR}"
     ok "构建完成"
 }
@@ -1338,7 +1377,380 @@ run_deploy() {
     VEER_INSTALL_PLUGINS="${FORWARD_INSTALL_PLUGINS}" bash ./deploy.sh "${DEPLOY_ARGS[@]}"
 }
 
+# Prints how many plugins this host runs: plugins_enabled and a plugin.json
+# under plugins_dir.
+count_installed_plugins() {
+    local install_dir="${INSTALL_DIR:-/opt/veer}"
+
+    if [[ ! -f "${install_dir}/config.json" ]]; then
+        printf '0'
+        return 0
+    fi
+    python3 - "${install_dir}" <<'PY' || printf '0'
+import json
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+try:
+    config = json.loads((root / "config.json").read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    config = {}
+installed = 0
+if isinstance(config, dict) and config.get("plugins_enabled") is True:
+    plugins = Path(str(config.get("plugins_dir") or "").strip() or "plugins")
+    if not plugins.is_absolute():
+        plugins = root / plugins
+    try:
+        entries = sorted(plugins.iterdir())
+    except OSError:
+        entries = []
+    installed = sum(1 for entry in entries if entry.is_dir() and (entry / "plugin.json").is_file())
+print(installed, end="")
+PY
+}
+
+# The rustup targets release.sh builds the plugin worker and plugins for.
+rust_targets_for_arch() {
+    case "${GOARCH}" in
+        amd64) printf '%s' "x86_64-unknown-linux-gnu x86_64-unknown-linux-musl" ;;
+        arm64) printf '%s' "aarch64-unknown-linux-gnu aarch64-unknown-linux-musl" ;;
+    esac
+}
+
+# cargo-zigbuild runs zig from PATH, $ZIG or the ziglang Python package.
+zig_available() {
+    command -v zig >/dev/null 2>&1 && return 0
+    [[ -n "${ZIG:-}" && -x "${ZIG}" ]] && return 0
+    python3 -c 'import ziglang' >/dev/null 2>&1
+}
+
+# Prints, space separated, what a source build lacks to compile the plugin
+# worker and the plugins: "rust" (no cargo, or rustc older than 1.88),
+# "target:<triple>" (a target of this architecture without its standard
+# library), "cargo-zigbuild" and "zig".
+missing_rust_tools() {
+    local missing=()
+    local version=""
+    local sysroot=""
+    local target=""
+
+    if command -v cargo >/dev/null 2>&1 && command -v rustc >/dev/null 2>&1; then
+        version="$(rustc --version 2>/dev/null | awk '{ print $2; exit }')"
+        if ! version_ge "${version:-0}" "${FORWARD_RUST_MIN_VERSION}"; then
+            missing+=(rust)
+        else
+            sysroot="$(rustc --print sysroot 2>/dev/null || true)"
+            for target in $(rust_targets_for_arch); do
+                [[ -n "${sysroot}" && -d "${sysroot}/lib/rustlib/${target}" ]] || missing+=("target:${target}")
+            done
+        fi
+    else
+        missing+=(rust)
+    fi
+    command -v cargo-zigbuild >/dev/null 2>&1 || missing+=(cargo-zigbuild)
+    zig_available || missing+=(zig)
+    printf '%s' "${missing[*]}"
+}
+
+describe_rust_tools() {
+    local item=""
+    local separator=""
+
+    for item in $1; do
+        case "${item}" in
+            rust) item="Rust ${FORWARD_RUST_MIN_VERSION}+ (cargo 与 rustc)" ;;
+            target:*) item="Rust 目标 ${item#target:}" ;;
+        esac
+        printf '%s%s' "${separator}" "${item}"
+        separator="、"
+    done
+}
+
+bootstrap_workdir_space() {
+    local free=""
+    local type=""
+
+    free="$(df -Pk "${FORWARD_WORKDIR}" 2>/dev/null | awk 'NR == 2 { printf "%.1f GB", $4 / 1048576 }')"
+    type="$(stat -f -c %T "${FORWARD_WORKDIR}" 2>/dev/null || true)"
+    printf '%s' "${free:-未知}"
+    if [[ "${type}" == tmpfs ]]; then
+        printf '，且在内存文件系统 (tmpfs) 上，可设置 VEER_WORKDIR 指向磁盘目录'
+    fi
+}
+
+# Asks on the terminal whether to install the Rust tools a source build
+# lacks. Returns 0 to install, 1 when declined, 2 without a terminal to ask
+# on; an empty answer takes the default, yes when the build needs them.
+ask_rust_install() {
+    local reason="$1"
+    local required="$2"
+    local choices="[y/N]"
+    local answer=""
+    local tty_fd=""
+
+    [[ "${required}" == 1 ]] && choices="[Y/n]"
+    { exec {tty_fd}<>/dev/tty; } 2>/dev/null || return 2
+    {
+        printf '\n%b  源码构建需要 Rust 工具链来编译插件 worker 与插件：%s\n' "${YELLOW}[?]${NC}" "${reason}"
+        printf '        缺少: %s\n' "$(describe_rust_tools "${FORWARD_RUST_MISSING}")"
+        printf '        将临时安装到 %s，部署结束后随工作目录删除，不改动系统中已有的 Rust\n' "${FORWARD_RUST_ROOT}"
+        printf '        下载约 200 MB，安装与编译约占 1.5 GB 磁盘（工作目录可用 %s），需要数分钟\n' "$(bootstrap_workdir_space)"
+        printf '        安装并继续？%s ' "${choices}"
+    } >&"${tty_fd}"
+    if ! IFS= read -r answer <&"${tty_fd}"; then
+        exec {tty_fd}>&-
+        return 2
+    fi
+    exec {tty_fd}>&-
+    case "${answer,,}" in
+        "") [[ "${required}" == 1 ]] ;;
+        y|yes) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# A veer built without the Rust tools carries no plugin worker and runs no
+# plugin. Before anything is built this decides whether to install the tools
+# the build lacks: VEER_INSTALL_RUST=1 or 0, or the answer on the terminal.
+# Without them it stops when this host runs plugins or VEER_INSTALL_PLUGINS=1
+# asks for the plugin bundle. With installed plugins the build also makes the
+# bundle, from which deploy.sh updates them.
+check_source_build_plugins() {
+    local installed=0
+    local required=0
+    local reason=""
+    local answer=0
+
+    installed="$(count_installed_plugins)"
+    if (( installed > 0 )); then
+        required=1
+        reason="本机已安装并启用 ${installed} 个插件"
+    elif [[ "${FORWARD_BUILD_PLUGIN_BUNDLE}" == "1" ]]; then
+        required=1
+        reason="VEER_INSTALL_PLUGINS=1 需要编译插件包"
+    else
+        reason="不安装也能构建，但构建出的 veer 不能运行插件"
+    fi
+
+    FORWARD_RUST_MISSING="$(missing_rust_tools)"
+    FORWARD_RUST_INSTALL=0
+    if [[ -z "${FORWARD_RUST_MISSING}" ]]; then
+        ok "Rust 工具链已就绪"
+    else
+        case "${FORWARD_INSTALL_RUST}" in
+            1) FORWARD_RUST_INSTALL=1 ;;
+            0) ;;
+            *)
+                ask_rust_install "${reason}" "${required}" || answer=$?
+                case "${answer}" in
+                    0) FORWARD_RUST_INSTALL=1 ;;
+                    2) info "没有可交互的终端，不安装 Rust 工具链；可设置 VEER_INSTALL_RUST=1 由 bootstrap 临时安装" ;;
+                esac
+                ;;
+        esac
+        if (( FORWARD_RUST_INSTALL == 0 )); then
+            if (( required )); then
+                fail "${reason}，但缺少 $(describe_rust_tools "${FORWARD_RUST_MISSING}")：源码构建的 veer 不带插件 worker，无法运行插件\n       改用 release 安装 (VEER_INSTALL_MODE=release)，设置 VEER_INSTALL_RUST=1 由 bootstrap 临时安装，或自行安装后重试"
+            fi
+            warn "未安装 Rust 工具链 (缺少 $(describe_rust_tools "${FORWARD_RUST_MISSING}"))：构建出的 veer 不能运行插件；需要插件时设置 VEER_INSTALL_RUST=1 重新运行"
+            return 0
+        fi
+        info "将临时安装: $(describe_rust_tools "${FORWARD_RUST_MISSING}")"
+    fi
+    if (( installed > 0 )) && [[ "${FORWARD_BUILD_PLUGIN_BUNDLE}" != "1" ]]; then
+        FORWARD_BUILD_PLUGIN_BUNDLE=1
+        info "同时构建插件包，部署时把已安装的 ${installed} 个插件更新为插件包中的版本"
+    fi
+}
+
+rustup_host_triple() {
+    local arch="x86_64"
+    local libc="gnu"
+
+    [[ "${GOARCH}" == arm64 ]] && arch="aarch64"
+    if compgen -G "/lib/ld-musl-*.so.1" >/dev/null; then
+        libc="musl"
+    fi
+    printf '%s-unknown-linux-%s' "${arch}" "${libc}"
+}
+
+# Installs stable Rust with this architecture's targets into
+# FORWARD_RUST_ROOT through rustup-init, checked against its published
+# SHA-256. In mainland China (the Go download region) rustup and crates.io
+# use the rsproxy.cn mirror unless RUSTUP_DIST_SERVER is set.
+install_rustup_toolchain() {
+    local host=""
+    local base=""
+    local init="${FORWARD_RUST_ROOT}/rustup-init"
+    local expected=""
+    local actual=""
+    local targets=""
+
+    host="$(rustup_host_triple)"
+    detect_go_download_region
+    if [[ -z "${RUSTUP_DIST_SERVER:-}" && "${FORWARD_GO_EFFECTIVE_REGION}" == cn ]]; then
+        export RUSTUP_DIST_SERVER="https://rsproxy.cn"
+        export RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"
+        info "Rust 使用国内镜像: ${RUSTUP_DIST_SERVER}"
+    fi
+    base="${RUSTUP_UPDATE_ROOT:-https://static.rust-lang.org/rustup}/dist/${host}"
+    info "下载 rustup-init: ${base}/rustup-init"
+    if ! curl -fL --connect-timeout 15 --retry 3 --retry-all-errors --retry-delay 1 --speed-limit 1024 --speed-time 60 \
+            -o "${init}" "${base}/rustup-init" ||
+        ! curl -fsSL --connect-timeout 15 --retry 3 --retry-all-errors --retry-delay 1 --speed-limit 1024 --speed-time 60 \
+            -o "${init}.sha256" "${base}/rustup-init.sha256"; then
+        fail "下载 rustup-init 失败: ${base}"
+    fi
+    expected="$(awk '{ print tolower($1); exit }' "${init}.sha256")"
+    [[ "${expected}" =~ ^[a-f0-9]{64}$ ]] || fail "rustup-init.sha256 格式无效: ${base}"
+    actual="$(file_sha256 "${init}")" || fail "无法计算 rustup-init 的 SHA-256"
+    [[ "${actual}" == "${expected}" ]] || fail "rustup-init SHA-256 不匹配，拒绝执行: ${base}"
+    chmod 700 "${init}"
+
+    export RUSTUP_HOME="${FORWARD_RUST_ROOT}/rustup"
+    export CARGO_HOME="${FORWARD_RUST_ROOT}/cargo"
+    targets="$(rust_targets_for_arch)"
+    "${init}" -y --no-modify-path --profile minimal --default-toolchain stable --target "${targets// /,}" ||
+        fail "安装 Rust 工具链失败"
+    rm -f "${init}" "${init}.sha256"
+    export PATH="${CARGO_HOME}/bin:${PATH}"
+    if [[ "${FORWARD_GO_EFFECTIVE_REGION}" == cn ]]; then
+        cat > "${CARGO_HOME}/config.toml" <<'EOF'
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+EOF
+        info "crates.io 使用国内镜像: rsproxy.cn"
+    fi
+}
+
+pinned_zig_sha256() {
+    case "$1-$2" in
+        0.15.2-x86_64) printf '%s' "02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239" ;;
+        0.15.2-aarch64) printf '%s' "958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f" ;;
+        *) return 1 ;;
+    esac
+}
+
+# zig's official site and two community mirrors, which keep release files at
+# their top level; in mainland China (the Go download region) the domestic
+# mirror goes first, since ziglang.org is slow there. The pinned SHA-256
+# checks whichever serves the file. VEER_ZIG_BASE_URL replaces the list.
+resolve_zig_download_urls() {
+    local file="$1"
+    local official="https://ziglang.org/download/${FORWARD_ZIG_VERSION}/${file}"
+    local domestic="https://fs.liujiacai.net/zigbuilds/${file}"
+    local mirror="https://zig.linus.dev/zig/${file}"
+
+    if [[ -n "${FORWARD_ZIG_BASE_URL}" ]]; then
+        printf '%s\n' "${FORWARD_ZIG_BASE_URL%/}/${FORWARD_ZIG_VERSION}/${file}"
+    elif [[ "${FORWARD_GO_EFFECTIVE_REGION}" == cn ]]; then
+        printf '%s\n' "${domestic}" "${official}" "${mirror}"
+    else
+        printf '%s\n' "${official}" "${mirror}" "${domestic}"
+    fi
+}
+
+install_zig() {
+    local arch="x86_64"
+    local name=""
+    local archive=""
+    local url=""
+    local urls=()
+    local expected="${FORWARD_ZIG_SHA256,,}"
+    local actual=""
+    local verified=0
+
+    [[ "${GOARCH}" == arm64 ]] && arch="aarch64"
+    name="zig-${arch}-linux-${FORWARD_ZIG_VERSION}"
+    archive="${FORWARD_RUST_ROOT}/${name}.tar.xz"
+    if [[ -z "${expected}" ]]; then
+        expected="$(pinned_zig_sha256 "${FORWARD_ZIG_VERSION}" "${arch}")" ||
+            fail "缺少 zig ${FORWARD_ZIG_VERSION} ${arch} 的可信 SHA-256；自定义版本请设置 VEER_ZIG_SHA256"
+    fi
+    [[ -n "${FORWARD_ZIG_BASE_URL}" ]] || detect_go_download_region
+    mapfile -t urls < <(resolve_zig_download_urls "${name}.tar.xz")
+    for url in "${urls[@]}"; do
+        info "下载 zig ${FORWARD_ZIG_VERSION}: ${url}"
+        rm -f "${archive}"
+        # A transfer that stalls (under 1 KB/s for a minute) moves on.
+        if ! curl -fL --connect-timeout 15 --retry 3 --retry-all-errors --retry-delay 1 --speed-limit 1024 --speed-time 60 \
+            -o "${archive}" "${url}"; then
+            warn "zig 下载失败，尝试下一个源: ${url}"
+            continue
+        fi
+        actual="$(file_sha256 "${archive}")" || fail "无法计算 zig 归档的 SHA-256"
+        if [[ "${actual}" == "${expected}" ]]; then
+            verified=1
+            break
+        fi
+        warn "zig SHA-256 不匹配，拒绝解压并尝试下一个源: ${url}"
+    done
+    if (( ! verified )); then
+        rm -f "${archive}"
+        fail "下载 zig ${FORWARD_ZIG_VERSION} 失败或未通过 SHA-256 校验，已尝试 ${#urls[@]} 个源；可设置 VEER_ZIG_BASE_URL 指定镜像"
+    fi
+    ok "zig 下载并通过 SHA-256 校验: ${url}"
+    tar -C "${FORWARD_RUST_ROOT}" --no-same-owner -xJf "${archive}" || fail "解压 zig 失败: ${archive}"
+    rm -f "${archive}"
+    [[ -x "${FORWARD_RUST_ROOT}/${name}/zig" ]] || fail "zig 归档缺少 ${name}/zig"
+    export PATH="${FORWARD_RUST_ROOT}/${name}:${PATH}"
+}
+
+# Installs what check_source_build_plugins chose into FORWARD_RUST_ROOT, the
+# work directory's, and puts it first on PATH for the rest of the bootstrap.
+# Rust already on the host is left alone: a toolchain that is too old or
+# lacks a target is shadowed by a temporary one.
+install_rust_toolchain() {
+    local missing=" ${FORWARD_RUST_MISSING} "
+    local left=""
+
+    (( FORWARD_RUST_INSTALL == 1 )) || return 0
+    mkdir -p "${FORWARD_RUST_ROOT}"
+    if [[ "${missing}" == *" rust "* || "${missing}" == *" target:"* ]]; then
+        install_rustup_toolchain
+    fi
+    if [[ "${missing}" == *" cargo-zigbuild "* ]]; then
+        info "编译安装 cargo-zigbuild ${FORWARD_CARGO_ZIGBUILD_VERSION}..."
+        cargo install --locked --root "${FORWARD_RUST_ROOT}/tools" --version "${FORWARD_CARGO_ZIGBUILD_VERSION}" cargo-zigbuild ||
+            fail "安装 cargo-zigbuild 失败"
+        export PATH="${FORWARD_RUST_ROOT}/tools/bin:${PATH}"
+    fi
+    if [[ "${missing}" == *" zig "* ]]; then
+        install_zig
+    fi
+    left="$(missing_rust_tools)"
+    [[ -z "${left}" ]] || fail "安装后仍缺少 $(describe_rust_tools "${left}")"
+    ok "Rust 工具链已临时安装到 ${FORWARD_RUST_ROOT}: $(rustc --version)"
+}
+
+# cargo links build scripts with cc, which a host with only clang lacks; and
+# LTO release builds of the plugins need memory per job.
+prepare_rust_build_env() {
+    local total_kib=""
+
+    command -v cargo >/dev/null 2>&1 || return 0
+    if ! command -v cc >/dev/null 2>&1 && command -v clang >/dev/null 2>&1; then
+        mkdir -p "${FORWARD_RUST_ROOT}/bin"
+        ln -sf "$(command -v clang)" "${FORWARD_RUST_ROOT}/bin/cc"
+        export PATH="${FORWARD_RUST_ROOT}/bin:${PATH}"
+        info "没有 cc，Rust 链接改用 clang"
+    fi
+    if [[ -z "${CARGO_BUILD_JOBS:-}" ]]; then
+        total_kib="$(awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo 2>/dev/null || true)"
+        if [[ "${total_kib}" =~ ^[0-9]+$ ]] && (( total_kib < 2 * 1024 * 1024 )); then
+            export CARGO_BUILD_JOBS=1
+            info "内存小于 2 GiB，Rust 编译使用单任务 (CARGO_BUILD_JOBS=1)"
+        fi
+    fi
+}
+
 build_from_source() {
+    set_step "检查插件与 Rust 工具链"
+    check_source_build_plugins
     set_step "检查内存"
     warn_low_memory
     set_step "安装构建依赖"
@@ -1347,6 +1759,9 @@ build_from_source() {
     require_build_tools
     set_step "安装 Go"
     install_go_if_needed
+    set_step "安装 Rust 工具链"
+    install_rust_toolchain
+    prepare_rust_build_env
     set_step "配置 Go 模块代理"
     configure_go_module_env
     set_step "拉取源码"

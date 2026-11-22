@@ -53,6 +53,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Unicode01/veer/refs/heads/ma
 - 回退规则：`VEER_VERSION=latest` 时，若还没有 release 或下载失败，回退为从源码构建 `VEER_REF`（默认 `main`）。指定了版本却下载失败、或校验不通过时，直接报错，不会回退。
 - `VEER_REF`：显式设置时直接从源码构建该 ref，流程同旧版：安装构建依赖、拉取源码、执行 `release.sh`。中国大陆网络环境下会自动优先使用可用的 Go 镜像和 Go module 代理。
 - `VEER_INSTALL_MODE`：固定为 `release` 或 `source`，可关闭上述自动选择。
+- `VEER_INSTALL_RUST`：源码构建编译插件 worker 与插件需要 Rust 1.88+、对应架构的 rustup 目标、cargo-zigbuild 与 zig。缺少时默认 `ask`：在终端列出缺少的部分、下载量与磁盘占用并询问，确认后临时安装到工作目录（中国大陆网络使用 rsproxy.cn 镜像），部署结束后随工作目录删除，不改动系统中已有的 Rust；`1` 不询问直接安装，`0` 不安装；没有终端时 `ask` 按 `0` 处理。不安装时构建出的 veer 不能运行插件，本机已安装并启用插件或设置了 `VEER_INSTALL_PLUGINS=1` 时会在构建前停止。
 
 默认只安装 Veer 核心；设置 `VEER_INSTALL_PLUGINS=1` 才会安装 bundled stable 插件。支持 `apt`、`dnf/yum`、`apk` 以及 systemd/OpenRC。release 二进制带[可选内核扩展](KERNEL.md)支持，不带 `.ko`；需要时以 `VEER_BUILD_KERNEL_MODULE=1 VEER_INSTALL_KERNEL_MODULE=1` 部署，bootstrap 会用下载的二进制为当前内核构建模块。
 
@@ -75,7 +76,9 @@ scp veer-linux-amd64 deploy.sh config.example.json root@server:/tmp/
 ssh root@server 'cd /tmp && chmod +x deploy.sh && ./deploy.sh'
 ```
 
-需要插件时额外上传 `veer-plugins.tar.gz`，并以 `VEER_INSTALL_PLUGINS=1 ./deploy.sh` 部署。安装插件文件与启用插件相互独立，升级时未请求安装不会删除或覆盖现有插件目录。
+需要插件时额外上传 `veer-plugins.tar.gz`，并以 `VEER_INSTALL_PLUGINS=1 ./deploy.sh` 部署。安装插件文件与启用插件相互独立。插件与宿主随同一个 release 发布：每次升级，已安装、且插件包里有的插件都会更新为插件包中的版本（已安装版本比插件包新的保留）；没装过的插件不会新装，插件包里没有的插件（lab 与第三方插件）保持原样。
+
+升级前 `deploy.sh` 用新二进制检查已安装插件（`veer plugin preflight`，只读）：新版本只运行原生插件库，插件包里没有的旧版 JavaScript 插件、缺少本机平台库的插件，或新二进制不带插件 worker（没有 Rust 的源码构建），都会让部署在替换任何文件前停止并列出原因。确认可以放弃这些插件时，设置 `VEER_ALLOW_INCOMPATIBLE_PLUGINS=1` 继续部署。
 
 部署默认把 `/opt/veer/veer` 链接为 `/usr/local/bin/veer`，之后可直接运行 `veer help`、`veer version`、`veer kfuncs status`、`veer tls fingerprint` 和 `veer plugin ...`。已有同名普通文件时不会覆盖，只给出警告；`VEER_LINK_CLI=0` 不创建链接，并移除此前为本安装创建的链接；`VEER_CLI_LINK_DIR` 可改为其他绝对路径目录。RHEL 系列 sudo 的 `secure_path` 默认不含 `/usr/local/bin`，可在 root shell 中运行或写完整路径。`plugin backup/restore` 在当前目录没有 `forward.db` 时，自动使用可执行文件所在安装目录的数据库和配置里的 `plugins_dir`。未知子命令会直接报错退出，不会误启动第二个 daemon。
 
@@ -447,7 +450,7 @@ Web UI 的诊断页和 `GET /api/kernel/runtime` 可查看：
 
 ## 插件层
 
-`release.sh` 会把 `wan_core`、`lan_core`、`vtolocal` 和 `pppoe_client` 四个 stable 插件打成可选包；部署默认不安装插件，设置 `VEER_INSTALL_PLUGINS=1` 才会安装。安装后仍需手动设置 `plugins_enabled=true` 才会运行插件控制面，进入数据面还需设置 `plugins_dataplane_enabled=true`。`packet_observer`、`router_wizard` 与 [vpn_core](plugins/vpn_core/README.md) 仍是源码内的 lab 插件，不进入默认发布包。VPN 插件支持内核 WireGuard、Mihomo、sing-box 和外部 TUN，通过 WAN Core 边界和双向 TC 适配器接入核心：支持 ingress 交接的 helper 使用单接口边界，其余环境使用 veth 兼容路径，内部 peer 对普通界面隐藏。现有 LAN/出向 NAT 可选择隧道出口，无需关闭快速 NAT。插件架构、开发接口和边界说明见 [PLUGIN.md](PLUGIN.md)。
+`release.sh` 会把 `wan_core`、`lan_core`、`vtolocal`、`pppoe_client` 和 `firewall` 五个 stable 插件（每个带 x86_64/aarch64 的 glibc 与 musl 原生库）打成可选包 `veer-plugins.tar.gz`，放进每个架构的 release 归档；部署默认不安装插件，设置 `VEER_INSTALL_PLUGINS=1` 才会安装。安装后仍需手动设置 `plugins_enabled=true` 才会运行插件控制面，进入数据面还需设置 `plugins_dataplane_enabled=true`。`packet_observer`、`router_wizard` 与 [vpn_core](plugins/vpn_core/README.md) 仍是源码内的 lab 插件，不进入默认发布包。VPN 插件支持内核 WireGuard、Mihomo、sing-box 和外部 TUN，通过 WAN Core 边界和双向 TC 适配器接入核心：支持 ingress 交接的 helper 使用单接口边界，其余环境使用 veth 兼容路径，内部 peer 对普通界面隐藏。现有 LAN/出向 NAT 可选择隧道出口，无需关闭快速 NAT。插件架构、开发接口和边界说明见 [PLUGIN.md](PLUGIN.md)。
 
 ## 平台与依赖
 

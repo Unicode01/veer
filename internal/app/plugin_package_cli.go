@@ -76,6 +76,8 @@ func runPluginPackageCLI(args []string, stdout, stderr io.Writer) (bool, error) 
 		err = runPluginPackageVerifyCLI(args[2:], stdout, stderr)
 	case "repository":
 		err = runPluginRepositoryCLI(args[2:], stdout, stderr)
+	case "preflight":
+		err = runPluginPreflightCLI(args[2:], stdout, stderr)
 	case "help", "-h", "--help":
 		writePluginPackageCLIUsage(stdout)
 	default:
@@ -99,9 +101,12 @@ func writePluginPackageCLIUsage(w io.Writer) {
 	fmt.Fprintln(w, "  veer plugin sign --archive FILE --private-key FILE [--output FILE]")
 	fmt.Fprintln(w, "  veer plugin verify --package FILE --public-key FILE")
 	fmt.Fprintln(w, "  veer plugin repository init|add|revoke|publish|rotate-key|status [options]")
+	fmt.Fprintln(w, "  veer plugin preflight [--json] [--install-dir DIR] [--config FILE]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "backup and restore default to ./forward.db and ./plugins; when the current")
 	fmt.Fprintln(w, "directory has no forward.db they use the Veer install beside this binary and its plugins_dir.")
+	fmt.Fprintln(w, "preflight tells, before an upgrade, which installed plugins this binary cannot run")
+	fmt.Fprintln(w, "(old JavaScript plugins, no library for this host, no plugin worker); it changes nothing.")
 }
 
 func runPluginPackagePackCLI(args []string, stdout, stderr io.Writer) error {

@@ -1143,7 +1143,15 @@ PPPoE tunnel 自愈按接口名重新解析 ifindex，并核对 veth 配对、�
 
 随仓库维护的插件的控制面测试是 Rust 单元测试（`src/tests.rs`，`veer_plugin::testing::Harness`），由 `cargo test --workspace` 与发布门禁的 portable 层执行；插件 UI 的 Node 测试放在插件目录内，命名为 `test-*.test.js`，由 `npm run test:plugins` 执行；宿主的 `internal/app/web_test` 只测试 WebUI 与 bridge 本身。bundled 打包会跳过 `test-` 开头的文件和 Rust 源码；`veer plugin pack` 同样不打包 Rust 源码与 `target/`，但不过滤 `test-` 文件。
 
-`bootstrap.sh` 默认只构建和安装 Veer 核心，不执行 bundled 插件构建；`deploy.sh` 默认也不会解压或覆盖插件目录。设置 `VEER_INSTALL_PLUGINS=1` 才会构建并安装 bundled 插件；该开关不启用插件运行时，插件控制面和数据面仍分别由 `plugins_enabled`、`plugins_dataplane_enabled` 控制。直接运行 `release.sh` 时仍默认生成插件包，可用 `VEER_BUILD_PLUGIN_BUNDLE=0` 只构建核心发布物。
+`bootstrap.sh` 只在需要时构建 bundled 插件：设置了 `VEER_INSTALL_PLUGINS=1`，或源码模式下本机已安装插件。`VEER_INSTALL_PLUGINS=1` 安装插件包里的全部 stable 插件；该开关不启用插件运行时，插件控制面和数据面仍分别由 `plugins_enabled`、`plugins_dataplane_enabled` 控制。直接运行 `release.sh` 时仍默认生成插件包，可用 `VEER_BUILD_PLUGIN_BUNDLE=0` 只构建核心发布物。
+
+插件与宿主一起发布，不保留旧版本：每次部署，`deploy.sh` 都把已安装、且插件包里有的插件（按目录名）替换为插件包中的版本，不论旧版能否运行；只有已安装版本比插件包新时保留。没装过的插件不会新装，插件包里没有的 lab 与第三方插件不动。替换前，`deploy.sh` 先用新二进制运行 `veer plugin preflight`（只读，检查 `plugins_dir` 下的每个插件目录，不区分是否已在数据库中停用）：
+- 插件包里没有、新版本又无法运行的插件：旧版 JavaScript 插件（`control.main`），或没有本机平台库（`control.library` 缺少本机三元组）的插件，会让部署在替换任何文件前停止；
+- 新二进制不带插件 worker（没有 Rust 工具链的源码构建）：部署停止。`bootstrap.sh` 的源码模式缺少 Rust 工具链时先询问是否临时安装（`VEER_INSTALL_RUST`），本机已安装并启用插件而不安装时，构建前就会停止；
+- 插件包替换后再检查一次，仍无法运行时恢复原有插件与配置并停止；
+- 目录加载错误只警告，不阻止部署。
+
+`VEER_ALLOW_INCOMPATIBLE_PLUGINS=1` 把阻止改为警告，这些插件升级后会停止工作。
 
 ## 插件包发布
 

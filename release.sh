@@ -319,7 +319,7 @@ if [[ "${#NATIVE_TRIPLES[@]}" -gt 0 ]]; then
     bash "${PROJECT_DIR}/scripts/build-native-plugins.sh" "${NATIVE_TRIPLES[@]}"
     ok "原生插件与插件 worker 已编译"
 else
-    info "跳过插件 worker: 二进制不能运行插件 (需要 cargo 与 cargo-zigbuild)"
+    info "跳过插件 worker: 没有能编译目标平台的 Rust 工具链，这个二进制不能运行任何插件 (需要 cargo、cargo-zigbuild 与 zig)"
 fi
 
 # ---------- bundled plugins ----------
