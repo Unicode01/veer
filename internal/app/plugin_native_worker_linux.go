@@ -13,9 +13,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// spawnPluginNativeWorker starts the worker with one end of a unix socket
-// pair as fd 3. The worker dies with this process.
-func spawnPluginNativeWorker(executable string, cfg *Config) (*exec.Cmd, net.Conn, io.ReadCloser, error) {
+// pluginNativeWorkerArgv0 is the worker's argv[0]. The embedded worker runs
+// from /proc/self/fd/N, which would make both its command line and its
+// kernel process name (set by the worker itself) the bare descriptor number.
+const pluginNativeWorkerArgv0 = "veer-plugin-worker"
+
+// spawnPluginNativeWorker starts the worker for group with one end of a unix
+// socket pair as fd 3. The worker dies with this process. Its command line is
+// "veer-plugin-worker <group>"; the worker ignores the arguments.
+func spawnPluginNativeWorker(executable, group string, cfg *Config) (*exec.Cmd, net.Conn, io.ReadCloser, error) {
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create plugin worker socket: %w", err)
@@ -28,7 +34,8 @@ func spawnPluginNativeWorker(executable string, cfg *Config) (*exec.Cmd, net.Con
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("open plugin worker socket: %w", err)
 	}
-	command := exec.Command(executable)
+	command := exec.Command(executable, group)
+	command.Args[0] = pluginNativeWorkerArgv0
 	command.Env = pluginNativeWorkerEnvironment()
 	command.ExtraFiles = []*os.File{child}
 	command.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL, Setpgid: true}

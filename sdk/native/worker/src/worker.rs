@@ -25,7 +25,12 @@ const MAX_HOST_FRAME: usize = 72 << 20;
 const MAX_KEPT_REPLY_BUFFER: usize = 256 << 10;
 const RTLD_NOW: c_int = 2;
 const PR_SET_PDEATHSIG: c_int = 1;
+const PR_SET_NAME: c_int = 15;
 const PR_SET_NO_NEW_PRIVS: c_int = 38;
+/// The kernel names a process after the file it executes, and the worker
+/// built into veer runs from /proc/self/fd/N, so ps and top would show the
+/// descriptor number. At most 15 bytes plus the terminating NUL.
+const PROCESS_NAME: &[u8] = b"veer-plugins\0";
 const SIGKILL: u64 = 9;
 const CLOCK_MONOTONIC: c_int = 1;
 const SOL_SOCKET: c_int = 1;
@@ -185,6 +190,8 @@ pub fn run() -> i32 {
         // Die with the host, and never gain privileges through exec.
         prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
         prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+        // Before any thread starts, so unnamed threads inherit it too.
+        prctl(PR_SET_NAME, PROCESS_NAME.as_ptr() as u64, 0, 0, 0);
     }
     let fd: RawFd = std::env::var("VEER_PLUGIN_WORKER_FD").ok().and_then(|value| value.parse().ok()).unwrap_or(3);
     let stream = unsafe { UnixStream::from_raw_fd(fd) };

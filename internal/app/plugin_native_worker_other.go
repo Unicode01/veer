@@ -9,7 +9,7 @@ import (
 	"os/exec"
 )
 
-func spawnPluginNativeWorker(string, *Config) (*exec.Cmd, net.Conn, io.ReadCloser, error) {
+func spawnPluginNativeWorker(string, string, *Config) (*exec.Cmd, net.Conn, io.ReadCloser, error) {
 	return nil, nil, nil, errPluginNativeUnsupported
 }
 

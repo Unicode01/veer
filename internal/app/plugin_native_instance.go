@@ -57,7 +57,7 @@ func startPluginNativeWorker(pool *pluginNativeWorkerPool, group string, deadlin
 	if err != nil {
 		return nil, err
 	}
-	command, conn, stderr, err := spawnPluginNativeWorker(executable, pool.cfg)
+	command, conn, stderr, err := spawnPluginNativeWorker(executable, group, pool.cfg)
 	if err != nil {
 		return nil, err
 	}

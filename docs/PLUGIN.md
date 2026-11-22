@@ -148,7 +148,7 @@ let record = host.call("resources.get", json!(["profiles", "default"]))?; // 记
 
 ## 控制面生命周期
 
-控制面不进入 TC/XDP 热路径。插件库由 worker 进程（`veer-plugin-worker`，嵌在 veer 二进制中，启动时从内存文件执行）加载；每个插件在 worker 中有一个实例，实例在 handler 调用之间保持状态，同一插件的主控制事件串行执行。Veer 主进程持有数据库、Secret、网络对象的所有权与变更日志以及 eBPF object：worker 不持有 Web Token、SQLite 句柄或 eBPF map FD；只读网络查询和 L2/UDP 收发由 worker 用自己的 socket 完成（见上文）。插件只能调用 manifest 已授权且 contract 中存在的方法。
+控制面不进入 TC/XDP 热路径。插件库由 worker 进程（`veer-plugin-worker`，嵌在 veer 二进制中，启动时从内存文件执行；`ps`/`top` 中进程名为 `veer-plugins`，命令行为 `veer-plugin-worker <分组>`，例如 `shared`、`dedicated:<插件 ID>`）加载；每个插件在 worker 中有一个实例，实例在 handler 调用之间保持状态，同一插件的主控制事件串行执行。Veer 主进程持有数据库、Secret、网络对象的所有权与变更日志以及 eBPF object：worker 不持有 Web Token、SQLite 句柄或 eBPF map FD；只读网络查询和 L2/UDP 收发由 worker 用自己的 socket 完成（见上文）。插件只能调用 manifest 已授权且 contract 中存在的方法。
 
 handler 收到一条消息：handler 名（`onReconcile`、`onResourceApply`、`onAction`、`onTimer`、`onEvent`、事件订阅声明的 handler 等）和上下文 JSON（`ctx.action`、`ctx.payload`、`ctx.resource`、`ctx.records`、`ctx.timer`、`ctx.event`/`ctx.events` 等）。插件不处理的 handler 返回 `Outcome::Unhandled`；返回值用于 `runtime_query` 动作、Worker 调用、升级 snapshot 和迁移结果。事件订阅的投递是批量的：一次最多 64 个事件放在 `ctx.events`，`ctx.event` 是其中最后一个，插件应按批处理以减少每事件开销。
 

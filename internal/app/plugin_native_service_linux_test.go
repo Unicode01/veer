@@ -40,6 +40,18 @@ func TestPluginNativeWorkerServiceLaunch(t *testing.T) {
 	pid := worker.command.Process.Pid
 	t.Logf("plugin worker %d started from %s", pid, executable)
 
+	// Run from a memory file, the worker would otherwise show up in ps and
+	// top as the descriptor number. PROCESS_NAME in sdk/native/worker sets
+	// the kernel name.
+	procDir := filepath.Join("/proc", strconv.Itoa(pid))
+	if comm, err := os.ReadFile(filepath.Join(procDir, "comm")); err != nil || strings.TrimSpace(string(comm)) != "veer-plugins" {
+		t.Fatalf("plugin worker comm = %q (err %v), want veer-plugins", strings.TrimSpace(string(comm)), err)
+	}
+	wantCmdline := pluginNativeWorkerArgv0 + "\x00" + pluginNativeWorkerShared + "\x00"
+	if cmdline, err := os.ReadFile(filepath.Join(procDir, "cmdline")); err != nil || string(cmdline) != wantCmdline {
+		t.Fatalf("plugin worker cmdline = %q (err %v), want %q", cmdline, err, wantCmdline)
+	}
+
 	name := "worker-" + pluginNativeWorkerShared
 	cgroupData, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cgroup"))
 	if err != nil {
