@@ -93,7 +93,7 @@ exports.onAction = function () {
 };`)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	request := pluginControlNetRouteRequest{
 		Dst: "198.51.100.0/24", Table: 100, Metric: 10,
 		Nexthops: []pluginControlNetRouteNexthop{
@@ -155,7 +155,7 @@ exports.onAction = function () {
 };`)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	runtime.netAdmin = controller
 	defer runtime.Close()

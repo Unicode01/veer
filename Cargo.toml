@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "sdk/native/rust/veer-plugin",
+    "sdk/native/worker",
+    "sdk/native/examples/echo",
+    "plugins/firewall",
+    "plugins/lan_core",
+    "plugins/packet_observer",
+    "plugins/pppoe_client",
+    "plugins/router_wizard",
+    "plugins/vtolocal",
+    "plugins/vpn_core",
+    "plugins/wan_core",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "unwind"

@@ -71,7 +71,7 @@ type pluginControlInvocation struct {
 	probe    bool
 }
 
-func (rt *gojaPluginControlRuntime) beginPluginControlInvocation(plugin LoadedPlugin, event pluginControlEvent, now time.Time) (pluginControlInvocation, error) {
+func (rt *pluginControlManager) beginPluginControlInvocation(plugin LoadedPlugin, event pluginControlEvent, now time.Time) (pluginControlInvocation, error) {
 	invocation := pluginControlInvocation{pluginID: plugin.ID, key: pluginControlCircuitKey(event), started: now}
 	if rt == nil || !pluginControlCircuitTracks(event) || plugin.ID == "" {
 		return invocation, nil
@@ -104,7 +104,7 @@ func (rt *gojaPluginControlRuntime) beginPluginControlInvocation(plugin LoadedPl
 	return invocation, nil
 }
 
-func (rt *gojaPluginControlRuntime) finishPluginControlInvocation(invocation pluginControlInvocation, callErr error, now time.Time) {
+func (rt *pluginControlManager) finishPluginControlInvocation(invocation pluginControlInvocation, callErr error, now time.Time) {
 	if rt == nil || !invocation.tracked {
 		return
 	}
@@ -196,7 +196,7 @@ func boundedPluginControlHealthError(message string) string {
 	return message[:pluginControlMaxLogMessageBytes] + "...<truncated>"
 }
 
-func (rt *gojaPluginControlRuntime) pluginControlHealthSnapshot(pluginID string) PluginControlHealthState {
+func (rt *pluginControlManager) pluginControlHealthSnapshot(pluginID string) PluginControlHealthState {
 	health := PluginControlHealthState{Status: "healthy"}
 	if rt == nil {
 		return health
@@ -249,7 +249,7 @@ func (rt *gojaPluginControlRuntime) pluginControlHealthSnapshot(pluginID string)
 	return health
 }
 
-func (rt *gojaPluginControlRuntime) reconcilePluginControlCircuits(previous, current map[string]LoadedPlugin) {
+func (rt *pluginControlManager) reconcilePluginControlCircuits(previous, current map[string]LoadedPlugin) {
 	if rt == nil {
 		return
 	}
@@ -288,7 +288,7 @@ func pluginControlCircuitSnapshot(circuit *pluginControlCircuitRuntime, now time
 	return state
 }
 
-func (rt *gojaPluginControlRuntime) clearPluginControlCircuits(pluginID string) {
+func (rt *pluginControlManager) clearPluginControlCircuits(pluginID string) {
 	if rt == nil {
 		return
 	}
@@ -301,7 +301,7 @@ func (rt *gojaPluginControlRuntime) clearPluginControlCircuits(pluginID string) 
 	rt.circuitMu.Unlock()
 }
 
-func (rt *gojaPluginControlRuntime) clearAllPluginControlCircuits() {
+func (rt *pluginControlManager) clearAllPluginControlCircuits() {
 	if rt == nil {
 		return
 	}

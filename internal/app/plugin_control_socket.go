@@ -624,7 +624,7 @@ func (r *pluginControlSocketRegistry) TransferPluginGeneration(plugin LoadedPlug
 				return 0, fmt.Errorf("socket %s is no longer allowed in namespace %s", info.Handle, info.Namespace)
 			}
 		}
-		if info.Watch != nil && !pluginControlHasPermission(plugin, "worker") {
+		if info.Watch != nil && !pluginHandlesAsyncEvents(plugin) {
 			return 0, fmt.Errorf("socket %s watcher requires retained worker permission", info.Handle)
 		}
 		entries = append(entries, entry)

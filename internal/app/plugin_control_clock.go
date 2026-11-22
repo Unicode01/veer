@@ -1,14 +1,14 @@
 package app
 
 import (
-	"github.com/dop251/goja"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 )
 
 // ebpfMonotonicMs implements ebpf.monotonicMs(): CLOCK_MONOTONIC in
 // milliseconds, the clock bpf_ktime_get_ns() reads, so control scripts can
 // compare it with ktime nanoseconds an eBPF program stored (divided by 1e6).
 // The value may carry a fractional part.
-func (h *pluginControlHost) ebpfMonotonicMs(goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) ebpfMonotonicMs(hv.FunctionCall) hv.Value {
 	if h.registrationPhase {
 		h.throwf("ebpf.monotonicMs is unavailable during plugin registration")
 	}

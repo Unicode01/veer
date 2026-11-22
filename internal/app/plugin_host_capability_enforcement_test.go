@@ -3,10 +3,9 @@ package app
 import (
 	"database/sql"
 	"fmt"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 	"strings"
 	"testing"
-
-	"github.com/dop251/goja"
 )
 
 // pluginHostCapabilityProbeArgs gives the probe calls arguments that pass the
@@ -37,8 +36,7 @@ type pluginHostCapabilityProbeResult struct {
 
 func probePluginHostCapability(t *testing.T, db *sql.DB, permissions []string, registration bool, method string) pluginHostCapabilityProbeResult {
 	t.Helper()
-	vm := goja.New()
-	host := &pluginControlHost{vm: vm, plugin: LoadedPlugin{
+	host := &pluginControlHost{vm: hv.New(), plugin: LoadedPlugin{
 		PluginManifest: PluginManifest{ID: "probe", Control: &PluginControl{
 			Main: "control.js", Permissions: permissions,
 			// Every net_access operation is granted, so only the phase and
@@ -85,7 +83,7 @@ func probePluginHostCapability(t *testing.T, db *sql.DB, permissions []string, r
 				result = pluginHostCapabilityProbeResult{message: fmt.Sprint(recovered), panic: true}
 			}
 		}()
-		value, err := vm.RunString(script)
+		value, err := host.runTestJS(script)
 		if err != nil {
 			result = pluginHostCapabilityProbeResult{message: err.Error()}
 			return
@@ -101,7 +99,9 @@ func pluginHostCapabilityProbeUnavailable(result pluginHostCapabilityProbeResult
 	if result.panic {
 		return true
 	}
-	for _, missing := range []string{"registry is unavailable", "store is unavailable", "controller is unavailable"} {
+	// A binding that dereferences a part of the runtime the probe leaves
+	// out fails with a Go runtime error.
+	for _, missing := range []string{"registry is unavailable", "store is unavailable", "controller is unavailable", "runtime error", "panicked"} {
 		if strings.Contains(result.message, missing) {
 			return true
 		}

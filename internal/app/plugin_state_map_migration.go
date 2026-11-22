@@ -49,7 +49,7 @@ type pluginEBPFStateMigrationRuntime interface {
 	CompletePluginEBPFStateMigrations([]PluginEBPFStateMigration)
 }
 
-func (rt *gojaPluginControlRuntime) ApplyPluginEBPFStateMigrations(catalog PluginCatalog, snapshot pluginRuntimeSnapshot, migrations []PluginEBPFStateMigration) ([]PluginEBPFStateMigration, map[string]error) {
+func (rt *pluginControlManager) ApplyPluginEBPFStateMigrations(catalog PluginCatalog, snapshot pluginRuntimeSnapshot, migrations []PluginEBPFStateMigration) ([]PluginEBPFStateMigration, map[string]error) {
 	if rt == nil || len(migrations) == 0 {
 		return nil, nil
 	}
@@ -86,7 +86,7 @@ func (rt *gojaPluginControlRuntime) ApplyPluginEBPFStateMigrations(catalog Plugi
 	return completed, failures
 }
 
-func (rt *gojaPluginControlRuntime) applyPluginEBPFStateMigration(plugin LoadedPlugin, migration PluginEBPFStateMigration) error {
+func (rt *pluginControlManager) applyPluginEBPFStateMigration(plugin LoadedPlugin, migration PluginEBPFStateMigration) error {
 	started := time.Now()
 	cursor := ""
 	for batch := 1; batch <= pluginEBPFStateMigrationMaxBatches; batch++ {

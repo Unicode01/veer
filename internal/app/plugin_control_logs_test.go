@@ -31,7 +31,7 @@ exports.onAction = function () {
 `)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	plugin := loadTestPluginByID(t, cfg, "log_plugin")
-	rt := newPluginControlRuntime(openTestDB(t), cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(openTestDB(t), cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	if err := rt.ApplyPluginAction(plugin, pluginActionByIDForTest(t, plugin, "write_log"), json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("ApplyPluginAction() error = %v", err)
@@ -71,7 +71,7 @@ func TestPluginStructuredLogRateLimitAndAPI(t *testing.T) {
 }`)
 	writePluginControlScript(t, dir, "rate_logs", ``)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
-	rt := newPluginControlRuntime(openTestDB(t), cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(openTestDB(t), cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	for i := 0; i < pluginLogRateLimit+7; i++ {
 		rt.appendPluginLog(PluginLogEntry{PluginID: "rate_logs", Level: "info", Message: "entry"})
@@ -110,14 +110,14 @@ func TestPluginStructuredLogsPersistAcrossRuntimeRestart(t *testing.T) {
 	writePluginControlScript(t, dir, "persistent_logs", ``)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	first := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	first := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	first.appendPluginLog(PluginLogEntry{PluginID: "persistent_logs", Level: "info", Message: "first"})
 	first.appendPluginLog(PluginLogEntry{PluginID: "persistent_logs", Level: "error", Message: "second", Fields: map[string]any{"attempt": 2}})
 	if err := first.Close(); err != nil {
 		t.Fatalf("Close(first runtime) error = %v", err)
 	}
 
-	second := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	second := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = second.Close() })
 	pm := &ProcessManager{cfg: cfg, pluginControlRuntime: second}
 	request := func(path string) pluginLogsResponse {

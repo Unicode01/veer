@@ -2109,7 +2109,7 @@ func pluginOwnedResourceCleanupPriority(item store.PluginOwnedResource) int {
 	}
 }
 
-func (rt *gojaPluginControlRuntime) cleanupInactivePluginOwnedResources(active map[string]LoadedPlugin) map[string]error {
+func (rt *pluginControlManager) cleanupInactivePluginOwnedResources(active map[string]LoadedPlugin) map[string]error {
 	if rt == nil || rt.db == nil || rt.netAdmin == nil {
 		return nil
 	}

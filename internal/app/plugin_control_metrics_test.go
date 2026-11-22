@@ -2,14 +2,13 @@ package app
 
 import (
 	"fmt"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 	"strings"
 	"testing"
-
-	"github.com/dop251/goja"
 )
 
 func TestPluginMetricsGojaAPIValidatesAndAggregates(t *testing.T) {
-	runtime := &gojaPluginControlRuntime{pluginMetrics: make(map[string]map[string]pluginMetricSeries)}
+	runtime := &pluginControlManager{pluginMetrics: make(map[string]map[string]pluginMetricSeries)}
 	plugin := LoadedPlugin{PluginManifest: PluginManifest{
 		ID: "metric_plugin",
 		Control: &PluginControl{
@@ -17,11 +16,11 @@ func TestPluginMetricsGojaAPIValidatesAndAggregates(t *testing.T) {
 			Permissions: []string{"metrics"},
 		},
 	}}
-	host := &pluginControlHost{vm: goja.New(), runtime: runtime, plugin: plugin}
+	host := &pluginControlHost{vm: hv.New(), runtime: runtime, plugin: plugin}
 	if err := host.install(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := host.vm.RunString(`
+	if _, err := host.runTestJS(`
 metrics.counter('requests_total', {direction: 'forward'});
 metrics.counter('requests_total', 2, {direction: 'forward'});
 metrics.gauge('session_up', 1, {wan: 'wan0'});
@@ -38,28 +37,28 @@ metrics.gauge('session_up', 1, {wan: 'wan0'});
 	if metrics[1].Name != "session_up" || metrics[1].Type != pluginMetricTypeGauge || metrics[1].Value != 1 || metrics[1].Labels["wan"] != "wan0" {
 		t.Fatalf("gauge = %+v", metrics[1])
 	}
-	if _, err := host.vm.RunString(`metrics.gauge('requests_total', 1, {direction: 'forward'});`); err == nil || !strings.Contains(err.Error(), "already a counter") {
+	if _, err := host.runTestJS(`metrics.gauge('requests_total', 1, {direction: 'forward'});`); err == nil || !strings.Contains(err.Error(), "already a counter") {
 		t.Fatalf("type conflict error = %v", err)
 	}
-	if _, err := host.vm.RunString(`metrics.counter('bad name');`); err == nil || !strings.Contains(err.Error(), "must match") {
+	if _, err := host.runTestJS(`metrics.counter('bad name');`); err == nil || !strings.Contains(err.Error(), "must match") {
 		t.Fatalf("invalid name error = %v", err)
 	}
-	if _, err := host.vm.RunString(`metrics.gauge('bad_label', 1, {key: 1});`); err == nil || !strings.Contains(err.Error(), "must be a string") {
+	if _, err := host.runTestJS(`metrics.gauge('bad_label', 1, {key: 1});`); err == nil || !strings.Contains(err.Error(), "must be a string") {
 		t.Fatalf("invalid label error = %v", err)
 	}
-	if _, err := host.vm.RunString(`metrics.gauge('not_finite', Infinity);`); err == nil || !strings.Contains(err.Error(), "finite number") {
+	if _, err := host.runTestJS(`metrics.gauge('not_finite', Infinity);`); err == nil || !strings.Contains(err.Error(), "finite number") {
 		t.Fatalf("non-finite metric error = %v", err)
 	}
-	if _, err := host.vm.RunString(`metrics.counter('requests_total', -1);`); err == nil || !strings.Contains(err.Error(), "must not be negative") {
+	if _, err := host.runTestJS(`metrics.counter('requests_total', -1);`); err == nil || !strings.Contains(err.Error(), "must not be negative") {
 		t.Fatalf("negative counter error = %v", err)
 	}
-	if _, err := host.vm.RunString(`metrics.delete('requests_total', {direction: 'forward'});`); err != nil {
+	if _, err := host.runTestJS(`metrics.delete('requests_total', {direction: 'forward'});`); err != nil {
 		t.Fatal(err)
 	}
 	if metrics := runtime.pluginMetricSnapshot(plugin.ID); len(metrics) != 1 || metrics[0].Name != "session_up" {
 		t.Fatalf("metrics after delete = %+v", metrics)
 	}
-	if _, err := host.vm.RunString(`metrics.clear();`); err != nil {
+	if _, err := host.runTestJS(`metrics.clear();`); err != nil {
 		t.Fatal(err)
 	}
 	if metrics := runtime.pluginMetricSnapshot(plugin.ID); len(metrics) != 0 {
@@ -68,19 +67,19 @@ metrics.gauge('session_up', 1, {wan: 'wan0'});
 }
 
 func TestPluginMetricsPermissionIsRequired(t *testing.T) {
-	runtime := &gojaPluginControlRuntime{pluginMetrics: make(map[string]map[string]pluginMetricSeries)}
+	runtime := &pluginControlManager{pluginMetrics: make(map[string]map[string]pluginMetricSeries)}
 	plugin := LoadedPlugin{PluginManifest: PluginManifest{ID: "no_metrics", Control: &PluginControl{Main: "control.js"}}}
-	host := &pluginControlHost{vm: goja.New(), runtime: runtime, plugin: plugin}
+	host := &pluginControlHost{vm: hv.New(), runtime: runtime, plugin: plugin}
 	if err := host.install(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := host.vm.RunString(`metrics.counter('requests_total');`); err == nil || !strings.Contains(err.Error(), "permission metrics is required") {
+	if _, err := host.runTestJS(`metrics.counter('requests_total');`); err == nil || !strings.Contains(err.Error(), "permission metrics is required") {
 		t.Fatalf("permission error = %v", err)
 	}
 }
 
 func TestPluginMetricRuntimeEnforcesCardinalityLimits(t *testing.T) {
-	runtime := &gojaPluginControlRuntime{pluginMetrics: make(map[string]map[string]pluginMetricSeries)}
+	runtime := &pluginControlManager{pluginMetrics: make(map[string]map[string]pluginMetricSeries)}
 	for i := 0; i < pluginMetricMaxNamesPerPlugin; i++ {
 		name := fmt.Sprintf("metric_%d", i)
 		if _, err := runtime.updatePluginMetric("names", name, pluginMetricTypeGauge, float64(i), nil, false); err != nil {
@@ -127,7 +126,7 @@ exports.onWork = function () {
 
 	db := openTestDB(t)
 	cfg := isolatedPluginsTestConfig(&Config{PluginsDir: dir})
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	defer runtime.Close()
 	snapshot := runtime.Reconcile(loadPluginCatalogWithState(cfg, db))
 	state, ok := snapshot.stateFor("isolated_metrics")
@@ -166,7 +165,7 @@ exports.onUpgradeRestore = function () {};
 
 	db := openTestDB(t)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	defer runtime.Close()
 	assertMetricValue := func(want float64) {
 		t.Helper()
@@ -204,7 +203,7 @@ exports.onUpgradeRestore = function () {};
 }
 
 func TestClearInactivePluginMetricsRemovesRevokedPermission(t *testing.T) {
-	runtime := &gojaPluginControlRuntime{pluginMetrics: make(map[string]map[string]pluginMetricSeries)}
+	runtime := &pluginControlManager{pluginMetrics: make(map[string]map[string]pluginMetricSeries)}
 	if _, err := runtime.updatePluginMetric("active", "value", pluginMetricTypeGauge, 1, nil, false); err != nil {
 		t.Fatal(err)
 	}

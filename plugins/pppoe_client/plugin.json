@@ -2,7 +2,7 @@
   "api_version": "v1",
   "id": "pppoe_client",
   "name": "PPPoE Client",
-  "version": "1.8.2",
+  "version": "1.9.0",
   "kind": "pipeline",
   "stability": "stable",
   "description": "PPPoE WAN control and bidirectional TC pipeline integration.",
@@ -10,7 +10,15 @@
     "runtime": ">=1.0.0 <2.0.0",
     "control_api_abi": 1,
     "tc_pipeline_abi": 2,
-    "features": ["control.net_offloads.v1", "control.raw_l2", "control.typed_services.v1", "dataplane.hook_bindings.v1", "dataplane.tc_pipeline.v2", "ui.capabilities.v1"]
+    "features": [
+      "control.native.v1",
+      "control.net_offloads.v1",
+      "control.raw_l2",
+      "control.typed_services.v1",
+      "dataplane.hook_bindings.v1",
+      "dataplane.tc_pipeline.v2",
+      "ui.capabilities.v1"
+    ]
   },
   "dependencies": [
     {
@@ -19,32 +27,364 @@
     }
   ],
   "control": {
-    "main": "control.js",
-    "sha256": "fe7f0c36d34bb9fc67cb5658da669fb2eeab1652eac4091fe72d8d2c40e3ddb1",
-    "permissions": ["crypto", "ebpf.load", "ebpf.map_read", "ebpf.map_write", "hook.attach", "net.admin", "net.l2", "plugin.action", "plugin.register", "plugin.resource", "resource", "secret", "timer", "ui"],
+    "library": {
+      "x86_64-linux-gnu": {
+        "path": "lib/x86_64-linux-gnu/libpppoe_client.so"
+      },
+      "x86_64-linux-musl": {
+        "path": "lib/x86_64-linux-musl/libpppoe_client.so"
+      },
+      "aarch64-linux-gnu": {
+        "path": "lib/aarch64-linux-gnu/libpppoe_client.so"
+      },
+      "aarch64-linux-musl": {
+        "path": "lib/aarch64-linux-musl/libpppoe_client.so"
+      }
+    },
+    "worker": "shared",
+    "permissions": [
+      "crypto",
+      "ebpf.load",
+      "ebpf.map_read",
+      "ebpf.map_write",
+      "hook.attach",
+      "net.admin",
+      "net.l2",
+      "plugin.action",
+      "plugin.register",
+      "plugin.resource",
+      "resource",
+      "secret",
+      "timer",
+      "ui"
+    ],
     "net_access": [
       {
-        "interfaces": ["en*", "eth*", "veer*", "lan*", "local*", "ppp*", "tap*", "veth*", "vmbr*", "wan*"],
-        "operations": ["l2", "link.offload", "link.read", "link.state"]
+        "interfaces": [
+          "en*",
+          "eth*",
+          "veer*",
+          "lan*",
+          "local*",
+          "ppp*",
+          "tap*",
+          "veth*",
+          "vmbr*",
+          "wan*"
+        ],
+        "operations": [
+          "l2",
+          "link.offload",
+          "link.read",
+          "link.state"
+        ]
       }
     ],
     "resource_access": [
       {
         "plugin": "wan_core",
         "resource": "sessions",
-        "methods": ["create", "get", "update"]
+        "methods": [
+          "create",
+          "get",
+          "update"
+        ]
       },
       {
         "plugin": "wan_core",
         "resource": "status",
-        "methods": ["get"]
+        "methods": [
+          "get"
+        ]
       }
     ],
     "action_access": [
       {
         "plugin": "wan_core",
-        "actions": ["prepare_handoff", "apply_session"]
+        "actions": [
+          "prepare_handoff",
+          "apply_session"
+        ]
       }
-    ]
+    ],
+    "upgrade_state": true,
+    "register": {
+      "capabilities": [
+        "pppoe",
+        "raw_l2",
+        "control"
+      ],
+      "pipeline_nodes": [
+        {
+          "id": "pppoe0",
+          "description": "Logical PPPoE session node in the Veer pipeline. This does not create a Linux netdev."
+        }
+      ],
+      "ebpf_objects": [
+        {
+          "id": "pppoe_tunnel",
+          "path": "pppoe_tunnel.o",
+          "description": "Bidirectional TC stage between a physical PPPoE interface and one local Linux L3 boundary.",
+          "programs": [
+            {
+              "id": "tc_tunnel",
+              "section": "tc/veer/pre_forward",
+              "type": "tc"
+            }
+          ],
+          "when": {
+            "not_feature": "dataplane.kfuncs.handoff.v1"
+          }
+        },
+        {
+          "id": "pppoe_tunnel",
+          "path": "pppoe_tunnel-kfuncs.o",
+          "description": "Bidirectional TC stage between a physical PPPoE interface and one local Linux L3 boundary.",
+          "programs": [
+            {
+              "id": "tc_tunnel",
+              "section": "tc/veer/pre_forward",
+              "type": "tc"
+            }
+          ],
+          "when": {
+            "feature": "dataplane.kfuncs.handoff.v1"
+          }
+        }
+      ],
+      "pipeline_attach": [
+        {
+          "id": "pppoe-ingress",
+          "direction": "forward",
+          "attach": "ingress",
+          "priority": 20,
+          "program": "pppoe_tunnel:tc_tunnel",
+          "mode": "rewrite",
+          "binding_required": true
+        },
+        {
+          "id": "pppoe-egress",
+          "direction": "forward",
+          "attach": "ingress",
+          "priority": 20,
+          "program": "pppoe_tunnel:tc_tunnel",
+          "mode": "rewrite",
+          "binding_required": true
+        },
+        {
+          "id": "pppoe-local-egress",
+          "direction": "forward",
+          "attach": "egress",
+          "priority": 20,
+          "program": "pppoe_tunnel:tc_tunnel",
+          "mode": "rewrite",
+          "binding_required": true,
+          "when": {
+            "feature": "dataplane.kfuncs.handoff.v1"
+          }
+        }
+      ],
+      "resources": [
+        {
+          "id": "hook_bindings",
+          "description": "Runtime TC hook interface bindings. Records map a declared hook_id to one or more real Linux interfaces.",
+          "methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "plugin_reconcile",
+          "max_records": 16,
+          "max_record_bytes": 4096
+        },
+        {
+          "id": "profiles",
+          "description": "PPPoE account, interface, negotiation and handoff profile used by client actions.",
+          "methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "manual",
+          "max_records": 16,
+          "max_record_bytes": 8192,
+          "secret_fields": [
+            "password"
+          ]
+        },
+        {
+          "id": "l2_identities",
+          "description": "Raw-L2 source MAC and physical-interface promiscuous-mode ownership for each profile.",
+          "methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "manual",
+          "max_records": 16,
+          "max_record_bytes": 4096
+        },
+        {
+          "id": "sessions",
+          "description": "Current IPv4/IPv6 session, keepalive, redial and probe results exposed to the plugin UI.",
+          "methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "manual",
+          "max_records": 32,
+          "max_record_bytes": 16384,
+          "secret_fields": [
+            "password"
+          ]
+        },
+        {
+          "id": "wan_links",
+          "description": "Normalized WAN session state exported for wan_core and veer_core handoff.",
+          "methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "manual",
+          "max_records": 32,
+          "max_record_bytes": 32768,
+          "secret_fields": [
+            "password"
+          ]
+        },
+        {
+          "id": "tunnel_configs",
+          "description": "Last installed TC tunnel map configuration. Replayed after plugin dataplane reloads.",
+          "methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "runtime_apply",
+          "max_records": 1,
+          "max_record_bytes": 4096
+        }
+      ],
+      "actions": [
+        {
+          "id": "discover",
+          "description": "Send PADI and record the first PADO response.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 8192
+        },
+        {
+          "id": "probe_session",
+          "description": "Run discovery, open a PPPoE session, send one LCP request and optional PAP/CHAP response, then send PADT by default.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 8192
+        },
+        {
+          "id": "traffic_probe",
+          "description": "Run discovery/session setup and install the TC IPv4/IPv6-over-PPPoE tunnel without sending PADT.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 8192
+        },
+        {
+          "id": "dial",
+          "description": "Run discovery/session setup, negotiate IPCP/IPv6CP/optional DHCPv6-PD, keep the PPPoE session open, and optionally arm LCP keepalive.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 8192
+        },
+        {
+          "id": "disconnect",
+          "description": "Send PADT for the stored or provided session and clear keepalive.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 4096
+        },
+        {
+          "id": "clear_state",
+          "description": "Delete the stored last probe result.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 1024
+        },
+        {
+          "id": "debug_stats",
+          "description": "Read PPPoE tunnel dataplane counters and build-mode diagnostics.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 1024
+        },
+        {
+          "id": "traffic_stats",
+          "description": "Read the current PPPoE session inner-IP traffic counters without persisting a snapshot.",
+          "runtime_update": "runtime_query",
+          "max_payload_bytes": 1024
+        }
+      ],
+      "services": [
+        {
+          "id": "pppoe.client",
+          "version": "1.0.0",
+          "description": "PPPoE discovery, authentication, session and tunnel control service.",
+          "actions": [
+            "discover",
+            "probe_session",
+            "traffic_probe",
+            "dial",
+            "disconnect",
+            "clear_state",
+            "debug_stats",
+            "traffic_stats"
+          ],
+          "resources": [
+            "hook_bindings",
+            "profiles",
+            "l2_identities",
+            "sessions",
+            "wan_links",
+            "tunnel_configs"
+          ]
+        }
+      ],
+      "ui": {
+        "static_dir": "ui",
+        "entry": "index.html",
+        "page": "pppoe",
+        "page_title": "PPPoE",
+        "resources": [
+          {
+            "resource": "profiles",
+            "methods": [
+              "list",
+              "get",
+              "create",
+              "update"
+            ]
+          },
+          {
+            "resource": "sessions",
+            "methods": [
+              "list"
+            ]
+          }
+        ],
+        "actions": [
+          "discover",
+          "probe_session",
+          "traffic_probe",
+          "dial",
+          "disconnect",
+          "traffic_stats"
+        ]
+      }
+    }
   }
 }

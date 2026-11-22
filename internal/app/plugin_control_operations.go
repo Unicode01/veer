@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 	"github.com/Unicode01/veer/internal/store"
-	"github.com/dop251/goja"
 )
 
 const (
@@ -64,7 +64,7 @@ type pluginOperationFailRequest struct {
 	Error string          `json:"error"`
 }
 
-func (h *pluginControlHost) operationBegin(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) operationBegin(call hv.FunctionCall) hv.Value {
 	const api = "operations.begin"
 	h.requireOperationAPI(api)
 	release := h.lockPluginOperationStore(api)
@@ -130,7 +130,7 @@ func (h *pluginControlHost) operationBegin(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(h.requiredPluginOperation(operationID, api))
 }
 
-func (h *pluginControlHost) operationGet(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) operationGet(call hv.FunctionCall) hv.Value {
 	const api = "operations.get"
 	h.requireOperationAPI(api)
 	release := h.lockPluginOperationStore(api)
@@ -141,12 +141,12 @@ func (h *pluginControlHost) operationGet(call goja.FunctionCall) goja.Value {
 		h.throwf("%s: %v", api, err)
 	}
 	if item == nil {
-		return goja.Null()
+		return hv.Null()
 	}
 	return h.vm.ToValue(h.pluginOperationForScript(h.decryptPluginOperation(*item, api)))
 }
 
-func (h *pluginControlHost) operationGetByKey(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) operationGetByKey(call hv.FunctionCall) hv.Value {
 	const api = "operations.getByKey"
 	h.requireOperationAPI(api)
 	release := h.lockPluginOperationStore(api)
@@ -157,18 +157,18 @@ func (h *pluginControlHost) operationGetByKey(call goja.FunctionCall) goja.Value
 		h.throwf("%s: %v", api, err)
 	}
 	if item == nil {
-		return goja.Null()
+		return hv.Null()
 	}
 	return h.vm.ToValue(h.pluginOperationForScript(h.decryptPluginOperation(*item, api)))
 }
 
-func (h *pluginControlHost) operationList(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) operationList(call hv.FunctionCall) hv.Value {
 	const api = "operations.list"
 	h.requireOperationAPI(api)
 	release := h.lockPluginOperationStore(api)
 	defer release()
 	var request pluginOperationListRequest
-	if len(call.Arguments) > 0 && !goja.IsUndefined(call.Arguments[0]) && !goja.IsNull(call.Arguments[0]) {
+	if len(call.Arguments) > 0 && !hv.IsUndefined(call.Arguments[0]) && !hv.IsNull(call.Arguments[0]) {
 		h.exportJSONValue(call.Arguments[0], &request, api)
 	}
 	if strings.TrimSpace(request.Kind) != "" {
@@ -210,7 +210,7 @@ func (h *pluginControlHost) operationList(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(out)
 }
 
-func (h *pluginControlHost) operationClaim(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) operationClaim(call hv.FunctionCall) hv.Value {
 	const api = "operations.claim"
 	h.requireOperationAPI(api)
 	release := h.lockPluginOperationStore(api)
@@ -224,7 +224,7 @@ func (h *pluginControlHost) operationClaim(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(h.requiredPluginOperation(operationID, api))
 }
 
-func (h *pluginControlHost) operationCheckpoint(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) operationCheckpoint(call hv.FunctionCall) hv.Value {
 	const api = "operations.checkpoint"
 	h.requireOperationAPI(api)
 	release := h.lockPluginOperationStore(api)
@@ -251,7 +251,7 @@ func (h *pluginControlHost) operationCheckpoint(call goja.FunctionCall) goja.Val
 	return h.vm.ToValue(h.requiredPluginOperation(operationID, api))
 }
 
-func (h *pluginControlHost) operationComplete(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) operationComplete(call hv.FunctionCall) hv.Value {
 	const api = "operations.complete"
 	h.requireOperationAPI(api)
 	release := h.lockPluginOperationStore(api)
@@ -259,7 +259,7 @@ func (h *pluginControlHost) operationComplete(call goja.FunctionCall) goja.Value
 	operationID := h.requiredOperationID(call, 0, api)
 	expectedRevision := h.requiredOperationRevision(call, 1, api)
 	result := json.RawMessage("null")
-	if len(call.Arguments) > 2 && !goja.IsUndefined(call.Arguments[2]) {
+	if len(call.Arguments) > 2 && !hv.IsUndefined(call.Arguments[2]) {
 		result = h.normalizeOperationValue(call.Arguments[2], api+" result")
 	}
 	current := h.requiredPluginOperationRecord(operationID, api)
@@ -282,7 +282,7 @@ func (h *pluginControlHost) operationComplete(call goja.FunctionCall) goja.Value
 	return h.vm.ToValue(h.requiredPluginOperation(operationID, api))
 }
 
-func (h *pluginControlHost) operationRetry(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) operationRetry(call hv.FunctionCall) hv.Value {
 	const api = "operations.retry"
 	h.requireOperationAPI(api)
 	release := h.lockPluginOperationStore(api)
@@ -298,7 +298,7 @@ func (h *pluginControlHost) operationRetry(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(h.requiredPluginOperation(operationID, api))
 }
 
-func (h *pluginControlHost) operationFail(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) operationFail(call hv.FunctionCall) hv.Value {
 	const api = "operations.fail"
 	h.requireOperationAPI(api)
 	release := h.lockPluginOperationStore(api)
@@ -311,7 +311,7 @@ func (h *pluginControlHost) operationFail(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(h.requiredPluginOperation(operationID, api))
 }
 
-func (h *pluginControlHost) operationCancel(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) operationCancel(call hv.FunctionCall) hv.Value {
 	const api = "operations.cancel"
 	h.requireOperationAPI(api)
 	release := h.lockPluginOperationStore(api)
@@ -319,14 +319,14 @@ func (h *pluginControlHost) operationCancel(call goja.FunctionCall) goja.Value {
 	operationID := h.requiredOperationID(call, 0, api)
 	expectedRevision := h.requiredOperationRevision(call, 1, api)
 	var request pluginOperationFailRequest
-	if len(call.Arguments) > 2 && !goja.IsUndefined(call.Arguments[2]) && !goja.IsNull(call.Arguments[2]) {
+	if len(call.Arguments) > 2 && !hv.IsUndefined(call.Arguments[2]) && !hv.IsNull(call.Arguments[2]) {
 		h.exportJSONValue(call.Arguments[2], &request, api)
 	}
 	h.transitionPluginOperation(operationID, expectedRevision, "cancelled", request.Phase, request.State, request.Error, 0, api)
 	return h.vm.ToValue(h.requiredPluginOperation(operationID, api))
 }
 
-func (h *pluginControlHost) operationRemove(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) operationRemove(call hv.FunctionCall) hv.Value {
 	const api = "operations.remove"
 	h.requireOperationAPI(api)
 	release := h.lockPluginOperationStore(api)
@@ -335,10 +335,10 @@ func (h *pluginControlHost) operationRemove(call goja.FunctionCall) goja.Value {
 	if err := store.DeletePluginOperation(h.db, h.plugin.ID, operationID); err != nil {
 		h.throwf("%s: operation is missing or nonterminal: %v", api, err)
 	}
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
-func (h *pluginControlHost) operationStats(goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) operationStats(hv.FunctionCall) hv.Value {
 	const api = "operations.stats"
 	h.requireOperationAPI(api)
 	release := h.lockPluginOperationStore(api)
@@ -412,14 +412,14 @@ func (h *pluginControlHost) lockPluginOperationStore(api string) func() {
 	return secrets.operationMu.RUnlock
 }
 
-func (h *pluginControlHost) requiredOperationRequest(call goja.FunctionCall, index int, target any, api string) {
-	if len(call.Arguments) <= index || goja.IsUndefined(call.Arguments[index]) || goja.IsNull(call.Arguments[index]) {
+func (h *pluginControlHost) requiredOperationRequest(call hv.FunctionCall, index int, target any, api string) {
+	if len(call.Arguments) <= index || hv.IsUndefined(call.Arguments[index]) || hv.IsNull(call.Arguments[index]) {
 		h.throwf("%s: request is required", api)
 	}
 	h.exportJSONValue(call.Arguments[index], target, api)
 }
 
-func (h *pluginControlHost) requiredOperationID(call goja.FunctionCall, index int, api string) string {
+func (h *pluginControlHost) requiredOperationID(call hv.FunctionCall, index int, api string) string {
 	value := strings.ToLower(strings.TrimSpace(h.requiredOperationString(call, index, "operation id", api)))
 	if len(value) != 32 || !isLowerHex(value) {
 		h.throwf("%s: operation id is invalid", api)
@@ -427,8 +427,8 @@ func (h *pluginControlHost) requiredOperationID(call goja.FunctionCall, index in
 	return value
 }
 
-func (h *pluginControlHost) requiredOperationRevision(call goja.FunctionCall, index int, api string) int64 {
-	if len(call.Arguments) <= index || goja.IsUndefined(call.Arguments[index]) || goja.IsNull(call.Arguments[index]) {
+func (h *pluginControlHost) requiredOperationRevision(call hv.FunctionCall, index int, api string) int64 {
+	if len(call.Arguments) <= index || hv.IsUndefined(call.Arguments[index]) || hv.IsNull(call.Arguments[index]) {
 		h.throwf("%s: expected revision is required", api)
 	}
 	number := call.Arguments[index].ToFloat()
@@ -438,8 +438,8 @@ func (h *pluginControlHost) requiredOperationRevision(call goja.FunctionCall, in
 	return int64(number)
 }
 
-func (h *pluginControlHost) requiredOperationString(call goja.FunctionCall, index int, label, api string) string {
-	if len(call.Arguments) <= index || goja.IsUndefined(call.Arguments[index]) || goja.IsNull(call.Arguments[index]) {
+func (h *pluginControlHost) requiredOperationString(call hv.FunctionCall, index int, label, api string) string {
+	if len(call.Arguments) <= index || hv.IsUndefined(call.Arguments[index]) || hv.IsNull(call.Arguments[index]) {
 		h.throwf("%s: %s is required", api, label)
 	}
 	value := strings.TrimSpace(call.Arguments[index].String())
@@ -465,7 +465,7 @@ func (h *pluginControlHost) normalizeOperationPhase(value, api string) string {
 	return h.normalizeOperationToken(value, "phase", api)
 }
 
-func (h *pluginControlHost) normalizeOperationValue(value goja.Value, label string) json.RawMessage {
+func (h *pluginControlHost) normalizeOperationValue(value hv.Value, label string) json.RawMessage {
 	raw, err := json.Marshal(value.Export())
 	if err != nil {
 		h.throwf("%s is not JSON serializable: %v", label, err)

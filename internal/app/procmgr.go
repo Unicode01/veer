@@ -629,7 +629,7 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 	}
 	pm.initializePluginCatalogSnapshot()
 	pm.pluginControlRuntime = newPluginControlRuntime(db, cfg, pm)
-	if control, ok := pm.pluginControlRuntime.(*gojaPluginControlRuntime); ok {
+	if control, ok := pm.pluginControlRuntime.(*pluginControlManager); ok {
 		secrets, err := control.requirePluginSecretStore()
 		if err != nil {
 			_ = pm.pluginControlRuntime.Close()

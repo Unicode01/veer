@@ -5,14 +5,14 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dop251/goja"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 )
 
 const pluginControlNetBatchMaxOperations = 128
 
 type pluginControlNetBatchValue struct {
 	operation string
-	request   goja.Value
+	request   hv.Value
 }
 
 type pluginControlNetRouteBatchItem struct {
@@ -44,12 +44,12 @@ type pluginControlNetNeighBatchItem struct {
 	leaseBefore pluginNetLeaseSnapshot
 }
 
-func (h *pluginControlHost) netRouteTransaction(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netRouteTransaction(call hv.FunctionCall) hv.Value {
 	values := h.netBatchValues(call, "net.route.transaction")
 	items := make([]pluginControlNetRouteBatchItem, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		req := h.netRouteRequest(goja.FunctionCall{Arguments: []goja.Value{value.request}}, "net.route.transaction")
+		req := h.netRouteRequest(hv.FunctionCall{Arguments: []hv.Value{value.request}}, "net.route.transaction")
 		h.requireRouteNetAccess(req, "net.route.transaction")
 		key := pluginControlNetRouteLeaseKey(req)
 		if _, duplicate := seen[key]; duplicate {
@@ -61,7 +61,7 @@ func (h *pluginControlHost) netRouteTransaction(call goja.FunctionCall) goja.Val
 	return h.netRouteTransactionItems(items)
 }
 
-func (h *pluginControlHost) netRouteTransactionItems(items []pluginControlNetRouteBatchItem) goja.Value {
+func (h *pluginControlHost) netRouteTransactionItems(items []pluginControlNetRouteBatchItem) hv.Value {
 	refs := make([]pluginOwnedResourceRef, 0, len(items))
 	for _, item := range items {
 		refs = append(refs, pluginOwnedResourceRef{pluginOwnedResourceTypeRoute, pluginControlNetRouteLeaseKey(item.request)})
@@ -133,12 +133,12 @@ func (h *pluginControlHost) netRouteTransactionItems(items []pluginControlNetRou
 	return h.vm.ToValue(map[string]any{"status": "completed", "operations": len(items)})
 }
 
-func (h *pluginControlHost) netRuleTransaction(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netRuleTransaction(call hv.FunctionCall) hv.Value {
 	values := h.netBatchValues(call, "net.rule.transaction")
 	items := make([]pluginControlNetRuleBatchItem, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		req := h.netRuleRequest(goja.FunctionCall{Arguments: []goja.Value{value.request}}, "net.rule.transaction")
+		req := h.netRuleRequest(hv.FunctionCall{Arguments: []hv.Value{value.request}}, "net.rule.transaction")
 		h.requireRuleNetAccess(req, "net.rule.transaction")
 		key := pluginControlNetRuleLeaseKey(req)
 		if _, duplicate := seen[key]; duplicate {
@@ -150,7 +150,7 @@ func (h *pluginControlHost) netRuleTransaction(call goja.FunctionCall) goja.Valu
 	return h.netRuleTransactionItems(items)
 }
 
-func (h *pluginControlHost) netRuleTransactionItems(items []pluginControlNetRuleBatchItem) goja.Value {
+func (h *pluginControlHost) netRuleTransactionItems(items []pluginControlNetRuleBatchItem) hv.Value {
 	refs := make([]pluginOwnedResourceRef, 0, len(items))
 	for _, item := range items {
 		refs = append(refs, pluginOwnedResourceRef{pluginOwnedResourceTypeRule, pluginControlNetRuleLeaseKey(item.request)})
@@ -218,13 +218,13 @@ func (h *pluginControlHost) netRuleTransactionItems(items []pluginControlNetRule
 	return h.vm.ToValue(map[string]any{"status": "completed", "operations": len(items)})
 }
 
-func (h *pluginControlHost) netNeighTransaction(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netNeighTransaction(call hv.FunctionCall) hv.Value {
 	values := h.netBatchValues(call, "net.neigh.transaction")
 	items := make([]pluginControlNetNeighBatchItem, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
 		present := value.operation == "replace"
-		req := h.netNeighRequest(goja.FunctionCall{Arguments: []goja.Value{value.request}}, "net.neigh.transaction", present)
+		req := h.netNeighRequest(hv.FunctionCall{Arguments: []hv.Value{value.request}}, "net.neigh.transaction", present)
 		h.requireNetAccess("neigh.write", req.Interface, "net.neigh.transaction")
 		key := pluginControlNetNeighLeaseKey(req)
 		if _, duplicate := seen[key]; duplicate {
@@ -236,7 +236,7 @@ func (h *pluginControlHost) netNeighTransaction(call goja.FunctionCall) goja.Val
 	return h.netNeighTransactionItems(items)
 }
 
-func (h *pluginControlHost) netNeighTransactionItems(items []pluginControlNetNeighBatchItem) goja.Value {
+func (h *pluginControlHost) netNeighTransactionItems(items []pluginControlNetNeighBatchItem) hv.Value {
 	refs := make([]pluginOwnedResourceRef, 0, len(items))
 	for _, item := range items {
 		refs = append(refs, pluginOwnedResourceRef{pluginOwnedResourceTypeNeighbor, pluginControlNetNeighLeaseKey(item.request)})
@@ -353,8 +353,8 @@ func (h *pluginControlHost) requireSinglePluginNetBatchNamespace(namespaces []st
 	return selected
 }
 
-func (h *pluginControlHost) netBatchValues(call goja.FunctionCall, operation string) []pluginControlNetBatchValue {
-	if len(call.Arguments) == 0 || goja.IsUndefined(call.Arguments[0]) || goja.IsNull(call.Arguments[0]) {
+func (h *pluginControlHost) netBatchValues(call hv.FunctionCall, operation string) []pluginControlNetBatchValue {
+	if len(call.Arguments) == 0 || hv.IsUndefined(call.Arguments[0]) || hv.IsNull(call.Arguments[0]) {
 		h.throwf("%s: operations are required", operation)
 	}
 	array := call.Arguments[0].ToObject(h.vm)
@@ -362,7 +362,7 @@ func (h *pluginControlHost) netBatchValues(call goja.FunctionCall, operation str
 		h.throwf("%s: operations must be an array", operation)
 	}
 	lengthValue := h.objectField(array, "length")
-	if goja.IsUndefined(lengthValue) || goja.IsNull(lengthValue) {
+	if hv.IsUndefined(lengthValue) || hv.IsNull(lengthValue) {
 		h.throwf("%s: operations must be an array", operation)
 	}
 	length := int(lengthValue.ToInteger())
@@ -372,7 +372,7 @@ func (h *pluginControlHost) netBatchValues(call goja.FunctionCall, operation str
 	out := make([]pluginControlNetBatchValue, 0, length)
 	for i := 0; i < length; i++ {
 		value := array.Get(strconv.Itoa(i))
-		if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
+		if value == nil || hv.IsUndefined(value) || hv.IsNull(value) {
 			h.throwf("%s: operation %d is missing", operation, i)
 		}
 		item := value.ToObject(h.vm)
@@ -381,7 +381,7 @@ func (h *pluginControlHost) netBatchValues(call goja.FunctionCall, operation str
 			h.throwf("%s: operation %d op must be replace or delete", operation, i)
 		}
 		request := h.objectField(item, "request")
-		if goja.IsUndefined(request) || goja.IsNull(request) {
+		if hv.IsUndefined(request) || hv.IsNull(request) {
 			request = value
 		}
 		out = append(out, pluginControlNetBatchValue{operation: op, request: request})

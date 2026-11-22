@@ -2,24 +2,173 @@
   "api_version": "v1",
   "id": "vtolocal",
   "name": "VTap To Local",
-  "version": "1.2.3",
+  "version": "1.3.0",
   "kind": "control",
   "stability": "stable",
   "description": "Creates one Linux L3 boundary for host egress and Veer reply injection without a veth peer.",
   "compatibility": {
     "runtime": ">=1.0.0 <2.0.0",
     "control_api_abi": 1,
-    "features": ["control.net_admin", "control.typed_services.v1", "ui.capabilities.v1"]
+    "features": [
+      "control.events.v1",
+      "control.native.v1",
+      "control.net_admin",
+      "control.net_events.v1",
+      "control.typed_services.v1",
+      "ui.capabilities.v1"
+    ]
   },
   "control": {
-    "main": "control.js",
-    "sha256": "5ece4ef5a8aafd06dde8a8dbbc423b0519ee6e1adcf7f5614a78ec21513e7f0c",
-    "permissions": ["net.admin", "plugin.register", "resource", "timer", "ui"],
+    "library": {
+      "x86_64-linux-gnu": {
+        "path": "lib/x86_64-linux-gnu/libvtolocal.so"
+      },
+      "x86_64-linux-musl": {
+        "path": "lib/x86_64-linux-musl/libvtolocal.so"
+      },
+      "aarch64-linux-gnu": {
+        "path": "lib/aarch64-linux-gnu/libvtolocal.so"
+      },
+      "aarch64-linux-musl": {
+        "path": "lib/aarch64-linux-musl/libvtolocal.so"
+      }
+    },
+    "worker": "shared",
+    "permissions": [
+      "event",
+      "net.admin",
+      "plugin.register",
+      "resource",
+      "timer",
+      "ui"
+    ],
     "net_access": [
       {
-        "interfaces": ["veer*", "local*", "vtolocal*"],
-        "operations": ["addr.write", "link.create", "link.delete", "route.write"]
+        "interfaces": [
+          "veer*",
+          "local*",
+          "vtolocal*"
+        ],
+        "operations": [
+          "addr.write",
+          "link.create",
+          "link.delete",
+          "link.read",
+          "route.write"
+        ]
       }
-    ]
+    ],
+    "register": {
+      "capabilities": [
+        "vtap",
+        "local_route",
+        "net_admin",
+        "control"
+      ],
+      "handoffs": [
+        {
+          "id": "vtolocal0",
+          "description": "Single Linux L3 boundary used by host routes and the bidirectional Veer pipeline."
+        }
+      ],
+      "resources": [
+        {
+          "id": "links",
+          "description": "Local dummy interface and its route/address bindings.",
+          "methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "runtime_apply",
+          "max_records": 16,
+          "max_record_bytes": 16384
+        },
+        {
+          "id": "status",
+          "description": "Last applied local handoff status.",
+          "methods": [
+            "list",
+            "get"
+          ],
+          "control_methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "manual",
+          "max_records": 16,
+          "max_record_bytes": 16384
+        }
+      ],
+      "actions": [
+        {
+          "id": "apply",
+          "description": "Apply a vtolocal binding from payload or stored profile.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 16384
+        },
+        {
+          "id": "teardown",
+          "description": "Remove plugin-owned state and delete the dummy only when this plugin created it.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 4096
+        }
+      ],
+      "services": [
+        {
+          "id": "local.handoff",
+          "version": "1.0.0",
+          "description": "Linux-local L3 handoff and route service.",
+          "actions": [
+            "apply",
+            "teardown"
+          ],
+          "resources": [
+            "links",
+            "status"
+          ]
+        }
+      ],
+      "subscriptions": [
+        {
+          "id": "vtolocal_net",
+          "topic": "net",
+          "match": "prefix",
+          "handler": "onNetEvent",
+          "queue_size": 64
+        }
+      ],
+      "ui": {
+        "static_dir": "ui",
+        "entry": "index.html",
+        "sha256": "88aca4f4689cc39e9e572b09139cba9f5295df1eec1d8f6faf4a10a4c69b2733",
+        "page": "vtolocal",
+        "page_title": "VToLocal",
+        "resources": [
+          {
+            "resource": "links",
+            "methods": [
+              "list",
+              "create",
+              "update"
+            ]
+          },
+          {
+            "resource": "status",
+            "methods": [
+              "list"
+            ]
+          }
+        ],
+        "actions": [
+          "teardown"
+        ]
+      }
+    }
   }
 }

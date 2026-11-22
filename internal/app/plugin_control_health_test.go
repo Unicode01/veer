@@ -8,7 +8,7 @@ import (
 )
 
 func TestPluginControlCircuitIsolatesFailingHandlerAndRecovers(t *testing.T) {
-	rt := newPluginControlRuntime(nil, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(nil, pluginsEnabledTestConfig(&Config{}), nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	plugin := LoadedPlugin{PluginManifest: PluginManifest{ID: "circuit_plugin"}}
 	event := pluginControlEvent{Kind: "action", Action: &PluginAction{ID: "fail"}}

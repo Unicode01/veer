@@ -57,7 +57,9 @@ test('VPN UI only references message keys that exist', () => {
   const jobs = JSON.parse(app.match(/const jobPhases=(\[[^\]]*\])/)[1].replace(/'/g, '"'));
   jobs.forEach((state) => { if (!pageKeys.has('core.job.' + state)) missing.push('core.job.' + state); });
   Object.keys(M.drivers).forEach((id) => { if (!pageKeys.has('driver.' + id + '.description')) missing.push('driver.' + id + '.description'); });
-  const reasons = new Set([...fs.readFileSync(path.join(uiDir, '..', 'health-check.js'), 'utf8').matchAll(/reason: '([a-z_]+)'/g)].map((m) => m[1]));
+  // Probe reasons of the native control side (src/health.rs).
+  const health = fs.readFileSync(path.join(uiDir, '..', 'src', 'health.rs'), 'utf8');
+  const reasons = new Set([...health.matchAll(/\("([a-z_]+)", "|"reason": "([a-z_]+)"|"reason": if good \{ "" \} else \{ "([a-z_]+)" \}/g)].map((m) => m[1] || m[2] || m[3]));
   assert.ok(reasons.size >= 5);
   reasons.forEach((reason) => { if (!pageKeys.has('health.reason.' + reason)) missing.push('health.reason.' + reason); });
 
@@ -82,9 +84,10 @@ test('VPN form and share errors follow the page locale and default to Chinese', 
 });
 
 test('VPN page explains every error code the plugin runtime raises', () => {
-  const runtime = ['control.js', 'core-drivers.js'].map((name) => fs.readFileSync(path.join(uiDir, '..', name), 'utf8')).join('\n');
-  const codes = new Set([...runtime.matchAll(/fail\('([a-z_]+)'/g)].map((m) => m[1]));
-  for (const match of runtime.matchAll(/error_code = '([a-z_]+)'/g)) codes.add(match[1]);
+  // Error codes of the native control side (src/lib.rs, src/drivers.rs).
+  const runtime = ['lib.rs', 'drivers.rs'].map((name) => fs.readFileSync(path.join(uiDir, '..', 'src', name), 'utf8')).join('\n');
+  const codes = new Set([...runtime.matchAll(/fail\("([a-z_]+)"/g)].map((m) => m[1]));
+  for (const match of runtime.matchAll(/\["error_code"\] = json!\("([a-z_]+)"\)/g)) codes.add(match[1]);
   assert.ok(codes.size >= 25, [...codes].join(','));
   assert.ok(codes.has('core_exited'));
   const missing = [];

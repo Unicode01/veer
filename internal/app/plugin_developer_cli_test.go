@@ -13,7 +13,7 @@ import (
 
 func TestPluginDeveloperCLIInitLintAndTest(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "sample_control")
-	output := runPluginPackageCLIForTest(t, "init", "--id", "sample_control", "--name", "Sample Control", "--directory", target)
+	output := runPluginPackageCLIForTest(t, "init", "--id", "sample_control", "--name", "Sample Control", "--directory", target, "--sdk-crate", pluginSDKCrateForTest(t))
 	var initialized map[string]any
 	if err := json.Unmarshal(output, &initialized); err != nil {
 		t.Fatal(err)
@@ -21,10 +21,10 @@ func TestPluginDeveloperCLIInitLintAndTest(t *testing.T) {
 	if initialized["plugin_id"] != "sample_control" || initialized["kind"] != "control" {
 		t.Fatalf("init output = %+v", initialized)
 	}
-	if commands, ok := initialized["next_commands"].([]any); !ok || len(commands) != 2 {
+	if commands, ok := initialized["next_commands"].([]any); !ok || len(commands) != 4 {
 		t.Fatalf("init next commands = %#v", initialized["next_commands"])
 	}
-	for _, name := range []string{pluginManifestFile, "control.js"} {
+	for _, name := range []string{pluginManifestFile, "Cargo.toml", filepath.Join("src", "lib.rs")} {
 		if info, err := os.Stat(filepath.Join(target, name)); err != nil || !info.Mode().IsRegular() {
 			t.Fatalf("generated %s info = %+v, error = %v", name, info, err)
 		}
@@ -72,9 +72,18 @@ func TestPluginDeveloperCLIInitLintAndTest(t *testing.T) {
 	if _, err := runPluginPackageCLIWithError("test", "--source", target, "--format", "yaml"); err == nil || !strings.Contains(err.Error(), "json or text") {
 		t.Fatalf("invalid output format error = %v", err)
 	}
-	if _, err := runPluginPackageCLIWithError("init", "--id", "sample_control", "--directory", target); err == nil || !strings.Contains(err.Error(), "already exists") {
+	if _, err := runPluginPackageCLIWithError("init", "--id", "sample_control", "--directory", target, "--sdk-crate", pluginSDKCrateForTest(t)); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("repeat init error = %v", err)
 	}
+}
+
+func pluginSDKCrateForTest(t *testing.T) string {
+	t.Helper()
+	crate, err := filepath.Abs(filepath.Join("..", "..", "sdk", "native", "rust", "veer-plugin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return crate
 }
 
 func TestPluginPackageCLIUsageListsAllPluginKinds(t *testing.T) {
@@ -124,18 +133,18 @@ func TestPluginDeveloperCLIInitPipelineCopiesSDK(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "sample_pipeline")
 	initOutput := runPluginPackageCLIForTest(t,
 		"init", "--id", "sample_pipeline", "--kind", "pipeline", "--directory", target,
-		"--sdk-include", filepath.Join(repoRoot, "plugins", "include"),
+		"--sdk-include", filepath.Join(repoRoot, "plugins", "include"), "--sdk-crate", pluginSDKCrateForTest(t),
 	)
 	var initialized struct {
 		NextCommands [][]string `json:"next_commands"`
 	}
-	if err := json.Unmarshal(initOutput, &initialized); err != nil || len(initialized.NextCommands) != 3 {
+	if err := json.Unmarshal(initOutput, &initialized); err != nil || len(initialized.NextCommands) != 5 {
 		t.Fatalf("pipeline init next commands = %#v, error = %v", initialized.NextCommands, err)
 	}
-	if command := strings.Join(initialized.NextCommands[1], " "); !strings.Contains(command, "--os linux") || !strings.Contains(command, "--kernel 6.6.0") {
+	if command := strings.Join(initialized.NextCommands[3], " "); !strings.Contains(command, "--os linux") || !strings.Contains(command, "--kernel 6.6.0") {
 		t.Fatalf("pipeline test next command = %q", command)
 	}
-	for _, name := range []string{pluginManifestFile, "control.js", "main.bpf.c", filepath.Join("include", "veer_plugin_helpers.h")} {
+	for _, name := range []string{pluginManifestFile, "Cargo.toml", filepath.Join("src", "lib.rs"), "main.bpf.c", filepath.Join("include", "veer_plugin_helpers.h")} {
 		if info, err := os.Stat(filepath.Join(target, name)); err != nil || !info.Mode().IsRegular() {
 			t.Fatalf("generated %s info = %+v, error = %v", name, info, err)
 		}
@@ -150,7 +159,7 @@ func TestPluginDeveloperCLIInitPipelineCopiesSDK(t *testing.T) {
 func TestPluginDeveloperCLIInitUI(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "sample_ui")
 	output := runPluginPackageCLIForTest(t,
-		"init", "--id", "sample_ui", "--name", "Sample <UI>", "--kind", "ui", "--directory", target,
+		"init", "--id", "sample_ui", "--name", "Sample <UI>", "--kind", "ui", "--directory", target, "--sdk-crate", pluginSDKCrateForTest(t),
 	)
 	var initialized map[string]any
 	if err := json.Unmarshal(output, &initialized); err != nil {
@@ -159,7 +168,7 @@ func TestPluginDeveloperCLIInitUI(t *testing.T) {
 	if initialized["plugin_id"] != "sample_ui" || initialized["kind"] != "ui" {
 		t.Fatalf("init output = %+v", initialized)
 	}
-	for _, name := range []string{pluginManifestFile, "control.js", filepath.Join("ui", "index.html")} {
+	for _, name := range []string{pluginManifestFile, "Cargo.toml", filepath.Join("src", "lib.rs"), filepath.Join("ui", "index.html")} {
 		if info, err := os.Stat(filepath.Join(target, name)); err != nil || !info.Mode().IsRegular() {
 			t.Fatalf("generated %s info = %+v, error = %v", name, info, err)
 		}
@@ -172,7 +181,7 @@ func TestPluginDeveloperCLIInitUI(t *testing.T) {
 	if err := json.Unmarshal(manifestData, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if manifest.Kind != "ui" || manifest.Control == nil || strings.Join(manifest.Control.Permissions, ",") != "ui" {
+	if manifest.Kind != "ui" || manifest.Control == nil || strings.Join(manifest.Control.Permissions, ",") != "metrics,ui" || manifest.Control.Register == nil || len(manifest.Control.Register.UI) == 0 {
 		t.Fatalf("generated UI manifest = %+v", manifest)
 	}
 	uiData, err := os.ReadFile(filepath.Join(target, "ui", "index.html"))
@@ -234,33 +243,6 @@ func TestPluginContractCLIExportsAndChecksCanonicalContract(t *testing.T) {
 	}
 	if result := runPluginPackageCLIForTest(t, "contract", "--output", target, "--force"); len(result) == 0 {
 		t.Fatal("forced contract write returned no result")
-	}
-
-	typesTarget := filepath.Join(t.TempDir(), "methods.d.ts")
-	typesOutput := runPluginPackageCLIForTest(t, "contract", "--types-output", typesTarget)
-	var typesWritten pluginContractCLIResult
-	if err := json.Unmarshal(typesOutput, &typesWritten); err != nil {
-		t.Fatal(err)
-	}
-	if typesWritten.Status != "written" || typesWritten.TypesPath != typesTarget {
-		t.Fatalf("contract types write = %+v", typesWritten)
-	}
-	writtenTypes, err := os.ReadFile(typesTarget)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantTypes, err := encodePluginSDKMethodTypes(pluginHostControlMethods)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(writtenTypes) != string(wantTypes) {
-		t.Fatal("generated contract method types differ from the runtime registry")
-	}
-	if _, err := runPluginPackageCLIWithError("contract", "--types-output", typesTarget); err == nil || !strings.Contains(err.Error(), "already exists") {
-		t.Fatalf("contract types overwrite error = %v", err)
-	}
-	if _, err := runPluginPackageCLIWithError("contract", "--output", target, "--types-output", typesTarget); err == nil || !strings.Contains(err.Error(), "only one") {
-		t.Fatalf("contract multiple output error = %v", err)
 	}
 
 	mismatched := currentPluginSDKAPIContract()

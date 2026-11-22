@@ -12,8 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 	"github.com/Unicode01/veer/internal/store"
-	"github.com/dop251/goja"
 )
 
 const (
@@ -48,9 +48,9 @@ const (
 	pluginEventTopicProcessState       = "process.state"
 	// pluginEventNetResync is the net.link operation that tells subscribers
 	// network events may have been lost: rebuild from the kernel state.
-	pluginEventNetResync = "resync"
-	pluginEventTopicResourceChanged    = "resource.changed"
-	pluginEventTopicPluginLifecycle    = "plugin.lifecycle"
+	pluginEventNetResync            = "resync"
+	pluginEventTopicResourceChanged = "resource.changed"
+	pluginEventTopicPluginLifecycle = "plugin.lifecycle"
 )
 
 type PluginEventSubscription struct {
@@ -172,12 +172,14 @@ type pluginControlEventSubscriptionRuntime struct {
 	lost atomic.Bool
 }
 
-func (h *pluginControlHost) eventSubscribe(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) eventSubscribe(call hv.FunctionCall) hv.Value {
 	h.requireRegistrationPermission("event", "events.subscribe")
-	if !pluginControlHasPermission(h.plugin, "worker") {
+	// JavaScript plugins handle events in a worker VM; native plugins
+	// handle them on their own instance.
+	if !pluginHandlesAsyncEvents(h.plugin) {
 		h.throwf("events.subscribe requires worker permission")
 	}
-	if len(call.Arguments) == 0 || goja.IsUndefined(call.Arguments[0]) || goja.IsNull(call.Arguments[0]) {
+	if len(call.Arguments) == 0 || hv.IsUndefined(call.Arguments[0]) || hv.IsNull(call.Arguments[0]) {
 		h.throwf("events.subscribe: spec is required")
 	}
 	var spec PluginEventSubscription
@@ -192,15 +194,15 @@ func (h *pluginControlHost) eventSubscribe(call goja.FunctionCall) goja.Value {
 		h.throwf("events.subscribe: duplicate subscription %q", spec.ID)
 	}
 	h.surface.EventSubscriptions = append(h.surface.EventSubscriptions, spec)
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
-func (h *pluginControlHost) eventPublish(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) eventPublish(call hv.FunctionCall) hv.Value {
 	h.requirePermission("event")
 	if h.registrationPhase {
 		h.throwf("events.publish is unavailable during plugin registration")
 	}
-	if len(call.Arguments) == 0 || goja.IsUndefined(call.Arguments[0]) || goja.IsNull(call.Arguments[0]) {
+	if len(call.Arguments) == 0 || hv.IsUndefined(call.Arguments[0]) || hv.IsNull(call.Arguments[0]) {
 		h.throwf("events.publish: topic is required")
 	}
 	topic := normalizePluginEventTopic(call.Arguments[0].String())
@@ -209,7 +211,7 @@ func (h *pluginControlHost) eventPublish(call goja.FunctionCall) goja.Value {
 		h.throwf("events.publish: custom topics must use %s*", prefix)
 	}
 	payload := json.RawMessage(`{}`)
-	if len(call.Arguments) > 1 && !goja.IsUndefined(call.Arguments[1]) && !goja.IsNull(call.Arguments[1]) {
+	if len(call.Arguments) > 1 && !hv.IsUndefined(call.Arguments[1]) && !hv.IsNull(call.Arguments[1]) {
 		payload = json.RawMessage(h.jsonFromValue(call.Arguments[1]))
 	}
 	if len(payload) > pluginEventMaxPayloadBytes {
@@ -218,7 +220,7 @@ func (h *pluginControlHost) eventPublish(call goja.FunctionCall) goja.Value {
 	options := struct {
 		SchemaVersion int `json:"schema_version,omitempty"`
 	}{SchemaVersion: 1}
-	if len(call.Arguments) > 2 && !goja.IsUndefined(call.Arguments[2]) && !goja.IsNull(call.Arguments[2]) {
+	if len(call.Arguments) > 2 && !hv.IsUndefined(call.Arguments[2]) && !hv.IsNull(call.Arguments[2]) {
 		h.exportJSONValue(call.Arguments[2], &options, "events.publish")
 	}
 	if options.SchemaVersion <= 0 || options.SchemaVersion > pluginSchemaMaxVersion {
@@ -234,7 +236,7 @@ func (h *pluginControlHost) eventPublish(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(result)
 }
 
-func (h *pluginControlHost) eventStats(goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) eventStats(hv.FunctionCall) hv.Value {
 	h.requirePermission("event")
 	if h.runtime == nil {
 		return h.vm.ToValue(PluginEventBusState{})
@@ -242,7 +244,7 @@ func (h *pluginControlHost) eventStats(goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(h.runtime.pluginEventBusSnapshot(h.plugin.ID))
 }
 
-func (h *pluginControlHost) eventDeadLetters(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) eventDeadLetters(call hv.FunctionCall) hv.Value {
 	h.requirePermission("event")
 	if h.registrationPhase {
 		h.throwf("events.deadLetters is unavailable during plugin registration")
@@ -251,7 +253,7 @@ func (h *pluginControlHost) eventDeadLetters(call goja.FunctionCall) goja.Value 
 	if len(call.Arguments) > 1 {
 		h.throwf("events.deadLetters accepts at most one options object")
 	}
-	if len(call.Arguments) == 1 && !goja.IsUndefined(call.Arguments[0]) && !goja.IsNull(call.Arguments[0]) {
+	if len(call.Arguments) == 1 && !hv.IsUndefined(call.Arguments[0]) && !hv.IsNull(call.Arguments[0]) {
 		var options struct {
 			Limit int `json:"limit,omitempty"`
 		}
@@ -277,7 +279,7 @@ func (h *pluginControlHost) eventDeadLetters(call goja.FunctionCall) goja.Value 
 	return h.vm.ToValue(out)
 }
 
-func (h *pluginControlHost) eventRetry(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) eventRetry(call hv.FunctionCall) hv.Value {
 	h.requirePermission("event")
 	if h.registrationPhase {
 		h.throwf("events.retry is unavailable during plugin registration")
@@ -294,7 +296,7 @@ func (h *pluginControlHost) eventRetry(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(pluginEventDeliveryPublicState(*item))
 }
 
-func (h *pluginControlHost) eventDiscard(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) eventDiscard(call hv.FunctionCall) hv.Value {
 	h.requirePermission("event")
 	if h.registrationPhase {
 		h.throwf("events.discard is unavailable during plugin registration")
@@ -323,8 +325,8 @@ func (h *pluginControlHost) eventDiscard(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(deleted)
 }
 
-func (h *pluginControlHost) eventDeliveryIDArg(call goja.FunctionCall, api string) string {
-	if len(call.Arguments) != 1 || goja.IsUndefined(call.Arguments[0]) || goja.IsNull(call.Arguments[0]) {
+func (h *pluginControlHost) eventDeliveryIDArg(call hv.FunctionCall, api string) string {
+	if len(call.Arguments) != 1 || hv.IsUndefined(call.Arguments[0]) || hv.IsNull(call.Arguments[0]) {
 		h.throwf("%s requires one delivery id", api)
 	}
 	deliveryID := strings.TrimSpace(strings.ToLower(call.Arguments[0].String()))
@@ -515,7 +517,10 @@ func validatePluginEventSubscriptions(plugin *LoadedPlugin) error {
 	if plugin == nil || len(plugin.EventSubscriptions) == 0 {
 		return nil
 	}
-	if !pluginControlHasPermission(*plugin, "event") || !pluginControlHasPermission(*plugin, "worker") {
+	if !pluginControlHasPermission(*plugin, "event") {
+		return fmt.Errorf("event subscriptions require event permission")
+	}
+	if !pluginHandlesAsyncEvents(*plugin) {
 		return fmt.Errorf("event subscriptions require event and worker permissions")
 	}
 	if len(plugin.EventSubscriptions) > pluginEventMaxSubscriptions {
@@ -536,7 +541,7 @@ func validatePluginEventSubscriptions(plugin *LoadedPlugin) error {
 	return nil
 }
 
-func (rt *gojaPluginControlRuntime) pluginByID(pluginID string) LoadedPlugin {
+func (rt *pluginControlManager) pluginByID(pluginID string) LoadedPlugin {
 	if rt == nil {
 		return LoadedPlugin{}
 	}
@@ -545,13 +550,13 @@ func (rt *gojaPluginControlRuntime) pluginByID(pluginID string) LoadedPlugin {
 	return rt.plugins[pluginID]
 }
 
-func (rt *gojaPluginControlRuntime) reconcilePluginEventSubscriptions(plugins map[string]LoadedPlugin) {
+func (rt *pluginControlManager) reconcilePluginEventSubscriptions(plugins map[string]LoadedPlugin) {
 	if rt == nil {
 		return
 	}
 	desired := make(map[string]PluginEventSubscription)
 	for pluginID, plugin := range plugins {
-		if !pluginControlHasPermission(plugin, "event") || !pluginControlHasPermission(plugin, "worker") {
+		if !pluginControlHasPermission(plugin, "event") || !pluginHandlesAsyncEvents(plugin) {
 			continue
 		}
 		for _, spec := range plugin.EventSubscriptions {
@@ -600,7 +605,7 @@ func (rt *gojaPluginControlRuntime) reconcilePluginEventSubscriptions(plugins ma
 
 // pluginNetResyncEvent builds the resync event for a network subscription:
 // on its own topic when that names one, on net.link for a prefix.
-func (rt *gojaPluginControlRuntime) pluginNetResyncEvent(sub *pluginControlEventSubscriptionRuntime, reason string) (pluginControlBusEvent, bool) {
+func (rt *pluginControlManager) pluginNetResyncEvent(sub *pluginControlEventSubscriptionRuntime, reason string) (pluginControlBusEvent, bool) {
 	if sub == nil || !pluginEventTopicRequiresNetAdmin(sub.spec.Topic) {
 		return pluginControlBusEvent{}, false
 	}
@@ -621,7 +626,7 @@ func (rt *gojaPluginControlRuntime) pluginNetResyncEvent(sub *pluginControlEvent
 
 // queuePluginNetResync queues a resync for a network subscription, or marks
 // it for one after the queue drains when the queue is full.
-func (rt *gojaPluginControlRuntime) queuePluginNetResync(sub *pluginControlEventSubscriptionRuntime, reason string) {
+func (rt *pluginControlManager) queuePluginNetResync(sub *pluginControlEventSubscriptionRuntime, reason string) {
 	event, ok := rt.pluginNetResyncEvent(sub, reason)
 	if !ok || sub.spec.Delivery == pluginEventDeliveryDurable {
 		return
@@ -634,7 +639,7 @@ func (rt *gojaPluginControlRuntime) queuePluginNetResync(sub *pluginControlEvent
 	}
 }
 
-func (rt *gojaPluginControlRuntime) runPluginEventSubscription(sub *pluginControlEventSubscriptionRuntime) {
+func (rt *pluginControlManager) runPluginEventSubscription(sub *pluginControlEventSubscriptionRuntime) {
 	var timer *time.Timer
 	var tick <-chan time.Time
 	if sub.spec.Delivery == pluginEventDeliveryDurable {
@@ -662,7 +667,23 @@ func (rt *gojaPluginControlRuntime) runPluginEventSubscription(sub *pluginContro
 			if sub.stopped.Load() {
 				return
 			}
-			rt.deliverPluginControlEvent(sub, event)
+			if sub.spec.Delivery != pluginEventDeliveryDurable && pluginUsesNativeControl(rt.pluginByID(sub.pluginID)) {
+				// A native plugin takes whatever has queued up in one
+				// message: a burst costs one round trip, not one per event.
+				batch := []pluginControlBusEvent{event}
+			drain:
+				for len(batch) < pluginEventMaxBatch {
+					select {
+					case next := <-sub.queue:
+						batch = append(batch, next)
+					default:
+						break drain
+					}
+				}
+				rt.deliverPluginControlEventBatch(sub, batch)
+			} else {
+				rt.deliverPluginControlEvent(sub, event)
+			}
 			// Events were dropped while the queue was full: once it has
 			// drained, tell the subscriber to rebuild from the kernel.
 			if len(sub.queue) == 0 && sub.lost.Swap(false) {
@@ -674,7 +695,7 @@ func (rt *gojaPluginControlRuntime) runPluginEventSubscription(sub *pluginContro
 	}
 }
 
-func (rt *gojaPluginControlRuntime) initializeDurablePluginEventSubscription(sub *pluginControlEventSubscriptionRuntime) {
+func (rt *pluginControlManager) initializeDurablePluginEventSubscription(sub *pluginControlEventSubscriptionRuntime) {
 	if rt == nil || sub == nil || sub.spec.Delivery != pluginEventDeliveryDurable {
 		return
 	}
@@ -696,7 +717,44 @@ func (rt *gojaPluginControlRuntime) initializeDurablePluginEventSubscription(sub
 	sub.deadLetters.Store(dead)
 }
 
-func (rt *gojaPluginControlRuntime) deliverPluginControlEvent(sub *pluginControlEventSubscriptionRuntime, event pluginControlBusEvent) {
+// pluginEventMaxBatch bounds how many queued events one native message carries.
+const pluginEventMaxBatch = 64
+
+// deliverPluginControlEventBatch hands a native plugin several events in one
+// message: ctx.events holds all of them, ctx.event the last.
+func (rt *pluginControlManager) deliverPluginControlEventBatch(sub *pluginControlEventSubscriptionRuntime, events []pluginControlBusEvent) {
+	plugin := rt.pluginByID(sub.pluginID)
+	accepted := make([]pluginControlBusEvent, 0, len(events))
+	for _, event := range events {
+		event.SubscriptionID = sub.spec.ID
+		switch {
+		case plugin.ID == "":
+			sub.noteResult(event.PublishedAt, fmt.Errorf("plugin is no longer active"))
+		case validatePluginEventPayload(sub.spec, event) != nil:
+			sub.noteResult(event.PublishedAt, fmt.Errorf("event contract validation before delivery: %w", validatePluginEventPayload(sub.spec, event)))
+		case !pluginEventDeliveryAllowed(plugin, event):
+			sub.noteResult(event.PublishedAt, fmt.Errorf("event delivery is no longer authorized"))
+		default:
+			accepted = append(accepted, event)
+		}
+	}
+	if len(accepted) == 0 {
+		return
+	}
+	last := accepted[len(accepted)-1]
+	vm, err := rt.getPluginControlVM(plugin, "worker", sub.spec.Worker)
+	if err == nil {
+		_, err = vm.run(plugin, pluginControlEvent{
+			Kind: "event", Payload: append(json.RawMessage(nil), last.Payload...), BusEvent: &last, BusEvents: accepted,
+			Worker: &pluginControlWorkerEvent{Name: sub.spec.Worker, Handler: sub.spec.Handler},
+		}, false)
+	}
+	for _, event := range accepted {
+		sub.noteResult(event.PublishedAt, err)
+	}
+}
+
+func (rt *pluginControlManager) deliverPluginControlEvent(sub *pluginControlEventSubscriptionRuntime, event pluginControlBusEvent) {
 	event.SubscriptionID = sub.spec.ID
 	var deliveryErr error
 	if err := validatePluginEventPayload(sub.spec, event); err != nil {
@@ -710,10 +768,14 @@ func (rt *gojaPluginControlRuntime) deliverPluginControlEvent(sub *pluginControl
 		} else {
 			vm, err := rt.getPluginControlVM(plugin, "worker", sub.spec.Worker)
 			if err == nil {
-				_, err = vm.run(plugin, pluginControlEvent{
+				request := pluginControlEvent{
 					Kind: "event", Payload: append(json.RawMessage(nil), event.Payload...), BusEvent: &event,
 					Worker: &pluginControlWorkerEvent{Name: sub.spec.Worker, Handler: sub.spec.Handler},
-				}, false)
+				}
+				if pluginUsesNativeControl(plugin) {
+					request.BusEvents = []pluginControlBusEvent{event}
+				}
+				_, err = vm.run(plugin, request, false)
 			}
 			deliveryErr = err
 		}
@@ -725,7 +787,7 @@ func (rt *gojaPluginControlRuntime) deliverPluginControlEvent(sub *pluginControl
 	rt.finishDurablePluginEventDelivery(sub, event, deliveryErr)
 }
 
-func (rt *gojaPluginControlRuntime) finishDurablePluginEventDelivery(sub *pluginControlEventSubscriptionRuntime, event pluginControlBusEvent, deliveryErr error) {
+func (rt *pluginControlManager) finishDurablePluginEventDelivery(sub *pluginControlEventSubscriptionRuntime, event pluginControlBusEvent, deliveryErr error) {
 	defer func() {
 		sub.unmarkDurableInFlight(event.DeliveryID)
 		sub.signalDurableWake()
@@ -784,7 +846,7 @@ func pluginDurableEventRetryDelay(baseMS, attempt int) time.Duration {
 	return time.Duration(delay) * time.Millisecond
 }
 
-func (rt *gojaPluginControlRuntime) enqueueDueDurablePluginEvents(sub *pluginControlEventSubscriptionRuntime) time.Duration {
+func (rt *pluginControlManager) enqueueDueDurablePluginEvents(sub *pluginControlEventSubscriptionRuntime) time.Duration {
 	if rt == nil || rt.db == nil || sub == nil || sub.stopped.Load() || sub.spec.Delivery != pluginEventDeliveryDurable {
 		return pluginEventDurableRecoveryInterval
 	}
@@ -877,7 +939,7 @@ func (sub *pluginControlEventSubscriptionRuntime) noteStoreError(err error) {
 	sub.lastMu.Unlock()
 }
 
-func (rt *gojaPluginControlRuntime) noteRetriedDeadPluginEvent(item store.PluginEventDelivery) {
+func (rt *pluginControlManager) noteRetriedDeadPluginEvent(item store.PluginEventDelivery) {
 	if rt == nil {
 		return
 	}
@@ -891,7 +953,7 @@ func (rt *gojaPluginControlRuntime) noteRetriedDeadPluginEvent(item store.Plugin
 	rt.eventMu.Unlock()
 }
 
-func (rt *gojaPluginControlRuntime) noteDiscardedPluginEvent(item store.PluginEventDelivery) {
+func (rt *pluginControlManager) noteDiscardedPluginEvent(item store.PluginEventDelivery) {
 	if rt == nil {
 		return
 	}
@@ -961,7 +1023,7 @@ func (sub *pluginControlEventSubscriptionRuntime) noteRejection(publishedAt stri
 	sub.lastMu.Unlock()
 }
 
-func (rt *gojaPluginControlRuntime) stopPluginEventSubscriptions(pluginID string) {
+func (rt *pluginControlManager) stopPluginEventSubscriptions(pluginID string) {
 	if rt == nil {
 		return
 	}
@@ -980,7 +1042,7 @@ func (rt *gojaPluginControlRuntime) stopPluginEventSubscriptions(pluginID string
 	}
 }
 
-func (rt *gojaPluginControlRuntime) stopAllPluginEventSubscriptions() {
+func (rt *pluginControlManager) stopAllPluginEventSubscriptions() {
 	if rt == nil {
 		return
 	}
@@ -996,7 +1058,7 @@ func (rt *gojaPluginControlRuntime) stopAllPluginEventSubscriptions() {
 	}
 }
 
-func (rt *gojaPluginControlRuntime) publishPluginControlEvent(publication pluginControlEventPublication) pluginControlEventPublishResult {
+func (rt *pluginControlManager) publishPluginControlEvent(publication pluginControlEventPublication) pluginControlEventPublishResult {
 	result := pluginControlEventPublishResult{}
 	if rt == nil || !validPluginEventTopic(publication.Topic) || len(publication.Payload) > pluginEventMaxPayloadBytes || !json.Valid(publication.Payload) {
 		return result
@@ -1106,7 +1168,7 @@ func (rt *gojaPluginControlRuntime) publishPluginControlEvent(publication plugin
 	return result
 }
 
-func (rt *gojaPluginControlRuntime) nextPluginEventSequence() uint64 {
+func (rt *pluginControlManager) nextPluginEventSequence() uint64 {
 	if rt == nil {
 		return 0
 	}
@@ -1174,7 +1236,7 @@ func pluginEventDeliveryAllowed(plugin LoadedPlugin, event pluginControlBusEvent
 			return true
 		}
 		return pluginControlHasPermission(plugin, "event") &&
-			pluginControlHasPermission(plugin, "worker") &&
+			pluginHandlesAsyncEvents(plugin) &&
 			pluginControlHasEventAccess(plugin, sourcePlugin, event.Topic)
 	}
 }
@@ -1251,7 +1313,7 @@ func pluginEventNetAccessAllowed(plugin LoadedPlugin, payload json.RawMessage) b
 	return allowed > 0
 }
 
-func (rt *gojaPluginControlRuntime) pluginEventBusSnapshot(pluginID string) PluginEventBusState {
+func (rt *pluginControlManager) pluginEventBusSnapshot(pluginID string) PluginEventBusState {
 	state := PluginEventBusState{}
 	if rt == nil {
 		return state
@@ -1291,7 +1353,7 @@ func (rt *gojaPluginControlRuntime) pluginEventBusSnapshot(pluginID string) Plug
 	return state
 }
 
-func (rt *gojaPluginControlRuntime) publishPluginSystemEvent(topic, targetPlugin, resourceID string, payload any) {
+func (rt *pluginControlManager) publishPluginSystemEvent(topic, targetPlugin, resourceID string, payload any) {
 	if rt == nil {
 		return
 	}
@@ -1308,7 +1370,7 @@ func (rt *gojaPluginControlRuntime) publishPluginSystemEvent(topic, targetPlugin
 	})
 }
 
-func (rt *gojaPluginControlRuntime) publishPluginResourceChanged(sourcePlugin string, plugin LoadedPlugin, resource PluginResource, operation, key string) {
+func (rt *pluginControlManager) publishPluginResourceChanged(sourcePlugin string, plugin LoadedPlugin, resource PluginResource, operation, key string) {
 	raw, _ := json.Marshal(map[string]any{
 		"plugin_id": plugin.ID, "resource_id": resource.ID, "operation": operation, "key": key,
 	})
@@ -1335,7 +1397,7 @@ func validatePluginEventContractUpgrade(previous, candidate LoadedPlugin) error 
 	return nil
 }
 
-func (rt *gojaPluginControlRuntime) publishPluginLifecycleChanges(previous, current map[string]LoadedPlugin) {
+func (rt *pluginControlManager) publishPluginLifecycleChanges(previous, current map[string]LoadedPlugin) {
 	ids := make(map[string]struct{}, len(previous)+len(current))
 	for id := range previous {
 		ids[id] = struct{}{}
@@ -1377,7 +1439,7 @@ func (pm *ProcessManager) publishPluginSystemEvent(topic, targetPlugin, resource
 	if pm == nil || pm.pluginControlRuntime == nil {
 		return
 	}
-	if rt, ok := pm.pluginControlRuntime.(*gojaPluginControlRuntime); ok {
+	if rt, ok := pm.pluginControlRuntime.(*pluginControlManager); ok {
 		rt.publishPluginSystemEvent(topic, targetPlugin, resourceID, payload)
 	}
 }
@@ -1397,7 +1459,7 @@ func (pm *ProcessManager) publishPluginSystemEventFor(topic string, build func()
 	if pm == nil || pm.pluginControlRuntime == nil {
 		return
 	}
-	rt, ok := pm.pluginControlRuntime.(*gojaPluginControlRuntime)
+	rt, ok := pm.pluginControlRuntime.(*pluginControlManager)
 	if !ok || !rt.pluginEventTopicSubscribed(topic) {
 		return
 	}
@@ -1406,7 +1468,7 @@ func (pm *ProcessManager) publishPluginSystemEventFor(topic string, build func()
 
 // pluginEventTopicSubscribed reports whether any running subscription matches
 // topic.
-func (rt *gojaPluginControlRuntime) pluginEventTopicSubscribed(topic string) bool {
+func (rt *pluginControlManager) pluginEventTopicSubscribed(topic string) bool {
 	if rt == nil {
 		return false
 	}

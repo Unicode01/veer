@@ -1,0 +1,475 @@
+package app
+
+import (
+	"encoding/hex"
+	"errors"
+	"net"
+	"strconv"
+	"strings"
+	"time"
+
+	hv "github.com/Unicode01/veer/internal/hostvalue"
+)
+
+func (h *pluginControlHost) socketOpen(call hv.FunctionCall) hv.Value {
+	const api = "net.socket.open"
+	registry := h.socketRegistryOrThrow(api)
+	obj := h.requiredObjectArg(call, 0, "request")
+	network := h.socketNetworkObjectField(obj, "network")
+	interfaceName := h.requiredUDPInterfaceObjectField(obj, "interface")
+	localIP := h.optionalIPObjectField(obj, "local_ip", "bind_ip", "source_ip")
+	remoteIP := h.requiredIPObjectField(obj, "remote_ip", "peer_ip", "dst_ip")
+	remotePort := h.requiredPortObjectField(obj, "remote_port", "peer_port", "dst_port", "port")
+	resolvedNetwork, err := pluginControlSocketResolveNetwork(network, localIP, remoteIP)
+	if err != nil {
+		h.throwf("%s: %v", api, err)
+	}
+	h.requireSocketNetworkAccess(resolvedNetwork, interfaceName, api)
+	_, operation := pluginControlSocketPermission(resolvedNetwork)
+	h.requireNetEndpointAccess(operation, interfaceName, "", remoteIP, remotePort, api)
+	namespace := h.requirePluginNetworkNamespace(h.netNamespaceObjectField(obj, api), api)
+	req := pluginControlSocketOpenRequest{
+		Network:    resolvedNetwork,
+		Namespace:  namespace,
+		Interface:  interfaceName,
+		LocalIP:    localIP,
+		LocalPort:  h.optionalPortObjectField(obj, 0, "local_port", "bind_port", "source_port"),
+		RemoteIP:   remoteIP,
+		RemotePort: remotePort,
+		Timeout:    h.socketTimeoutObjectField(obj, api),
+		KeepAlive:  h.socketKeepAliveObjectField(obj, api),
+		NoDelay:    h.socketNoDelayObjectField(obj),
+	}
+	info, err := registry.Open(h.plugin.ID, h.controlGeneration, req)
+	if err != nil {
+		h.throwf("%s: %v", api, err)
+	}
+	return h.vm.ToValue(pluginControlSocketInfoObject(info))
+}
+
+func (h *pluginControlHost) socketListen(call hv.FunctionCall) hv.Value {
+	const api = "net.socket.listen"
+	registry := h.socketRegistryOrThrow(api)
+	obj := h.requiredObjectArg(call, 0, "request")
+	network := h.socketNetworkObjectField(obj, "network")
+	interfaceName := h.requiredUDPInterfaceObjectField(obj, "interface")
+	localIP := h.optionalIPObjectField(obj, "local_ip", "bind_ip")
+	resolvedNetwork, err := pluginControlSocketResolveNetwork(network, localIP, nil)
+	if err != nil {
+		h.throwf("%s: %v", api, err)
+	}
+	h.requireSocketNetworkAccess(resolvedNetwork, interfaceName, api)
+	namespace := h.requirePluginNetworkNamespace(h.netNamespaceObjectField(obj, api), api)
+	req := pluginControlSocketListenRequest{
+		Network:   resolvedNetwork,
+		Namespace: namespace,
+		Interface: interfaceName,
+		LocalIP:   localIP,
+		LocalPort: h.requiredPortObjectField(obj, "local_port", "bind_port", "port"),
+		KeepAlive: h.socketKeepAliveObjectField(obj, api),
+		NoDelay:   h.socketNoDelayObjectField(obj),
+	}
+	info, err := registry.Listen(h.plugin.ID, h.controlGeneration, req)
+	if err != nil {
+		h.throwf("%s: %v", api, err)
+	}
+	return h.vm.ToValue(pluginControlSocketInfoObject(info))
+}
+
+func (h *pluginControlHost) socketAccept(call hv.FunctionCall) hv.Value {
+	const api = "net.socket.accept"
+	registry := h.socketRegistryOrThrow(api)
+	obj := h.requiredObjectArg(call, 0, "request")
+	handle := h.requiredStringObjectField(obj, "handle")
+	info := h.socketInfoForAccess(registry, handle, api)
+	if !pluginControlSocketIsTCP(info.Network) || info.Kind != "listener" {
+		h.throwf("%s: socket %s is not a TCP listener", api, handle)
+	}
+	accepted, timedOut, err := registry.Accept(h.plugin.ID, h.controlGeneration, handle, h.socketTimeoutObjectField(obj, api))
+	if err != nil {
+		h.throwf("%s: %v", api, err)
+	}
+	if timedOut {
+		return h.vm.ToValue(map[string]any{"timeout": true})
+	}
+	remoteIP, remotePort, ok := pluginControlSocketRemoteEndpoint(accepted.RemoteAddr)
+	if !ok {
+		_, _ = registry.Close(h.plugin.ID, h.controlGeneration, accepted.Handle)
+		h.throwf("%s: accepted socket returned an invalid remote endpoint", api)
+	}
+	_, operation := pluginControlSocketPermission(accepted.Network)
+	if _, accessErr := pluginControlNetEndpointPolicyFor(h.plugin, operation, accepted.Interface, "", remoteIP, remotePort); accessErr != nil {
+		_, _ = registry.Close(h.plugin.ID, h.controlGeneration, accepted.Handle)
+		h.throwf("%s: %v", api, accessErr)
+	}
+	return h.vm.ToValue(pluginControlSocketInfoObject(accepted))
+}
+
+func (h *pluginControlHost) socketRead(call hv.FunctionCall) hv.Value {
+	const api = "net.socket.read"
+	registry := h.socketRegistryOrThrow(api)
+	obj := h.requiredObjectArg(call, 0, "request")
+	handle := h.requiredStringObjectField(obj, "handle")
+	info := h.socketInfoForAccess(registry, handle, api)
+	maxBytes := 64 << 10
+	if raw := h.objectField(obj, "max_bytes"); !hv.IsUndefined(raw) && !hv.IsNull(raw) {
+		value := raw.ToInteger()
+		if value <= 0 || value > pluginControlSocketMaxPayload {
+			h.throwf("%s: max_bytes must be between 1 and %d", api, pluginControlSocketMaxPayload)
+		}
+		maxBytes = int(value)
+	}
+	result, err := registry.Read(h.plugin.ID, h.controlGeneration, handle, maxBytes, h.socketTimeoutObjectField(obj, api))
+	if err != nil {
+		h.throwf("%s: %v", api, err)
+	}
+	if result.RemoteAddr != nil {
+		remoteIP, remotePort, ok := pluginControlSocketRemoteEndpoint(result.RemoteAddr.String())
+		if !ok {
+			_, _ = registry.Close(h.plugin.ID, h.controlGeneration, handle)
+			h.throwf("%s: datagram socket returned an invalid remote endpoint", api)
+		}
+		_, operation := pluginControlSocketPermission(info.Network)
+		if _, accessErr := pluginControlNetEndpointPolicyFor(h.plugin, operation, info.Interface, "", remoteIP, remotePort); accessErr != nil {
+			_, _ = registry.Close(h.plugin.ID, h.controlGeneration, handle)
+			h.throwf("%s: %v", api, accessErr)
+		}
+	}
+	out := map[string]any{
+		"payload_hex": hex.EncodeToString(result.Payload),
+		"bytes":       len(result.Payload),
+		"timeout":     result.Timeout,
+		"eof":         result.EOF,
+	}
+	pluginControlSocketAddrObject(out, "remote", result.RemoteAddr)
+	return h.vm.ToValue(out)
+}
+
+func (h *pluginControlHost) socketWrite(call hv.FunctionCall) hv.Value {
+	const api = "net.socket.write"
+	registry := h.socketRegistryOrThrow(api)
+	obj := h.requiredObjectArg(call, 0, "request")
+	handle := h.requiredStringObjectField(obj, "handle")
+	info := h.socketInfoForAccess(registry, handle, api)
+	payload := h.socketPayloadObjectField(obj, api)
+	var remoteAddr net.Addr
+	remoteIP := h.optionalIPObjectField(obj, "remote_ip", "peer_ip", "dst_ip")
+	remotePort := h.optionalPortObjectField(obj, 0, "remote_port", "peer_port", "dst_port", "port")
+	if remoteIP != nil || remotePort > 0 {
+		if !pluginControlSocketIsUDP(info.Network) {
+			h.throwf("%s: remote address is supported only for UDP datagram listeners", api)
+		}
+		if remoteIP == nil || remotePort <= 0 {
+			h.throwf("%s: remote_ip and remote_port must be provided together", api)
+		}
+		if _, err := pluginControlSocketResolveNetwork(info.Network, nil, remoteIP); err != nil {
+			h.throwf("%s: %v", api, err)
+		}
+		remoteAddr = &net.UDPAddr{IP: remoteIP, Port: remotePort}
+		_, operation := pluginControlSocketPermission(info.Network)
+		h.requireNetEndpointAccess(operation, info.Interface, "", remoteIP, remotePort, api)
+	}
+	result, err := registry.Write(h.plugin.ID, h.controlGeneration, handle, pluginControlSocketWriteRequest{
+		Payload:    payload,
+		RemoteAddr: remoteAddr,
+		Timeout:    h.socketTimeoutObjectField(obj, api),
+	})
+	if err != nil {
+		h.throwf("%s: %v", api, err)
+	}
+	return h.vm.ToValue(map[string]any{"bytes": result.Bytes})
+}
+
+func (h *pluginControlHost) socketClose(call hv.FunctionCall) hv.Value {
+	const api = "net.socket.close"
+	registry := h.socketRegistryOrThrow(api)
+	h.requireAnySocketPermission(api)
+	obj := h.requiredObjectArg(call, 0, "request")
+	handle := h.requiredStringObjectField(obj, "handle")
+	if info, err := registry.Info(h.plugin.ID, h.controlGeneration, handle); err == nil {
+		h.requireSocketInfoAccess(info, api)
+	} else if !errors.Is(err, errPluginControlSocketNotFound) {
+		h.throwf("%s: %v", api, err)
+	}
+	closed, err := registry.Close(h.plugin.ID, h.controlGeneration, handle)
+	if err != nil {
+		h.throwf("%s: %v", api, err)
+	}
+	return h.vm.ToValue(map[string]any{"closed": closed})
+}
+
+func (h *pluginControlHost) socketStatus(call hv.FunctionCall) hv.Value {
+	const api = "net.socket.status"
+	registry := h.socketRegistryOrThrow(api)
+	obj := h.requiredObjectArg(call, 0, "request")
+	handle := h.requiredStringObjectField(obj, "handle")
+	info := h.socketInfoForAccess(registry, handle, api)
+	return h.vm.ToValue(pluginControlSocketInfoObject(info))
+}
+
+func (h *pluginControlHost) socketList(call hv.FunctionCall) hv.Value {
+	const api = "net.socket.list"
+	registry := h.socketRegistryOrThrow(api)
+	h.requireAnySocketPermission(api)
+	infos := registry.List(h.plugin.ID, h.controlGeneration)
+	out := make([]map[string]any, 0, len(infos))
+	for _, info := range infos {
+		permission, operation := pluginControlSocketPermission(info.Network)
+		if !pluginControlHasPermission(h.plugin, permission) || !pluginControlHasNetAccess(h.plugin, operation, info.Interface) {
+			continue
+		}
+		if info.Namespace != "host" && (!pluginControlHasPermission(h.plugin, "net.namespace") || !pluginControlHasNamespaceAccess(h.plugin, info.Namespace)) {
+			continue
+		}
+		out = append(out, pluginControlSocketInfoObject(info))
+	}
+	return h.vm.ToValue(out)
+}
+
+func (h *pluginControlHost) socketWatch(call hv.FunctionCall) hv.Value {
+	const api = "net.socket.watch"
+	h.requirePermission("worker")
+	registry := h.socketRegistryOrThrow(api)
+	obj := h.requiredObjectArg(call, 0, "request")
+	handle := h.requiredStringObjectField(obj, "handle")
+	h.socketInfoForAccess(registry, handle, api)
+	worker, err := pluginPathToken(h.requiredStringObjectField(obj, "worker"))
+	if err != nil {
+		h.throwf("%s: worker: %v", api, err)
+	}
+	handler := strings.TrimSpace(h.requiredStringObjectField(obj, "handler"))
+	if !validPluginControlHandlerName(handler) {
+		h.throwf("%s: handler contains invalid handler name", api)
+	}
+	maxBytes := pluginControlSocketWatchDefaultBytes
+	if raw := h.objectField(obj, "max_bytes"); !hv.IsUndefined(raw) && !hv.IsNull(raw) {
+		value := raw.ToInteger()
+		if value < 1 || value > pluginControlSocketMaxPayload {
+			h.throwf("%s: max_bytes must be between 1 and %d", api, pluginControlSocketMaxPayload)
+		}
+		maxBytes = int(value)
+	}
+	info, err := registry.Watch(h.plugin.ID, h.controlGeneration, handle, pluginControlSocketWatchSpec{
+		Worker: worker, Handler: handler, MaxBytes: maxBytes,
+	}, h.runtime.deliverPluginControlSocketEvent)
+	if err != nil {
+		h.throwf("%s: %v", api, err)
+	}
+	return h.vm.ToValue(pluginControlSocketWatchInfoObject(info))
+}
+
+func (h *pluginControlHost) socketUnwatch(call hv.FunctionCall) hv.Value {
+	const api = "net.socket.unwatch"
+	h.requirePermission("worker")
+	registry := h.socketRegistryOrThrow(api)
+	obj := h.requiredObjectArg(call, 0, "request")
+	handle := h.requiredStringObjectField(obj, "handle")
+	if info, err := registry.Info(h.plugin.ID, h.controlGeneration, handle); err == nil {
+		h.requireSocketInfoAccess(info, api)
+	} else if !errors.Is(err, errPluginControlSocketNotFound) {
+		h.throwf("%s: %v", api, err)
+	}
+	stopped, err := registry.Unwatch(h.plugin.ID, h.controlGeneration, handle)
+	if err != nil {
+		h.throwf("%s: %v", api, err)
+	}
+	return h.vm.ToValue(map[string]any{"stopped": stopped})
+}
+
+func (h *pluginControlHost) socketWatchList(call hv.FunctionCall) hv.Value {
+	const api = "net.socket.watchList"
+	h.requirePermission("worker")
+	registry := h.socketRegistryOrThrow(api)
+	h.requireAnySocketPermission(api)
+	infos := registry.List(h.plugin.ID, h.controlGeneration)
+	out := make([]map[string]any, 0)
+	for _, info := range infos {
+		if info.Watch == nil {
+			continue
+		}
+		permission, operation := pluginControlSocketPermission(info.Network)
+		if !pluginControlHasPermission(h.plugin, permission) || !pluginControlHasNetAccess(h.plugin, operation, info.Interface) {
+			continue
+		}
+		out = append(out, map[string]any{
+			"handle": info.Handle, "watch": pluginControlSocketWatchInfoObject(*info.Watch),
+		})
+	}
+	return h.vm.ToValue(out)
+}
+
+func (h *pluginControlHost) socketRegistryOrThrow(api string) *pluginControlSocketRegistry {
+	if h.runtime == nil || h.runtime.socketRegistry == nil {
+		h.throwf("%s: persistent socket registry is unavailable", api)
+	}
+	return h.runtime.socketRegistry
+}
+
+func (h *pluginControlHost) socketInfoForAccess(registry *pluginControlSocketRegistry, handle string, api string) pluginControlSocketInfo {
+	info, err := registry.Info(h.plugin.ID, h.controlGeneration, handle)
+	if err != nil {
+		h.throwf("%s: %v", api, err)
+	}
+	h.requireSocketInfoAccess(info, api)
+	return info
+}
+
+func (h *pluginControlHost) requireSocketInfoAccess(info pluginControlSocketInfo, api string) {
+	h.requireSocketNetworkAccess(info.Network, info.Interface, api)
+	h.requirePluginNetworkNamespace(info.Namespace, api)
+}
+
+func (h *pluginControlHost) requireSocketNetworkAccess(network string, interfaceName string, api string) {
+	permission, operation := pluginControlSocketPermission(network)
+	h.requirePermission(permission)
+	h.requireNetAccess(operation, interfaceName, api)
+}
+
+func (h *pluginControlHost) requireAnySocketPermission(api string) {
+	if pluginControlHasPermission(h.plugin, "net.tcp") {
+		h.requirePermission("net.tcp")
+		return
+	}
+	if pluginControlHasPermission(h.plugin, "net.udp") {
+		h.requirePermission("net.udp")
+		return
+	}
+	h.throwf("%s: permission net.tcp or net.udp is required", api)
+}
+
+func pluginControlSocketPermission(network string) (string, string) {
+	if pluginControlSocketIsTCP(network) {
+		return "net.tcp", "tcp"
+	}
+	return "net.udp", "udp"
+}
+
+func (h *pluginControlHost) socketNetworkObjectField(obj *hv.Object, field string) string {
+	network, err := normalizePluginControlSocketNetwork(h.requiredStringObjectField(obj, field))
+	if err != nil {
+		h.throwf("%s: %v", field, err)
+	}
+	return network
+}
+
+func (h *pluginControlHost) socketTimeoutObjectField(obj *hv.Object, api string) time.Duration {
+	timeout := pluginControlSocketDefaultTimeout
+	if raw := h.objectField(obj, "timeout_ms"); !hv.IsUndefined(raw) && !hv.IsNull(raw) {
+		milliseconds := raw.ToInteger()
+		if milliseconds <= 0 || milliseconds > pluginControlSocketMaxTimeout.Milliseconds() {
+			h.throwf("%s: timeout_ms must be between 1 and %d", api, pluginControlSocketMaxTimeout.Milliseconds())
+		}
+		timeout = time.Duration(milliseconds) * time.Millisecond
+	}
+	return h.boundedTransportTimeout(timeout, api)
+}
+
+func (h *pluginControlHost) socketKeepAliveObjectField(obj *hv.Object, api string) time.Duration {
+	raw := h.objectField(obj, "keepalive_ms")
+	if hv.IsUndefined(raw) || hv.IsNull(raw) {
+		return 0
+	}
+	milliseconds := raw.ToInteger()
+	if milliseconds < 0 || milliseconds > (24*time.Hour).Milliseconds() {
+		h.throwf("%s: keepalive_ms must be between 0 and %d", api, (24 * time.Hour).Milliseconds())
+	}
+	return time.Duration(milliseconds) * time.Millisecond
+}
+
+func (h *pluginControlHost) socketNoDelayObjectField(obj *hv.Object) bool {
+	raw := h.objectField(obj, "no_delay")
+	if hv.IsUndefined(raw) || hv.IsNull(raw) {
+		return true
+	}
+	return raw.ToBoolean()
+}
+
+func (h *pluginControlHost) socketPayloadObjectField(obj *hv.Object, api string) []byte {
+	raw := h.objectField(obj, "payload_hex")
+	if hv.IsUndefined(raw) || hv.IsNull(raw) {
+		raw = h.objectField(obj, "payload")
+	}
+	if hv.IsUndefined(raw) || hv.IsNull(raw) {
+		h.throwf("%s: payload_hex is required", api)
+	}
+	encoded := strings.TrimSpace(raw.String())
+	if len(encoded) > pluginControlSocketMaxPayload*3+2 {
+		h.throwf("%s: encoded payload exceeds the %d-byte limit", api, pluginControlSocketMaxPayload)
+	}
+	payload, err := decodePluginControlHexBytes(encoded)
+	if err != nil {
+		h.throwf("%s: payload_hex: %v", api, err)
+	}
+	if len(payload) > pluginControlSocketMaxPayload {
+		h.throwf("%s: payload exceeds %d bytes", api, pluginControlSocketMaxPayload)
+	}
+	return payload
+}
+
+func pluginControlSocketInfoObject(info pluginControlSocketInfo) map[string]any {
+	out := map[string]any{
+		"handle":        info.Handle,
+		"network":       info.Network,
+		"kind":          info.Kind,
+		"namespace":     normalizePluginControlNamespace(info.Namespace),
+		"interface":     info.Interface,
+		"state":         info.State,
+		"bytes_read":    info.BytesRead,
+		"bytes_written": info.BytesWritten,
+		"created_at":    info.CreatedAt.UTC().Format(time.RFC3339Nano),
+	}
+	if info.ParentHandle != "" {
+		out["parent_handle"] = info.ParentHandle
+	}
+	if info.LastError != "" {
+		out["last_error"] = info.LastError
+	}
+	if info.Watch != nil {
+		out["watch"] = pluginControlSocketWatchInfoObject(*info.Watch)
+	}
+	if !info.LastReadAt.IsZero() {
+		out["last_read_at"] = info.LastReadAt.UTC().Format(time.RFC3339Nano)
+	}
+	if !info.LastWriteAt.IsZero() {
+		out["last_write_at"] = info.LastWriteAt.UTC().Format(time.RFC3339Nano)
+	}
+	pluginControlSocketAddrStringObject(out, "local", info.LocalAddr)
+	pluginControlSocketAddrStringObject(out, "remote", info.RemoteAddr)
+	return out
+}
+
+func pluginControlSocketWatchInfoObject(info pluginControlSocketWatchInfo) map[string]any {
+	out := map[string]any{
+		"worker": info.Worker, "handler": info.Handler, "max_bytes": info.MaxBytes,
+		"events": info.Events, "rejected": info.Rejected,
+	}
+	if !info.LastEventAt.IsZero() {
+		out["last_event_at"] = info.LastEventAt.UTC().Format(time.RFC3339Nano)
+	}
+	if info.LastError != "" {
+		out["last_error"] = info.LastError
+	}
+	return out
+}
+
+func pluginControlSocketAddrObject(out map[string]any, prefix string, addr net.Addr) {
+	if addr == nil {
+		return
+	}
+	pluginControlSocketAddrStringObject(out, prefix, addr.String())
+}
+
+func pluginControlSocketAddrStringObject(out map[string]any, prefix string, address string) {
+	if strings.TrimSpace(address) == "" {
+		return
+	}
+	out[prefix+"_addr"] = address
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return
+	}
+	out[prefix+"_ip"] = host
+	if port, err := strconv.Atoi(portText); err == nil {
+		out[prefix+"_port"] = port
+	}
+}

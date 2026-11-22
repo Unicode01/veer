@@ -130,7 +130,7 @@ assert_minimum() {
 }
 
 run_portable() {
-	for command_name in go node npm npx python3 sh tar cmp govulncheck; do
+	for command_name in go node npm npx python3 sh tar cmp govulncheck cargo; do
 		require_command "$command_name"
 	done
 	new_temp_dir
@@ -138,6 +138,11 @@ run_portable() {
 	log "Go module integrity"
 	(cd "$ROOT_DIR" && go mod verify && go mod tidy -diff)
 
+	log "Rust plugin SDK, worker and bundled plugin tests"
+	(cd "$ROOT_DIR" && cargo test --workspace)
+
+	# Plugins are native: on Linux build-all-ebpf.sh also builds the worker
+	# veer embeds and the bundled plugins' libraries (plugins/<id>/lib/).
 	prepare_portable_ebpf
 
 	log "deployment platform scripts"
@@ -153,11 +158,16 @@ run_portable() {
 	esac
 	(cd "$ROOT_DIR" && go build -trimpath -o "$verify_binary" .)
 
+	# On Linux the tests that run bundled plugins must not skip for want of
+	# a worker or library.
+	native_required=0
+	[ "$(uname -s)" = Linux ] && native_required=1
+
 	log "Go tests"
-	(cd "$ROOT_DIR" && go test ./... -count=1)
+	(cd "$ROOT_DIR" && VEER_REQUIRE_NATIVE_PLUGINS=$native_required go test ./... -count=1)
 
 	log "Go race tests"
-	(cd "$ROOT_DIR" && go test -race ./... -count=1 -timeout=15m)
+	(cd "$ROOT_DIR" && VEER_REQUIRE_NATIVE_PLUGINS=$native_required go test -race ./... -count=1 -timeout=15m)
 
 	log "Go vet"
 	(cd "$ROOT_DIR" && go vet ./...)
@@ -171,16 +181,10 @@ run_portable() {
 	log "WebUI browser tests"
 	(cd "$ROOT_DIR" && npm run test:web:e2e)
 
-	log "plugin SDK Node tests"
-	(cd "$ROOT_DIR" && node --test sdk/plugin/test-host.test.cjs)
-
-	log "PPPoE control-plane self-test"
-	(cd "$ROOT_DIR" && node plugins/pppoe_client/test-control-node.js)
-
-	log "plugin SDK TypeScript declarations"
+	log "plugin SDK WebUI TypeScript declarations"
 	(cd "$ROOT_DIR" && npx --yes --package typescript@5.9.3 tsc \
 		--noEmit --strict --skipLibCheck false --target ES2022 --moduleResolution node \
-		sdk/plugin/control.d.ts sdk/plugin/methods.d.ts sdk/plugin/webui.d.ts sdk/plugin/test-host.d.ts)
+		sdk/plugin/webui.d.ts)
 
 	log "SDK contract"
 	"$verify_binary" plugin contract --check "$ROOT_DIR/sdk/plugin/api-contract.json"
@@ -195,13 +199,18 @@ run_portable() {
 	mkdir -p "$sdk_extract"
 	tar -xzf "$sdk_archive_a" -C "$sdk_extract"
 	test -f "$sdk_extract/veer-plugin-sdk/sdk-manifest.json" || fail "plugin SDK manifest is missing"
-	test -f "$sdk_extract/veer-plugin-sdk/sdk/plugin/control.d.ts" || fail "plugin SDK control declarations are missing"
-	test -f "$sdk_extract/veer-plugin-sdk/sdk/plugin/test-host.cjs" || fail "plugin SDK test host is missing"
+	test -f "$sdk_extract/veer-plugin-sdk/sdk/native/include/veer_plugin.h" || fail "plugin SDK C ABI header is missing"
+	test -f "$sdk_extract/veer-plugin-sdk/sdk/native/rust/veer-plugin/Cargo.toml" || fail "plugin SDK Rust crate is missing"
+	test -f "$sdk_extract/veer-plugin-sdk/sdk/native/build-plugin.sh" || fail "plugin SDK library build script is missing"
+	sdk_crate="$sdk_extract/veer-plugin-sdk/sdk/native/rust/veer-plugin"
+	# The scaffolds build their library for this runner only.
+	VEER_PLUGIN_NATIVE_TARGETS=x86_64-linux-gnu
+	export VEER_PLUGIN_NATIVE_TARGETS
 	test -f "$sdk_extract/veer-plugin-sdk/plugins/include/veer_plugin_helpers.h" || fail "plugin SDK eBPF helper is missing"
 	test -f "$sdk_extract/veer-plugin-sdk/sdk/plugin/templates/plugin-ci.yml" || fail "plugin SDK CI template is missing"
 	scaffold="$TMP_DIR/plugin-sdk-scaffold"
 	"$verify_binary" plugin init --id release_gate --kind pipeline --directory "$scaffold" \
-		--sdk-include "$sdk_extract/veer-plugin-sdk/plugins/include"
+		--sdk-include "$sdk_extract/veer-plugin-sdk/plugins/include" --sdk-crate "$sdk_crate"
 	VEER_BIN="$verify_binary" \
 		sh "$sdk_extract/veer-plugin-sdk/sdk/plugin/ci/verify.sh" "$scaffold"
 	prebuilt_scaffold="$TMP_DIR/plugin-sdk-prebuilt-scaffold"
@@ -210,11 +219,11 @@ run_portable() {
 	VEER_BIN="$verify_binary" \
 		sh "$sdk_extract/veer-plugin-sdk/sdk/plugin/ci/verify.sh" "$prebuilt_scaffold"
 	control_scaffold="$TMP_DIR/plugin-sdk-control-scaffold"
-	"$verify_binary" plugin init --id release_control --kind control --directory "$control_scaffold"
+	"$verify_binary" plugin init --id release_control --kind control --directory "$control_scaffold" --sdk-crate "$sdk_crate"
 	VEER_BIN="$verify_binary" \
 		sh "$sdk_extract/veer-plugin-sdk/sdk/plugin/ci/verify.sh" "$control_scaffold"
 	ui_scaffold="$TMP_DIR/plugin-sdk-ui-scaffold"
-	"$verify_binary" plugin init --id release_ui --kind ui --directory "$ui_scaffold"
+	"$verify_binary" plugin init --id release_ui --kind ui --directory "$ui_scaffold" --sdk-crate "$sdk_crate"
 	VEER_BIN="$verify_binary" \
 		sh "$sdk_extract/veer-plugin-sdk/sdk/plugin/ci/verify.sh" "$ui_scaffold"
 
@@ -263,12 +272,14 @@ run_privileged() {
 	new_temp_dir
 	log "build eBPF objects for privileged integration"
 	sh "$ROOT_DIR/scripts/build-all-ebpf.sh"
+	log "build the native conformance plugin"
+	(cd "$ROOT_DIR" && cargo build --release -p veer-plugin-example-echo)
 	log "build privileged integration binary"
 	privileged_binary="$TMP_DIR/veer-plugin-privileged.test"
 	go test -c -o "$privileged_binary" ./internal/app
 
 	privileged_log="$TMP_DIR/privileged.log"
-	privileged_pattern='^(TestPluginHostSeccompFilterRejectsForeignABIAndBlockedSyscalls|TestPluginHostLinuxSandboxIdentityAndCgroup|TestPluginHostLinuxSandboxSupportsConcurrentHosts|TestPluginHostLinuxSandboxEnforcementProbe|TestPluginHostLinuxChrootFallbackEnforcementProbe|TestPluginHostIsolationContainsMemoryExhaustion|TestPluginHostIsolationLoadsRelativeControlModulesInMainAndWorker|TestPluginHostIsolationBrokersTypedServiceDiscoveryAndCall|TestCleanupOrphanPluginHostCgroups|TestCleanupOrphanPluginHostFilesystemRoots|TestLinuxPluginScopedNamespaceNetworkAPIs|TestEgressNATTCActiveTCPRefreshesBothFlowEntries|TestEgressNATTCNextHopCacheFollowsNeighbourChange|TestEgressNATTCFullConeSYNRetryKeepsNATPort|TestPlugin(NetPolicyProviderLinuxIntegration|NetPolicyTransactionsLinuxIntegration|MultipathRouteLinuxIntegration|NamespaceTunTapLinuxIntegration|NamespaceTunTapCrashRecoveryLinuxIntegration|NetTransactionCrashRecoveryLinuxIntegration|WANCoreLinuxIntegration|VToLocalLinuxIntegration|LANCoreLinuxIntegration|ActionApplyPersistsAndRepairsLinuxIntegration|LANCoreResolvesWANCoreStatusLinuxIntegration|ControlNetEnsureVethRejectsMismatchedExistingPeersLinuxIntegration|ControlNetOwnedLinkMACLinuxIntegration|ControlNetEnsureMacvlanLinuxIntegration|ControlNetSetGSOLinuxIntegration|ControlNetAddrReplaceIdempotentLinuxIntegration|DataplaneRuntimeAttachesTCObservePlugin|IPv6AssignmentPlanLinuxIntegration|LANCoreGeneratedEgressNATTCIntegration|LANCoreResolvesWANCoreEgressNATTCIntegration)|TestKernelPluginPipelineRuntime.*|TestKernelXDPPluginPipelineChainHotUpdateAndConflict|TestKernelXDPPluginPipelineRecoversOrphanAfterSIGKILL|TestKernelXDPPluginPipelineHotRestartHandsOffInPlace|TestKernelXDPPluginTCFallbackRunsAheadOfCore|TestKernelXDPPluginTCFallbackHotRestartHandsOffInPlace|TestKernelXDPPluginTCEgressAttachesOnBoundInterfaces|TestKernelXDPPluginTCEgressBesideNativeXDP|TestKernelXDPPluginTCEgressHotRestartHandsOffInPlace|TestPinKernelHotRestartTailCallsKeepsChainAfterLastFD|TestPluginMapHandoffKeepsPreservedMaps|TestPluginMapHandoffSkipsMapsThatDoNotMatchTheirRecord|TestPluginMapHandoffNeedsHotRestart|TestSyncKernelPluginConfigsWriteBankBeforeHeader|TestKernelNetfilterPlugin(PipelineIntegration|PriorityIntegration|NamespaceRecreateIntegration|InitialMissingNamespaceRecoversIntegration)|TestOrderedKernelRuntimeChainsXDPIntoTCPlugin)$'
+	privileged_pattern='^(TestNativePlugin.*|TestPluginHostIsolationLoadsRelativeControlModulesInMainAndWorker|TestPluginHostIsolationBrokersTypedServiceDiscoveryAndCall|TestCleanupOrphanPluginHostCgroups|TestLinuxPluginScopedNamespaceNetworkAPIs|TestEgressNATTCActiveTCPRefreshesBothFlowEntries|TestEgressNATTCNextHopCacheFollowsNeighbourChange|TestEgressNATTCFullConeSYNRetryKeepsNATPort|TestPlugin(NetPolicyProviderLinuxIntegration|NetPolicyTransactionsLinuxIntegration|MultipathRouteLinuxIntegration|NamespaceTunTapLinuxIntegration|NamespaceTunTapCrashRecoveryLinuxIntegration|NetTransactionCrashRecoveryLinuxIntegration|WANCoreLinuxIntegration|VToLocalLinuxIntegration|LANCoreLinuxIntegration|ActionApplyPersistsAndRepairsLinuxIntegration|LANCoreResolvesWANCoreStatusLinuxIntegration|ControlNetEnsureVethRejectsMismatchedExistingPeersLinuxIntegration|ControlNetOwnedLinkMACLinuxIntegration|ControlNetEnsureMacvlanLinuxIntegration|ControlNetSetGSOLinuxIntegration|ControlNetAddrReplaceIdempotentLinuxIntegration|DataplaneRuntimeAttachesTCObservePlugin|IPv6AssignmentPlanLinuxIntegration|LANCoreGeneratedEgressNATTCIntegration|LANCoreResolvesWANCoreEgressNATTCIntegration)|TestKernelPluginPipelineRuntime.*|TestKernelXDPPluginPipelineChainHotUpdateAndConflict|TestKernelXDPPluginPipelineRecoversOrphanAfterSIGKILL|TestKernelXDPPluginPipelineHotRestartHandsOffInPlace|TestKernelXDPPluginTCFallbackRunsAheadOfCore|TestKernelXDPPluginTCFallbackHotRestartHandsOffInPlace|TestKernelXDPPluginTCEgressAttachesOnBoundInterfaces|TestKernelXDPPluginTCEgressBesideNativeXDP|TestKernelXDPPluginTCEgressHotRestartHandsOffInPlace|TestPinKernelHotRestartTailCallsKeepsChainAfterLastFD|TestPluginMapHandoffKeepsPreservedMaps|TestPluginMapHandoffSkipsMapsThatDoNotMatchTheirRecord|TestPluginMapHandoffNeedsHotRestart|TestSyncKernelPluginConfigsWriteBankBeforeHeader|TestKernelNetfilterPlugin(PipelineIntegration|PriorityIntegration|NamespaceRecreateIntegration|InitialMissingNamespaceRecoversIntegration)|TestOrderedKernelRuntimeChainsXDPIntoTCPlugin)$'
 	env_command=$(command -v env)
 	set -- \
 		"$env_command" \
@@ -286,6 +297,9 @@ run_privileged() {
 		VEER_RUN_XDP_PLUGIN_TESTS=1 \
 		VEER_RUN_NETFILTER_PLUGIN_TEST=1 \
 		VEER_PLUGIN_OOM_TEST=1 \
+		VEER_REQUIRE_NATIVE_PLUGINS=1 \
+		"VEER_PLUGIN_WORKER=$ROOT_DIR/internal/app/pluginworker/x86_64-linux-gnu/veer-plugin-worker" \
+		"VEER_TEST_NATIVE_ECHO=$ROOT_DIR/target/release/libnative_echo.so" \
 		"$privileged_binary" \
 		-test.v -test.run "$privileged_pattern" -test.count=1 -test.timeout=30m
 	if command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
@@ -298,13 +312,13 @@ run_privileged() {
 	run_no_skips "privileged plugin integration" "$privileged_log" "$@"
 
 	for required_test in \
-		TestPluginHostSeccompFilterRejectsForeignABIAndBlockedSyscalls \
-		TestPluginHostLinuxSandboxIdentityAndCgroup \
-		TestPluginHostLinuxSandboxSupportsConcurrentHosts \
-		TestPluginHostLinuxSandboxEnforcementProbe \
-		TestPluginHostLinuxChrootFallbackEnforcementProbe \
-		TestCleanupOrphanPluginHostFilesystemRoots \
-		TestPluginHostIsolationContainsMemoryExhaustion \
+		TestNativePluginQueryAndHostCalls \
+		TestNativePluginPanicRestartsInstance \
+		TestNativePluginCrashDemotesSharedPlugin \
+		TestNativePluginTimeoutKillsWorker \
+		TestNativePluginDispatchRunsOnItsOwnInstance \
+		TestNativePluginEventLatency \
+		TestCleanupOrphanPluginHostCgroups \
 		TestPluginHostIsolationLoadsRelativeControlModulesInMainAndWorker \
 		TestPluginHostIsolationBrokersTypedServiceDiscoveryAndCall \
 		TestPluginNetPolicyTransactionsLinuxIntegration \

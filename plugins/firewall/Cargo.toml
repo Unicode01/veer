@@ -1,0 +1,19 @@
+[package]
+name = "veer-plugin-firewall"
+version = "1.2.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "XDP source filter with address sets, a security baseline and optional connection tracking"
+
+[lib]
+name = "firewall"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+veer-plugin = { path = "../../sdk/native/rust/veer-plugin" }
+
+[dev-dependencies]
+veer-plugin = { path = "../../sdk/native/rust/veer-plugin", features = ["testing"] }
+serde_json.workspace = true

@@ -13,8 +13,7 @@ import (
 const pluginManifestRelationshipLimit = 64
 
 var pluginRuntimeFeatures = []string{
-	"control.goja.v1",
-	"control.modules.v1",
+	"control.native.v1",
 	"control.action_schema.v1",
 	"control.attachment_status.v1",
 	"control.blobs.v1",

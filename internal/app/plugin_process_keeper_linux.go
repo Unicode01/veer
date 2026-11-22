@@ -20,7 +20,7 @@ import (
 const pluginProcessKeeperTestEnv = "VEER_PLUGIN_PROCESS_KEEPER_TEST"
 
 // pluginProcessKeeperTestMode makes the test binary re-enter itself as the
-// keeper, the same way isolated plugin-host tests do.
+// keeper.
 var pluginProcessKeeperTestMode bool
 
 func pluginProcessKeeperInvocation() (string, []string, []string, error) {

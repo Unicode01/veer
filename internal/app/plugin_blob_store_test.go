@@ -299,7 +299,7 @@ exports.readBlob = function () {
 };
 `)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	plugin := testPersistentSocketPlugin(dir, "blob_control", []string{"blob", "kv", "worker"}, nil)
 	action := PluginAction{ID: "blob"}
@@ -340,7 +340,7 @@ exports.onUpgradeRestore = function () {};
 	}
 	writeVersion(1)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	first := runtime.Reconcile(loadPluginCatalogWithControlRegistrationAndState(cfg, db))
 	if state := first.Plugins["blob_upgrade"]; state.Error != "" {

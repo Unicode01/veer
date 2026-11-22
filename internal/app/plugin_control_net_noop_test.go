@@ -70,7 +70,7 @@ exports.onAction = function () {
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
 	writes := countPluginNetStoreWrites(t, db)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	controller := &bundledRepairNetAdmin{pluginControlNetAdminTest{links: map[string]pluginControlNetLinkInfo{
 		"host0": {Name: "host0", IfIndex: 50, Kind: "device", MTU: 1500, Up: true, ARP: true},
 	}}}
@@ -158,7 +158,7 @@ exports.onAction = function () {
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
 	writes := countPluginNetStoreWrites(t, db)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	request := pluginControlNetRouteRequest{Dst: "0.0.0.0/0", Gateway: "192.0.2.1", Dev: "host0", Table: 100}
 	controller := &bundledRepairNetAdmin{pluginControlNetAdminTest{
 		links: map[string]pluginControlNetLinkInfo{

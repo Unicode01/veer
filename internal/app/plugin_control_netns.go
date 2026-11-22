@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dop251/goja"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 
 	"github.com/Unicode01/veer/internal/store"
 )
@@ -159,8 +159,8 @@ func validatePluginControlNamespaceName(value string, allowHost bool) (string, e
 	return value, nil
 }
 
-func (h *pluginControlHost) requiredNamespaceStringArg(call goja.FunctionCall, index int, label string) string {
-	if len(call.Arguments) <= index || goja.IsUndefined(call.Arguments[index]) || goja.IsNull(call.Arguments[index]) {
+func (h *pluginControlHost) requiredNamespaceStringArg(call hv.FunctionCall, index int, label string) string {
+	if len(call.Arguments) <= index || hv.IsUndefined(call.Arguments[index]) || hv.IsNull(call.Arguments[index]) {
 		h.throwf("%s is required", label)
 	}
 	value := strings.TrimSpace(call.Arguments[index].String())
@@ -185,7 +185,7 @@ func pluginControlTunTapResourceKey(namespace, name string) string {
 	return normalizePluginControlNamespace(namespace) + "/" + strings.TrimSpace(name)
 }
 
-func (h *pluginControlHost) netNamespaceGet(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netNamespaceGet(call hv.FunctionCall) hv.Value {
 	provider := h.networkProviderOrThrow("net.namespace", "net.namespace.get")
 	name, err := validatePluginControlNamespaceName(h.requiredNamespaceStringArg(call, 0, "name"), false)
 	if err != nil {
@@ -197,12 +197,12 @@ func (h *pluginControlHost) netNamespaceGet(call goja.FunctionCall) goja.Value {
 		h.throwf("net.namespace.get: %v", err)
 	}
 	if !present {
-		return goja.Null()
+		return hv.Null()
 	}
 	return h.vm.ToValue(pluginControlNamespaceInfoMap(info))
 }
 
-func (h *pluginControlHost) netNamespaceList(goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netNamespaceList(hv.FunctionCall) hv.Value {
 	provider := h.networkProviderOrThrow("net.namespace", "net.namespace.list")
 	items, err := provider.NamespaceList()
 	if err != nil {
@@ -217,7 +217,7 @@ func (h *pluginControlHost) netNamespaceList(goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(out)
 }
 
-func (h *pluginControlHost) netNamespaceEnsure(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netNamespaceEnsure(call hv.FunctionCall) hv.Value {
 	provider := h.networkProviderOrThrow("net.namespace", "net.namespace.ensure")
 	obj := h.requiredObjectArg(call, 0, "request")
 	name, err := validatePluginControlNamespaceName(h.firstStringObjectField(obj, "name", "namespace"), false)
@@ -228,8 +228,8 @@ func (h *pluginControlHost) netNamespaceEnsure(call goja.FunctionCall) goja.Valu
 	unlock := h.lockPluginNetMutation([]pluginOwnedResourceRef{{pluginOwnedResourceTypeNamespace, name}}, "net.namespace.ensure")
 	defer unlock()
 	loopbackUp := true
-	if raw := h.objectField(obj, "loopback_up"); goja.IsUndefined(raw) || goja.IsNull(raw) {
-		if raw = h.objectField(obj, "loopbackUp"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
+	if raw := h.objectField(obj, "loopback_up"); hv.IsUndefined(raw) || hv.IsNull(raw) {
+		if raw = h.objectField(obj, "loopbackUp"); !hv.IsUndefined(raw) && !hv.IsNull(raw) {
 			loopbackUp = raw.ToBoolean()
 		}
 	} else {
@@ -294,7 +294,7 @@ func (h *pluginControlHost) netNamespaceEnsure(call goja.FunctionCall) goja.Valu
 	return h.vm.ToValue(value)
 }
 
-func (h *pluginControlHost) netNamespaceDelete(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netNamespaceDelete(call hv.FunctionCall) hv.Value {
 	provider := h.networkProviderOrThrow("net.namespace", "net.namespace.delete")
 	name, err := validatePluginControlNamespaceName(h.requiredNamespaceStringArg(call, 0, "name"), false)
 	if err != nil {
@@ -325,10 +325,10 @@ func (h *pluginControlHost) netNamespaceDelete(call goja.FunctionCall) goja.Valu
 	if err := store.DeletePluginOwnedResource(h.db, h.plugin.ID, pluginOwnedResourceTypeNamespace, name); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		h.throwf("net.namespace.delete: clear ownership: %v", err)
 	}
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
-func (h *pluginControlHost) netNamespaceRelease(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netNamespaceRelease(call hv.FunctionCall) hv.Value {
 	h.networkProviderOrThrow("net.namespace", "net.namespace.release")
 	name, err := validatePluginControlNamespaceName(h.requiredNamespaceStringArg(call, 0, "name"), false)
 	if err != nil {
@@ -352,15 +352,15 @@ func (h *pluginControlHost) netNamespaceRelease(call goja.FunctionCall) goja.Val
 	if err := store.DeletePluginOwnedResource(h.db, h.plugin.ID, pluginOwnedResourceTypeNamespace, name); err != nil {
 		h.throwf("net.namespace.release: %v", err)
 	}
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
-func (h *pluginControlHost) netNamespaceOwned(goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netNamespaceOwned(hv.FunctionCall) hv.Value {
 	h.networkProviderOrThrow("net.namespace", "net.namespace.owned")
 	return h.vm.ToValue(h.pluginOwnedNetworkResourceViews(pluginOwnedResourceTypeNamespace, "net.namespace.owned"))
 }
 
-func (h *pluginControlHost) netTunTapEnsure(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netTunTapEnsure(call hv.FunctionCall) hv.Value {
 	provider := h.networkProviderOrThrow("net.tuntap", "net.tuntap.ensure")
 	obj := h.requiredObjectArg(call, 0, "request")
 	req := pluginControlNetTunTapRequest{
@@ -373,7 +373,7 @@ func (h *pluginControlHost) netTunTapEnsure(call goja.FunctionCall) goja.Value {
 	if req.Mode == "" {
 		req.Mode = "tun"
 	}
-	if raw := h.objectField(obj, "up"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
+	if raw := h.objectField(obj, "up"); !hv.IsUndefined(raw) && !hv.IsNull(raw) {
 		req.Up = raw.ToBoolean()
 	}
 	if err := validatePluginControlInterfaceName(req.Name, "name"); err != nil {
@@ -439,7 +439,7 @@ func (h *pluginControlHost) netTunTapEnsure(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(map[string]any{"device": result.Info, "created": result.Created})
 }
 
-func (h *pluginControlHost) netTunTapClose(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netTunTapClose(call hv.FunctionCall) hv.Value {
 	provider := h.networkProviderOrThrow("net.tuntap", "net.tuntap.close")
 	req, owned := h.requiredOwnedTunTap(call, "net.tuntap.close")
 	unlock := h.lockPluginNetLinks(req.Namespace, "net.tuntap.close", req.Name)
@@ -451,10 +451,10 @@ func (h *pluginControlHost) netTunTapClose(call goja.FunctionCall) goja.Value {
 	if err := store.DeletePluginOwnedResource(h.db, h.plugin.ID, pluginOwnedResourceTypeTunTap, owned.ResourceKey); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		h.throwf("net.tuntap.close: clear ownership: %v", err)
 	}
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
-func (h *pluginControlHost) netTunTapRead(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netTunTapRead(call hv.FunctionCall) hv.Value {
 	provider := h.networkProviderOrThrow("net.tuntap", "net.tuntap.read")
 	claim, _ := h.requiredOwnedTunTap(call, "net.tuntap.read")
 	obj := h.requiredObjectArg(call, 0, "request")
@@ -475,7 +475,7 @@ func (h *pluginControlHost) netTunTapRead(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(map[string]any{"data": hex.EncodeToString(packet.Packet), "bytes": len(packet.Packet), "timed_out": packet.TimedOut})
 }
 
-func (h *pluginControlHost) netTunTapWrite(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netTunTapWrite(call hv.FunctionCall) hv.Value {
 	provider := h.networkProviderOrThrow("net.tuntap", "net.tuntap.write")
 	claim, _ := h.requiredOwnedTunTap(call, "net.tuntap.write")
 	obj := h.requiredObjectArg(call, 0, "request")
@@ -494,17 +494,17 @@ func (h *pluginControlHost) netTunTapWrite(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(map[string]any{"bytes": written})
 }
 
-func (h *pluginControlHost) netTunTapList(goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netTunTapList(hv.FunctionCall) hv.Value {
 	provider := h.networkProviderOrThrow("net.tuntap", "net.tuntap.list")
 	return h.vm.ToValue(provider.TunTapList(h.plugin.ID))
 }
 
-func (h *pluginControlHost) netTunTapOwned(goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netTunTapOwned(hv.FunctionCall) hv.Value {
 	h.networkProviderOrThrow("net.tuntap", "net.tuntap.owned")
 	return h.vm.ToValue(h.pluginOwnedNetworkResourceViews(pluginOwnedResourceTypeTunTap, "net.tuntap.owned"))
 }
 
-func (h *pluginControlHost) requiredOwnedTunTap(call goja.FunctionCall, api string) (pluginOwnedTunTapClaim, store.PluginOwnedResource) {
+func (h *pluginControlHost) requiredOwnedTunTap(call hv.FunctionCall, api string) (pluginOwnedTunTapClaim, store.PluginOwnedResource) {
 	obj := h.requiredObjectArg(call, 0, "request")
 	name := strings.TrimSpace(h.firstStringObjectField(obj, "name", "interface", "link"))
 	if err := validatePluginControlInterfaceName(name, "name"); err != nil {

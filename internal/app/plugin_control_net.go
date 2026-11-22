@@ -8,7 +8,7 @@ import (
 	"net"
 	"strings"
 
-	"github.com/dop251/goja"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 
 	"github.com/Unicode01/veer/internal/store"
 )
@@ -385,7 +385,7 @@ func (h *pluginControlHost) requirePluginNetworkNamespace(namespace, operation s
 	return namespace
 }
 
-func (h *pluginControlHost) netNamespaceObjectField(obj *goja.Object, operation string) string {
+func (h *pluginControlHost) netNamespaceObjectField(obj *hv.Object, operation string) string {
 	namespace := h.firstStringObjectField(obj, "namespace", "netns")
 	namespace, err := normalizePluginControlRequestNamespace(namespace)
 	if err != nil {
@@ -394,8 +394,8 @@ func (h *pluginControlHost) netNamespaceObjectField(obj *goja.Object, operation 
 	return namespace
 }
 
-func (h *pluginControlHost) netNamespaceArgument(call goja.FunctionCall, index int, operation string) string {
-	if index >= len(call.Arguments) || goja.IsUndefined(call.Arguments[index]) || goja.IsNull(call.Arguments[index]) {
+func (h *pluginControlHost) netNamespaceArgument(call hv.FunctionCall, index int, operation string) string {
+	if index >= len(call.Arguments) || hv.IsUndefined(call.Arguments[index]) || hv.IsNull(call.Arguments[index]) {
 		return "host"
 	}
 	value := call.Arguments[index]
@@ -439,7 +439,7 @@ func (h *pluginControlHost) requireAnyNetAccess(operation string, api string) {
 	}
 }
 
-func (h *pluginControlHost) netLinkGet(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkGet(call hv.FunctionCall) hv.Value {
 	name := h.requiredNetStringArg(call, 0, "name")
 	namespace := h.netNamespaceArgument(call, 1, "net.link.get")
 	admin := h.netAdminInNamespaceOrThrow(namespace, "net.link.get")
@@ -451,7 +451,7 @@ func (h *pluginControlHost) netLinkGet(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(pluginControlNetLinkInfoMap(info))
 }
 
-func (h *pluginControlHost) netLeaseList(goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLeaseList(hv.FunctionCall) hv.Value {
 	h.netAdminOrThrow("net.lease.list")
 	items, err := pluginOwnedResourceViews(h.db, h.plugin.ID)
 	if err != nil {
@@ -460,7 +460,7 @@ func (h *pluginControlHost) netLeaseList(goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(items)
 }
 
-func (h *pluginControlHost) netLeaseRestore(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLeaseRestore(call hv.FunctionCall) hv.Value {
 	admin := h.netAdminOrThrow("net.lease.restore")
 	resourceType := strings.ToLower(h.requiredPluginLeaseStringArg(call, 0, "type", 64))
 	resourceKey := h.requiredPluginLeaseStringArg(call, 1, "key", 512)
@@ -509,8 +509,8 @@ func (h *pluginControlHost) netLeaseRestore(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(map[string]any{"restored": true, "type": resourceType, "key": resourceKey})
 }
 
-func (h *pluginControlHost) requiredPluginLeaseStringArg(call goja.FunctionCall, index int, label string, maxBytes int) string {
-	if index >= len(call.Arguments) || goja.IsUndefined(call.Arguments[index]) || goja.IsNull(call.Arguments[index]) {
+func (h *pluginControlHost) requiredPluginLeaseStringArg(call hv.FunctionCall, index int, label string, maxBytes int) string {
+	if index >= len(call.Arguments) || hv.IsUndefined(call.Arguments[index]) || hv.IsNull(call.Arguments[index]) {
 		h.throwf("net.lease.restore: %s is required", label)
 	}
 	value := strings.TrimSpace(call.Arguments[index].String())
@@ -520,7 +520,7 @@ func (h *pluginControlHost) requiredPluginLeaseStringArg(call goja.FunctionCall,
 	return value
 }
 
-func (h *pluginControlHost) netLinkList(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkList(call hv.FunctionCall) hv.Value {
 	namespace := h.netNamespaceArgument(call, 0, "net.link.list")
 	admin := h.netAdminInNamespaceOrThrow(namespace, "net.link.list")
 	h.requireAnyNetAccess("link.read", "net.link.list")
@@ -538,7 +538,7 @@ func (h *pluginControlHost) netLinkList(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(out)
 }
 
-func (h *pluginControlHost) netLinkEnsureVeth(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkEnsureVeth(call hv.FunctionCall) hv.Value {
 	obj := h.requiredObjectArg(call, 0, "request")
 	req := pluginControlNetVethRequest{
 		Namespace: h.netNamespaceObjectField(obj, "net.link.ensureVeth"),
@@ -548,11 +548,11 @@ func (h *pluginControlHost) netLinkEnsureVeth(call goja.FunctionCall) goja.Value
 		Up:        true,
 	}
 	admin := h.netAdminInNamespaceOrThrow(req.Namespace, "net.link.ensureVeth")
-	if raw := h.objectField(obj, "up"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
+	if raw := h.objectField(obj, "up"); !hv.IsUndefined(raw) && !hv.IsNull(raw) {
 		req.Up = raw.ToBoolean()
 	}
 	peerInternal := false
-	if raw := h.objectField(obj, "peer_internal"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
+	if raw := h.objectField(obj, "peer_internal"); !hv.IsUndefined(raw) && !hv.IsNull(raw) {
 		peerInternal = raw.ToBoolean()
 	}
 	if err := validatePluginControlInterfaceName(req.Host, "host"); err != nil {
@@ -611,15 +611,15 @@ func (h *pluginControlHost) netLinkEnsureVeth(call goja.FunctionCall) goja.Value
 	})
 }
 
-func (h *pluginControlHost) netLinkEnsureDummy(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkEnsureDummy(call hv.FunctionCall) hv.Value {
 	return h.netLinkEnsureSingle(call, "net.link.ensureDummy", "dummy")
 }
 
-func (h *pluginControlHost) netLinkEnsureHelperWAN(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkEnsureHelperWAN(call hv.FunctionCall) hv.Value {
 	return h.netLinkEnsureSingle(call, "net.link.ensureHelperWAN", "veerwan")
 }
 
-func (h *pluginControlHost) netLinkEnsureSingle(call goja.FunctionCall, api, kind string) goja.Value {
+func (h *pluginControlHost) netLinkEnsureSingle(call hv.FunctionCall, api, kind string) hv.Value {
 	obj := h.requiredObjectArg(call, 0, "request")
 	req := pluginControlNetDummyRequest{
 		Namespace: h.netNamespaceObjectField(obj, api),
@@ -628,7 +628,7 @@ func (h *pluginControlHost) netLinkEnsureSingle(call goja.FunctionCall, api, kin
 		Up:        true,
 	}
 	admin := h.netAdminInNamespaceOrThrow(req.Namespace, api)
-	if raw := h.objectField(obj, "up"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
+	if raw := h.objectField(obj, "up"); !hv.IsUndefined(raw) && !hv.IsNull(raw) {
 		req.Up = raw.ToBoolean()
 	}
 	if err := validatePluginControlInterfaceName(req.Name, "name"); err != nil {
@@ -671,7 +671,7 @@ func (h *pluginControlHost) netLinkEnsureSingle(call goja.FunctionCall, api, kin
 	})
 }
 
-func (h *pluginControlHost) netLinkEnsureMacvlan(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkEnsureMacvlan(call hv.FunctionCall) hv.Value {
 	obj := h.requiredObjectArg(call, 0, "request")
 	req := pluginControlNetMacvlanRequest{
 		Namespace: h.netNamespaceObjectField(obj, "net.link.ensureMacvlan"),
@@ -686,7 +686,7 @@ func (h *pluginControlHost) netLinkEnsureMacvlan(call goja.FunctionCall) goja.Va
 	if req.Mode == "" {
 		req.Mode = "bridge"
 	}
-	if raw := h.objectField(obj, "up"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
+	if raw := h.objectField(obj, "up"); !hv.IsUndefined(raw) && !hv.IsNull(raw) {
 		req.Up = raw.ToBoolean()
 	}
 	if err := validatePluginControlInterfaceName(req.Name, "name"); err != nil {
@@ -743,7 +743,7 @@ func (h *pluginControlHost) netLinkEnsureMacvlan(call goja.FunctionCall) goja.Va
 	})
 }
 
-func (h *pluginControlHost) netLinkEnsureVLAN(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkEnsureVLAN(call hv.FunctionCall) hv.Value {
 	obj := h.requiredObjectArg(call, 0, "request")
 	req := pluginControlNetVLANRequest{
 		Namespace: h.netNamespaceObjectField(obj, "net.link.ensureVLAN"),
@@ -758,7 +758,7 @@ func (h *pluginControlHost) netLinkEnsureVLAN(call goja.FunctionCall) goja.Value
 	if req.Protocol == "" {
 		req.Protocol = "802.1q"
 	}
-	if raw := h.objectField(obj, "up"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
+	if raw := h.objectField(obj, "up"); !hv.IsUndefined(raw) && !hv.IsNull(raw) {
 		req.Up = raw.ToBoolean()
 	}
 	if err := validatePluginControlInterfaceName(req.Name, "name"); err != nil {
@@ -806,7 +806,7 @@ func (h *pluginControlHost) netLinkEnsureVLAN(call goja.FunctionCall) goja.Value
 	return h.vm.ToValue(map[string]any{"link": pluginControlNetLinkInfoMap(result.Link), "created": result.Created})
 }
 
-func (h *pluginControlHost) netLinkEnsureVRF(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkEnsureVRF(call hv.FunctionCall) hv.Value {
 	obj := h.requiredObjectArg(call, 0, "request")
 	table := h.optionalIntObjectField(obj, 0, "table", "table_id")
 	req := pluginControlNetVRFRequest{
@@ -818,7 +818,7 @@ func (h *pluginControlHost) netLinkEnsureVRF(call goja.FunctionCall) goja.Value 
 	if table > 0 {
 		req.Table = uint32(table)
 	}
-	if raw := h.objectField(obj, "up"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
+	if raw := h.objectField(obj, "up"); !hv.IsUndefined(raw) && !hv.IsNull(raw) {
 		req.Up = raw.ToBoolean()
 	}
 	if err := validatePluginControlInterfaceName(req.Name, "name"); err != nil {
@@ -874,7 +874,7 @@ func normalizePluginControlUnicastMAC(value string) (string, error) {
 	return strings.ToLower(hardwareAddr.String()), nil
 }
 
-func (h *pluginControlHost) netLinkEnsureBridge(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkEnsureBridge(call hv.FunctionCall) hv.Value {
 	obj := h.requiredObjectArg(call, 0, "request")
 	req := pluginControlNetBridgeRequest{
 		Namespace: h.netNamespaceObjectField(obj, "net.link.ensureBridge"),
@@ -883,7 +883,7 @@ func (h *pluginControlHost) netLinkEnsureBridge(call goja.FunctionCall) goja.Val
 		Up:        true,
 	}
 	admin := h.netAdminInNamespaceOrThrow(req.Namespace, "net.link.ensureBridge")
-	if raw := h.objectField(obj, "up"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
+	if raw := h.objectField(obj, "up"); !hv.IsUndefined(raw) && !hv.IsNull(raw) {
 		req.Up = raw.ToBoolean()
 	}
 	if err := validatePluginControlInterfaceName(req.Name, "name"); err != nil {
@@ -918,7 +918,7 @@ func (h *pluginControlHost) netLinkEnsureBridge(call goja.FunctionCall) goja.Val
 	return h.vm.ToValue(pluginControlNetLinkInfoMap(info))
 }
 
-func (h *pluginControlHost) netLinkDelete(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkDelete(call hv.FunctionCall) hv.Value {
 	name := h.requiredNetStringArg(call, 0, "name")
 	namespace := h.netNamespaceArgument(call, 1, "net.link.delete")
 	admin := h.netAdminInNamespaceOrThrow(namespace, "net.link.delete")
@@ -988,10 +988,10 @@ func (h *pluginControlHost) netLinkDelete(call goja.FunctionCall) goja.Value {
 	if err := tx.Commit(); err != nil {
 		h.throwf("net.link.delete: commit ownership cleanup: %v", err)
 	}
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
-func (h *pluginControlHost) netLinkRelease(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkRelease(call hv.FunctionCall) hv.Value {
 	name := h.requiredNetStringArg(call, 0, "name")
 	namespace := h.netNamespaceArgument(call, 1, "net.link.release")
 	h.netAdminInNamespaceOrThrow(namespace, "net.link.release")
@@ -1001,10 +1001,10 @@ func (h *pluginControlHost) netLinkRelease(call goja.FunctionCall) goja.Value {
 	if err := h.releasePluginOwnedLink(namespace, name); err != nil {
 		h.throwf("net.link.release: %v", err)
 	}
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
-func (h *pluginControlHost) netLinkOwned(goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkOwned(hv.FunctionCall) hv.Value {
 	h.netAdminOrThrow("net.link.owned")
 	links, err := pluginOwnedLinks(h.db, h.plugin.ID)
 	if err != nil {
@@ -1013,7 +1013,7 @@ func (h *pluginControlHost) netLinkOwned(goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(links)
 }
 
-func (h *pluginControlHost) netLinkSetMaster(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkSetMaster(call hv.FunctionCall) hv.Value {
 	obj := h.requiredObjectArg(call, 0, "request")
 	req := pluginControlNetMasterRequest{
 		Namespace: h.netNamespaceObjectField(obj, "net.link.setMaster"),
@@ -1022,7 +1022,7 @@ func (h *pluginControlHost) netLinkSetMaster(call goja.FunctionCall) goja.Value 
 		Up:        true,
 	}
 	admin := h.netAdminInNamespaceOrThrow(req.Namespace, "net.link.setMaster")
-	if raw := h.objectField(obj, "up"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
+	if raw := h.objectField(obj, "up"); !hv.IsUndefined(raw) && !hv.IsNull(raw) {
 		req.Up = raw.ToBoolean()
 	}
 	if err := validatePluginControlInterfaceName(req.Link, "link"); err != nil {
@@ -1069,7 +1069,7 @@ func (h *pluginControlHost) netLinkSetMaster(call goja.FunctionCall) goja.Value 
 	return h.vm.ToValue(pluginControlNetLinkInfoMap(info))
 }
 
-func (h *pluginControlHost) netLinkClearMaster(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkClearMaster(call hv.FunctionCall) hv.Value {
 	name := h.requiredNetStringArg(call, 0, "name")
 	namespace := h.netNamespaceArgument(call, 1, "net.link.clearMaster")
 	admin := h.netAdminInNamespaceOrThrow(namespace, "net.link.clearMaster")
@@ -1099,10 +1099,10 @@ func (h *pluginControlHost) netLinkClearMaster(call goja.FunctionCall) goja.Valu
 	return h.vm.ToValue(pluginControlNetLinkInfoMap(info))
 }
 
-func (h *pluginControlHost) netLinkSetUp(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkSetUp(call hv.FunctionCall) hv.Value {
 	name := h.requiredNetStringArg(call, 0, "name")
 	up := true
-	if len(call.Arguments) > 1 && !goja.IsUndefined(call.Arguments[1]) && !goja.IsNull(call.Arguments[1]) {
+	if len(call.Arguments) > 1 && !hv.IsUndefined(call.Arguments[1]) && !hv.IsNull(call.Arguments[1]) {
 		up = call.Arguments[1].ToBoolean()
 	}
 	namespace := h.netNamespaceArgument(call, 2, "net.link.setUp")
@@ -1129,12 +1129,12 @@ func (h *pluginControlHost) netLinkSetUp(call goja.FunctionCall) goja.Value {
 	if err := h.releaseRestoredPluginLinkLease(namespace, name, "up", up); err != nil {
 		h.throwf("net.link.setUp: release restored lease: %v", err)
 	}
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
-func (h *pluginControlHost) netLinkSetMTU(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkSetMTU(call hv.FunctionCall) hv.Value {
 	name := h.requiredNetStringArg(call, 0, "name")
-	if len(call.Arguments) <= 1 || goja.IsUndefined(call.Arguments[1]) || goja.IsNull(call.Arguments[1]) {
+	if len(call.Arguments) <= 1 || hv.IsUndefined(call.Arguments[1]) || hv.IsNull(call.Arguments[1]) {
 		h.throwf("net.link.setMTU: mtu is required")
 	}
 	mtu := int(call.Arguments[1].ToInteger())
@@ -1165,12 +1165,12 @@ func (h *pluginControlHost) netLinkSetMTU(call goja.FunctionCall) goja.Value {
 	if err := h.releaseRestoredPluginLinkLease(namespace, name, "mtu", mtu); err != nil {
 		h.throwf("net.link.setMTU: release restored lease: %v", err)
 	}
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
-func (h *pluginControlHost) netLinkSetARP(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkSetARP(call hv.FunctionCall) hv.Value {
 	name := h.requiredNetStringArg(call, 0, "name")
-	if len(call.Arguments) <= 1 || goja.IsUndefined(call.Arguments[1]) || goja.IsNull(call.Arguments[1]) {
+	if len(call.Arguments) <= 1 || hv.IsUndefined(call.Arguments[1]) || hv.IsNull(call.Arguments[1]) {
 		h.throwf("net.link.setARP: enabled is required")
 	}
 	enabled := call.Arguments[1].ToBoolean()
@@ -1202,9 +1202,9 @@ func (h *pluginControlHost) netLinkSetARP(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(pluginControlNetLinkInfoMap(info))
 }
 
-func (h *pluginControlHost) netLinkSetPromiscuous(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkSetPromiscuous(call hv.FunctionCall) hv.Value {
 	name := h.requiredNetStringArg(call, 0, "name")
-	if len(call.Arguments) <= 1 || goja.IsUndefined(call.Arguments[1]) || goja.IsNull(call.Arguments[1]) {
+	if len(call.Arguments) <= 1 || hv.IsUndefined(call.Arguments[1]) || hv.IsNull(call.Arguments[1]) {
 		h.throwf("net.link.setPromiscuous: enabled is required")
 	}
 	enabled := call.Arguments[1].ToBoolean()
@@ -1236,9 +1236,9 @@ func (h *pluginControlHost) netLinkSetPromiscuous(call goja.FunctionCall) goja.V
 	return h.vm.ToValue(pluginControlNetLinkInfoMap(info))
 }
 
-func (h *pluginControlHost) netLinkSetOffloads(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkSetOffloads(call hv.FunctionCall) hv.Value {
 	name := h.requiredNetStringArg(call, 0, "name")
-	if len(call.Arguments) <= 1 || goja.IsUndefined(call.Arguments[1]) || goja.IsNull(call.Arguments[1]) {
+	if len(call.Arguments) <= 1 || hv.IsUndefined(call.Arguments[1]) || hv.IsNull(call.Arguments[1]) {
 		h.throwf("net.link.setOffloads: features are required")
 	}
 	obj := call.Arguments[1].ToObject(h.vm)
@@ -1299,10 +1299,10 @@ func (h *pluginControlHost) netLinkSetOffloads(call goja.FunctionCall) goja.Valu
 			h.throwf("net.link.setOffloads: release restored %s lease: %v", feature, err)
 		}
 	}
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
-func (h *pluginControlHost) netLinkGetOffloads(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkGetOffloads(call hv.FunctionCall) hv.Value {
 	name := h.requiredNetStringArg(call, 0, "name")
 	namespace := h.netNamespaceArgument(call, 1, "net.link.getOffloads")
 	admin := h.netAdminInNamespaceOrThrow(namespace, "net.link.getOffloads")
@@ -1314,9 +1314,9 @@ func (h *pluginControlHost) netLinkGetOffloads(call goja.FunctionCall) goja.Valu
 	return h.vm.ToValue(features)
 }
 
-func (h *pluginControlHost) netLinkSetGSO(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netLinkSetGSO(call hv.FunctionCall) hv.Value {
 	name := h.requiredNetStringArg(call, 0, "name")
-	if len(call.Arguments) <= 1 || goja.IsUndefined(call.Arguments[1]) || goja.IsNull(call.Arguments[1]) {
+	if len(call.Arguments) <= 1 || hv.IsUndefined(call.Arguments[1]) || hv.IsNull(call.Arguments[1]) {
 		h.throwf("net.link.setGSO: limits are required")
 	}
 	obj := call.Arguments[1].ToObject(h.vm)
@@ -1382,7 +1382,7 @@ func isAllowedPluginControlOffloadFeature(name string) bool {
 	}
 }
 
-func (h *pluginControlHost) netAddrReplace(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netAddrReplace(call hv.FunctionCall) hv.Value {
 	req := h.netAddrRequest(call, "net.addr.replace")
 	admin := h.netAdminInNamespaceOrThrow(req.Namespace, "net.addr.replace")
 	h.requireNetAccess("addr.write", req.Interface, "net.addr.replace")
@@ -1417,10 +1417,10 @@ func (h *pluginControlHost) netAddrReplace(call goja.FunctionCall) goja.Value {
 	if err := h.releaseRestoredPluginAddressLease(normalized, true); err != nil {
 		h.throwf("net.addr.replace: release restored lease: %v", err)
 	}
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
-func (h *pluginControlHost) netPrefixSubnet(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netPrefixSubnet(call hv.FunctionCall) hv.Value {
 	if h.upgradePhase {
 		h.throwf("net.prefix.subnet is unavailable during plugin upgrade snapshot/restore")
 	}
@@ -1448,7 +1448,7 @@ func (h *pluginControlHost) netPrefixSubnet(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(subnet.String())
 }
 
-func (h *pluginControlHost) netAddrDelete(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netAddrDelete(call hv.FunctionCall) hv.Value {
 	req := h.netAddrRequest(call, "net.addr.delete")
 	admin := h.netAdminInNamespaceOrThrow(req.Namespace, "net.addr.delete")
 	h.requireNetAccess("addr.write", req.Interface, "net.addr.delete")
@@ -1481,7 +1481,7 @@ func (h *pluginControlHost) netAddrDelete(call goja.FunctionCall) goja.Value {
 	if err := h.releaseRestoredPluginAddressLease(normalized, false); err != nil {
 		h.throwf("net.addr.delete: release restored lease: %v", err)
 	}
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
 func pluginControlNetLinkHasAddress(info pluginControlNetLinkInfo, cidr string) bool {
@@ -1494,18 +1494,18 @@ func pluginControlNetLinkHasAddress(info pluginControlNetLinkInfo, cidr string) 
 	return false
 }
 
-func (h *pluginControlHost) netRouteReplace(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netRouteReplace(call hv.FunctionCall) hv.Value {
 	req := h.netRouteRequest(call, "net.route.replace")
 	h.requireRouteNetAccess(req, "net.route.replace")
 	h.netRouteTransactionItems([]pluginControlNetRouteBatchItem{{request: req, present: true}})
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
-func (h *pluginControlHost) netRouteDelete(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netRouteDelete(call hv.FunctionCall) hv.Value {
 	req := h.netRouteRequest(call, "net.route.delete")
 	h.requireRouteNetAccess(req, "net.route.delete")
 	h.netRouteTransactionItems([]pluginControlNetRouteBatchItem{{request: req, present: false}})
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
 func (h *pluginControlHost) pluginRouteLinkIdentities(admin pluginControlNetAdmin, req pluginControlNetRouteRequest, operation string) ([]pluginOwnedRouteLinkIdentity, error) {
@@ -1524,35 +1524,35 @@ func (h *pluginControlHost) pluginRouteLinkIdentities(admin pluginControlNetAdmi
 	return identities, nil
 }
 
-func (h *pluginControlHost) netRuleReplace(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netRuleReplace(call hv.FunctionCall) hv.Value {
 	req := h.netRuleRequest(call, "net.rule.replace")
 	h.requireRuleNetAccess(req, "net.rule.replace")
 	h.netRuleTransactionItems([]pluginControlNetRuleBatchItem{{request: req, present: true}})
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
-func (h *pluginControlHost) netRuleDelete(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netRuleDelete(call hv.FunctionCall) hv.Value {
 	req := h.netRuleRequest(call, "net.rule.delete")
 	h.requireRuleNetAccess(req, "net.rule.delete")
 	h.netRuleTransactionItems([]pluginControlNetRuleBatchItem{{request: req, present: false}})
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
-func (h *pluginControlHost) netNeighReplace(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netNeighReplace(call hv.FunctionCall) hv.Value {
 	req := h.netNeighRequest(call, "net.neigh.replace", true)
 	h.requireNetAccess("neigh.write", req.Interface, "net.neigh.replace")
 	h.netNeighTransactionItems([]pluginControlNetNeighBatchItem{{request: req, present: true}})
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
-func (h *pluginControlHost) netNeighDelete(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netNeighDelete(call hv.FunctionCall) hv.Value {
 	req := h.netNeighRequest(call, "net.neigh.delete", false)
 	h.requireNetAccess("neigh.write", req.Interface, "net.neigh.delete")
 	h.netNeighTransactionItems([]pluginControlNetNeighBatchItem{{request: req, present: false}})
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
-func (h *pluginControlHost) netNeighList(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netNeighList(call hv.FunctionCall) hv.Value {
 	const api = "net.neigh.list"
 	req, limit := h.netReadRequest(call, api, true)
 	h.requireNetAccess("neigh.read", req.Interface, api)
@@ -1572,7 +1572,7 @@ func (h *pluginControlHost) netNeighList(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(map[string]any{"items": out, "truncated": truncated})
 }
 
-func (h *pluginControlHost) netBridgeFDBList(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) netBridgeFDBList(call hv.FunctionCall) hv.Value {
 	const api = "net.bridge.fdb.list"
 	req, limit := h.netReadRequest(call, api, false)
 	h.requireNetAccess("bridge.fdb.read", req.Interface, api)
@@ -1592,7 +1592,7 @@ func (h *pluginControlHost) netBridgeFDBList(call goja.FunctionCall) goja.Value 
 	return h.vm.ToValue(map[string]any{"items": out, "truncated": truncated})
 }
 
-func (h *pluginControlHost) netReadRequest(call goja.FunctionCall, operation string, allowFamily bool) (pluginControlNetReadRequest, int) {
+func (h *pluginControlHost) netReadRequest(call hv.FunctionCall, operation string, allowFamily bool) (pluginControlNetReadRequest, int) {
 	obj := h.requiredObjectArg(call, 0, "request")
 	req := pluginControlNetReadRequest{
 		Namespace: h.netNamespaceObjectField(obj, operation),
@@ -1649,7 +1649,7 @@ func (h *pluginControlHost) requireRuleNetAccess(req pluginControlNetRuleRequest
 	}
 }
 
-func (h *pluginControlHost) netAddrRequest(call goja.FunctionCall, operation string) pluginControlNetAddrRequest {
+func (h *pluginControlHost) netAddrRequest(call hv.FunctionCall, operation string) pluginControlNetAddrRequest {
 	obj := h.requiredObjectArg(call, 0, "request")
 	req := pluginControlNetAddrRequest{
 		Namespace: h.netNamespaceObjectField(obj, operation),
@@ -1665,7 +1665,7 @@ func (h *pluginControlHost) netAddrRequest(call goja.FunctionCall, operation str
 	return req
 }
 
-func (h *pluginControlHost) netRouteRequest(call goja.FunctionCall, operation string) pluginControlNetRouteRequest {
+func (h *pluginControlHost) netRouteRequest(call hv.FunctionCall, operation string) pluginControlNetRouteRequest {
 	obj := h.requiredObjectArg(call, 0, "request")
 	req := pluginControlNetRouteRequest{
 		Namespace: h.netNamespaceObjectField(obj, operation),
@@ -1688,12 +1688,12 @@ func (h *pluginControlHost) netRouteRequest(call goja.FunctionCall, operation st
 	return normalized
 }
 
-func (h *pluginControlHost) netRouteNexthops(obj *goja.Object, operation string) []pluginControlNetRouteNexthop {
+func (h *pluginControlHost) netRouteNexthops(obj *hv.Object, operation string) []pluginControlNetRouteNexthop {
 	value := h.objectField(obj, "nexthops")
-	if goja.IsUndefined(value) || goja.IsNull(value) {
+	if hv.IsUndefined(value) || hv.IsNull(value) {
 		value = h.objectField(obj, "next_hops")
 	}
-	if goja.IsUndefined(value) || goja.IsNull(value) {
+	if hv.IsUndefined(value) || hv.IsNull(value) {
 		return nil
 	}
 	array := value.ToObject(h.vm)
@@ -1707,7 +1707,7 @@ func (h *pluginControlHost) netRouteNexthops(obj *goja.Object, operation string)
 	out := make([]pluginControlNetRouteNexthop, 0, length)
 	for index := 0; index < length; index++ {
 		itemValue := array.Get(fmt.Sprintf("%d", index))
-		if itemValue == nil || goja.IsUndefined(itemValue) || goja.IsNull(itemValue) {
+		if itemValue == nil || hv.IsUndefined(itemValue) || hv.IsNull(itemValue) {
 			h.throwf("%s: nexthop %d is missing", operation, index)
 		}
 		item := itemValue.ToObject(h.vm)
@@ -1719,7 +1719,7 @@ func (h *pluginControlHost) netRouteNexthops(obj *goja.Object, operation string)
 			Dev:     h.firstStringObjectField(item, "dev", "interface", "link"),
 			Weight:  h.optionalIntObjectField(item, 1, "weight"),
 		}
-		if raw := h.objectField(item, "onlink"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
+		if raw := h.objectField(item, "onlink"); !hv.IsUndefined(raw) && !hv.IsNull(raw) {
 			nexthop.Onlink = raw.ToBoolean()
 		}
 		out = append(out, nexthop)
@@ -1727,7 +1727,7 @@ func (h *pluginControlHost) netRouteNexthops(obj *goja.Object, operation string)
 	return out
 }
 
-func (h *pluginControlHost) netRuleRequest(call goja.FunctionCall, operation string) pluginControlNetRuleRequest {
+func (h *pluginControlHost) netRuleRequest(call hv.FunctionCall, operation string) pluginControlNetRuleRequest {
 	obj := h.requiredObjectArg(call, 0, "request")
 	mark, hasMark := h.optionalUint32ObjectField(obj, operation, "mark", "fwmark")
 	mask, hasMask := h.optionalUint32ObjectField(obj, operation, "mask", "fwmask")
@@ -1747,7 +1747,7 @@ func (h *pluginControlHost) netRuleRequest(call goja.FunctionCall, operation str
 		IIF:       h.firstStringObjectField(obj, "iif", "in_interface"),
 		OIF:       h.firstStringObjectField(obj, "oif", "out_interface"),
 	}
-	if raw := h.objectField(obj, "invert"); !goja.IsUndefined(raw) && !goja.IsNull(raw) {
+	if raw := h.objectField(obj, "invert"); !hv.IsUndefined(raw) && !hv.IsNull(raw) {
 		req.Invert = raw.ToBoolean()
 	}
 	if req.Priority < 1 || req.Priority > 32765 {
@@ -1773,7 +1773,7 @@ func (h *pluginControlHost) netRuleRequest(call goja.FunctionCall, operation str
 	return normalized
 }
 
-func (h *pluginControlHost) netNeighRequest(call goja.FunctionCall, operation string, requireMAC bool) pluginControlNetNeighRequest {
+func (h *pluginControlHost) netNeighRequest(call hv.FunctionCall, operation string, requireMAC bool) pluginControlNetNeighRequest {
 	obj := h.requiredObjectArg(call, 0, "request")
 	req := pluginControlNetNeighRequest{
 		Namespace: h.netNamespaceObjectField(obj, operation),
@@ -1793,10 +1793,10 @@ func (h *pluginControlHost) netNeighRequest(call goja.FunctionCall, operation st
 	return normalized
 }
 
-func (h *pluginControlHost) optionalUint32ObjectField(obj *goja.Object, operation string, names ...string) (uint32, bool) {
+func (h *pluginControlHost) optionalUint32ObjectField(obj *hv.Object, operation string, names ...string) (uint32, bool) {
 	for _, name := range names {
 		value := h.objectField(obj, name)
-		if goja.IsUndefined(value) || goja.IsNull(value) {
+		if hv.IsUndefined(value) || hv.IsNull(value) {
 			continue
 		}
 		integer := value.ToInteger()
@@ -1808,8 +1808,8 @@ func (h *pluginControlHost) optionalUint32ObjectField(obj *goja.Object, operatio
 	return 0, false
 }
 
-func (h *pluginControlHost) requiredNetStringArg(call goja.FunctionCall, index int, name string) string {
-	if len(call.Arguments) <= index || goja.IsUndefined(call.Arguments[index]) || goja.IsNull(call.Arguments[index]) {
+func (h *pluginControlHost) requiredNetStringArg(call hv.FunctionCall, index int, name string) string {
+	if len(call.Arguments) <= index || hv.IsUndefined(call.Arguments[index]) || hv.IsNull(call.Arguments[index]) {
 		h.throwf("%s is required", name)
 	}
 	value := strings.TrimSpace(call.Arguments[index].String())
@@ -1819,7 +1819,7 @@ func (h *pluginControlHost) requiredNetStringArg(call goja.FunctionCall, index i
 	return value
 }
 
-func (h *pluginControlHost) firstStringObjectField(obj *goja.Object, fields ...string) string {
+func (h *pluginControlHost) firstStringObjectField(obj *hv.Object, fields ...string) string {
 	for _, field := range fields {
 		value := h.optionalStringObjectField(obj, field)
 		if value != "" {
@@ -1829,10 +1829,10 @@ func (h *pluginControlHost) firstStringObjectField(obj *goja.Object, fields ...s
 	return ""
 }
 
-func (h *pluginControlHost) optionalIntObjectField(obj *goja.Object, fallback int, fields ...string) int {
+func (h *pluginControlHost) optionalIntObjectField(obj *hv.Object, fallback int, fields ...string) int {
 	for _, field := range fields {
 		value := h.objectField(obj, field)
-		if goja.IsUndefined(value) || goja.IsNull(value) {
+		if hv.IsUndefined(value) || hv.IsNull(value) {
 			continue
 		}
 		return int(value.ToInteger())

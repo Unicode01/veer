@@ -559,7 +559,7 @@ func fwsStartDaemon(t *testing.T, opts fwsDaemonOptions) *fwsDaemon {
 	cfg := Config{WebBind: "127.0.0.1", WebPort: freeTCPPort(t), WebToken: egressNATTestToken,
 		PluginAdminToken: "firewall-system-admin", MaxWorkers: 1, DefaultEngine: ruleEngineKernel,
 		KernelEngineOrder: order, PluginsDir: pluginsDir,
-		PluginsEnabledSetting: &enabled, PluginsDataplaneSetting: &enabled, PluginsIsolationSetting: &disabled,
+		PluginsEnabledSetting: &enabled, PluginsDataplaneSetting: &enabled,
 		PluginsMinSandboxLevel: pluginSandboxLevelNone, PluginsRequireSigned: &disabled,
 		PluginsRemoteInstallEnabled: opts.RemoteInstall, Experimental: opts.Experimental}
 	if opts.NoPlugins {

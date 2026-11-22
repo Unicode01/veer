@@ -11,7 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/dop251/goja"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 )
 
 const (
@@ -36,7 +36,7 @@ type pluginMetricSeries struct {
 	updatedAt time.Time
 }
 
-func (h *pluginControlHost) metricCounter(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) metricCounter(call hv.FunctionCall) hv.Value {
 	h.requirePermission("metrics")
 	if len(call.Arguments) == 0 || len(call.Arguments) > 3 {
 		h.throwf("metrics.counter: expected name, optional delta, and optional labels")
@@ -44,7 +44,7 @@ func (h *pluginControlHost) metricCounter(call goja.FunctionCall) goja.Value {
 	name := h.metricNameArg(call.Arguments[0], "metrics.counter")
 	delta := 1.0
 	var labels map[string]string
-	if len(call.Arguments) >= 2 && !goja.IsUndefined(call.Arguments[1]) && !goja.IsNull(call.Arguments[1]) {
+	if len(call.Arguments) >= 2 && !hv.IsUndefined(call.Arguments[1]) && !hv.IsNull(call.Arguments[1]) {
 		if pluginMetricValueIsLabels(call.Arguments[1]) {
 			labels = h.metricLabelsArg(call.Arguments[1], "metrics.counter")
 		} else {
@@ -67,7 +67,7 @@ func (h *pluginControlHost) metricCounter(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(value)
 }
 
-func (h *pluginControlHost) metricGauge(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) metricGauge(call hv.FunctionCall) hv.Value {
 	h.requirePermission("metrics")
 	if len(call.Arguments) < 2 || len(call.Arguments) > 3 {
 		h.throwf("metrics.gauge: expected name, value, and optional labels")
@@ -85,13 +85,13 @@ func (h *pluginControlHost) metricGauge(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(value)
 }
 
-func (h *pluginControlHost) metricDelete(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) metricDelete(call hv.FunctionCall) hv.Value {
 	h.requirePermission("metrics")
 	if len(call.Arguments) == 0 || len(call.Arguments) > 2 {
 		h.throwf("metrics.delete: expected name and optional labels")
 	}
 	name := h.metricNameArg(call.Arguments[0], "metrics.delete")
-	labelsProvided := len(call.Arguments) == 2 && !goja.IsUndefined(call.Arguments[1]) && !goja.IsNull(call.Arguments[1])
+	labelsProvided := len(call.Arguments) == 2 && !hv.IsUndefined(call.Arguments[1]) && !hv.IsNull(call.Arguments[1])
 	var labels map[string]string
 	if labelsProvided {
 		labels = h.metricLabelsArg(call.Arguments[1], "metrics.delete")
@@ -99,7 +99,7 @@ func (h *pluginControlHost) metricDelete(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(h.metricRuntime().deletePluginMetric(h.plugin.ID, name, labels, labelsProvided))
 }
 
-func (h *pluginControlHost) metricClear(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) metricClear(call hv.FunctionCall) hv.Value {
 	h.requirePermission("metrics")
 	if len(call.Arguments) != 0 {
 		h.throwf("metrics.clear: no arguments are accepted")
@@ -107,7 +107,7 @@ func (h *pluginControlHost) metricClear(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(h.metricRuntime().clearPluginMetrics(h.plugin.ID))
 }
 
-func (h *pluginControlHost) metricList(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) metricList(call hv.FunctionCall) hv.Value {
 	h.requirePermission("metrics")
 	if len(call.Arguments) != 0 {
 		h.throwf("metrics.list: no arguments are accepted")
@@ -115,15 +115,15 @@ func (h *pluginControlHost) metricList(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(h.metricRuntime().pluginMetricSnapshot(h.plugin.ID))
 }
 
-func (h *pluginControlHost) metricRuntime() *gojaPluginControlRuntime {
+func (h *pluginControlHost) metricRuntime() *pluginControlManager {
 	if h.runtime == nil {
 		h.throwf("plugin metrics runtime is unavailable")
 	}
 	return h.runtime
 }
 
-func (h *pluginControlHost) metricNameArg(value goja.Value, api string) string {
-	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
+func (h *pluginControlHost) metricNameArg(value hv.Value, api string) string {
+	if value == nil || hv.IsUndefined(value) || hv.IsNull(value) {
 		h.throwf("%s: metric name is required", api)
 	}
 	exported, ok := value.Export().(string)
@@ -137,7 +137,7 @@ func (h *pluginControlHost) metricNameArg(value goja.Value, api string) string {
 	return name
 }
 
-func (h *pluginControlHost) metricNumberArg(value goja.Value, api string) float64 {
+func (h *pluginControlHost) metricNumberArg(value hv.Value, api string) float64 {
 	number, ok := pluginMetricNumber(value)
 	if !ok || math.IsNaN(number) || math.IsInf(number, 0) {
 		h.throwf("%s: metric value must be a finite number", api)
@@ -145,8 +145,8 @@ func (h *pluginControlHost) metricNumberArg(value goja.Value, api string) float6
 	return number
 }
 
-func pluginMetricNumber(value goja.Value) (float64, bool) {
-	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
+func pluginMetricNumber(value hv.Value) (float64, bool) {
+	if value == nil || hv.IsUndefined(value) || hv.IsNull(value) {
 		return 0, false
 	}
 	switch typed := value.Export().(type) {
@@ -182,16 +182,16 @@ func pluginMetricNumber(value goja.Value) (float64, bool) {
 	}
 }
 
-func pluginMetricValueIsLabels(value goja.Value) bool {
-	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
+func pluginMetricValueIsLabels(value hv.Value) bool {
+	if value == nil || hv.IsUndefined(value) || hv.IsNull(value) {
 		return false
 	}
 	_, ok := value.Export().(map[string]any)
 	return ok
 }
 
-func (h *pluginControlHost) metricLabelsArg(value goja.Value, api string) map[string]string {
-	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
+func (h *pluginControlHost) metricLabelsArg(value hv.Value, api string) map[string]string {
+	if value == nil || hv.IsUndefined(value) || hv.IsNull(value) {
 		return nil
 	}
 	obj := value.ToObject(h.vm)
@@ -221,7 +221,7 @@ func (h *pluginControlHost) metricLabelsArg(value goja.Value, api string) map[st
 	return labels
 }
 
-func (rt *gojaPluginControlRuntime) updatePluginMetric(pluginID, name, typeName string, value float64, labels map[string]string, add bool) (float64, error) {
+func (rt *pluginControlManager) updatePluginMetric(pluginID, name, typeName string, value float64, labels map[string]string, add bool) (float64, error) {
 	if rt == nil {
 		return 0, fmt.Errorf("runtime is unavailable")
 	}
@@ -264,7 +264,7 @@ func (rt *gojaPluginControlRuntime) updatePluginMetric(pluginID, name, typeName 
 	return value, nil
 }
 
-func (rt *gojaPluginControlRuntime) deletePluginMetric(pluginID, name string, labels map[string]string, labelsProvided bool) int {
+func (rt *pluginControlManager) deletePluginMetric(pluginID, name string, labels map[string]string, labelsProvided bool) int {
 	if rt == nil {
 		return 0
 	}
@@ -295,7 +295,7 @@ func (rt *gojaPluginControlRuntime) deletePluginMetric(pluginID, name string, la
 	return deleted
 }
 
-func (rt *gojaPluginControlRuntime) clearPluginMetrics(pluginID string) int {
+func (rt *pluginControlManager) clearPluginMetrics(pluginID string) int {
 	if rt == nil {
 		return 0
 	}
@@ -306,7 +306,7 @@ func (rt *gojaPluginControlRuntime) clearPluginMetrics(pluginID string) int {
 	return count
 }
 
-func (rt *gojaPluginControlRuntime) clearInactivePluginMetrics(active map[string]LoadedPlugin) {
+func (rt *pluginControlManager) clearInactivePluginMetrics(active map[string]LoadedPlugin) {
 	if rt == nil {
 		return
 	}
@@ -320,7 +320,7 @@ func (rt *gojaPluginControlRuntime) clearInactivePluginMetrics(active map[string
 	}
 }
 
-func (rt *gojaPluginControlRuntime) clearAllPluginMetrics() {
+func (rt *pluginControlManager) clearAllPluginMetrics() {
 	if rt == nil {
 		return
 	}
@@ -329,7 +329,7 @@ func (rt *gojaPluginControlRuntime) clearAllPluginMetrics() {
 	rt.metricMu.Unlock()
 }
 
-func (rt *gojaPluginControlRuntime) pluginMetricSnapshot(pluginID string) []PluginMetricState {
+func (rt *pluginControlManager) pluginMetricSnapshot(pluginID string) []PluginMetricState {
 	if rt == nil {
 		return nil
 	}

@@ -3,6 +3,7 @@
 package app
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -1925,9 +1926,7 @@ func TestKernelPluginPipelineRuntimeChainsPreForwardPlugin(t *testing.T) {
 		t.Fatalf("updated plugin attachment metrics = %+v, want observed packets", metricAttachment.Metrics)
 	}
 	packetsBeforeFailedUpdate := metricAttachment.Metrics.Total.Packets
-	if err := os.WriteFile(filepath.Join(pluginDir, "control.js"), []byte(`pipeline.attach({`), 0o644); err != nil {
-		t.Fatalf("write broken control.js: %v", err)
-	}
+	breakPacketObserverRegistrationForTest(t, pluginDir)
 	results, err = rt.Reconcile([]Rule{rule})
 	if err != nil {
 		t.Fatalf("Reconcile(broken plugin hot update) error = %v", err)
@@ -4466,4 +4465,28 @@ func (rt *orderedKernelRuntimeEntryTestRuntime) SnapshotAssignments() map[int64]
 
 func (rt *orderedKernelRuntimeEntryTestRuntime) Close() error {
 	return nil
+}
+
+// breakPacketObserverRegistrationForTest makes the plugin's declared hook
+// invalid, so a hot update fails at registration like a broken script did.
+func breakPacketObserverRegistrationForTest(t *testing.T, pluginDir string) {
+	t.Helper()
+	path := filepath.Join(pluginDir, "plugin.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read packet_observer manifest: %v", err)
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("decode packet_observer manifest: %v", err)
+	}
+	register := manifest["control"].(map[string]any)["register"].(map[string]any)
+	register["pipeline_attach"] = []any{map[string]any{"id": "observe-ingress"}}
+	data, err = json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatalf("encode packet_observer manifest: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write broken packet_observer manifest: %v", err)
+	}
 }

@@ -16,7 +16,7 @@ import (
 // plugin_firewall_prog_linux_test.go: ICMP and IP-protocol policies,
 // catch-all policies, the baseline checks, sets (blocklists, policy source
 // sets, add_to_set) and connection tracking with the tc_egress program.
-// Layouts follow plugins/firewall/lib/compile.js; TestFirewallExtMapKeysMatchCompiler
+// Layouts follow plugins/firewall/src/compile.rs; TestFirewallExtMapKeysMatchCompiler
 // pins them to the compiler's bytes.
 
 const (
@@ -89,7 +89,7 @@ func fwCTKey(proto uint8, laddr string, lport uint16, raddr string, rport uint16
 }
 
 func TestFirewallExtMapKeysMatchCompiler(t *testing.T) {
-	// Literals from plugins/firewall/test-compile.test.js.
+	// Literals from plugins/firewall/src/tests.rs.
 	for _, tc := range []struct {
 		got  []byte
 		want string

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 	"strings"
 	"sync"
 	"testing"
@@ -15,12 +16,12 @@ import (
 func TestPluginOperationsLifecyclePersistsEncryptedCASState(t *testing.T) {
 	db := openTestDB(t)
 	cfg := pluginsEnabledTestConfig(&Config{})
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	plugin := operationTestPlugin("operation_lifecycle")
 	host := operationTestHost(t, runtime, plugin, false)
 
-	value, err := host.vm.RunString(`
+	value, err := host.runTestJS(`
 var op = operations.begin({key: 'router_default', kind: 'router.apply', input: {password: 'secret-value'}, state: {step: 0}});
 op = operations.claim(op.id, op.revision);
 op = operations.checkpoint(op.id, op.revision, {phase: 'wan_ready', state: {step: 1}});
@@ -53,7 +54,7 @@ op;
 	}
 
 	reloaded := operationTestHost(t, runtime, plugin, false)
-	loaded, err := reloaded.vm.RunString(`operations.getByKey('router_default')`)
+	loaded, err := reloaded.runTestJS(`operations.getByKey('router_default')`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,11 +63,11 @@ op;
 	if input["password"] != "secret-value" || loadedResult["status"] != "completed" {
 		t.Fatalf("reloaded operation = %+v", loadedResult)
 	}
-	if _, err := reloaded.vm.RunString(`operations.claim(operations.getByKey('router_default').id, 1)`); err == nil || !strings.Contains(err.Error(), "stale") {
+	if _, err := reloaded.runTestJS(`operations.claim(operations.getByKey('router_default').id, 1)`); err == nil || !strings.Contains(err.Error(), "stale") {
 		t.Fatalf("stale claim error = %v", err)
 	}
 
-	restarted, err := reloaded.vm.RunString(`operations.begin({key:'router_default', kind:'router.apply', input:{password:'next'}, state:{step:0}, restart:true})`)
+	restarted, err := reloaded.runTestJS(`operations.begin({key:'router_default', kind:'router.apply', input:{password:'next'}, state:{step:0}, restart:true})`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,11 +79,11 @@ op;
 
 func TestPluginOperationsResumeFilteringAndTerminalRemoval(t *testing.T) {
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	host := operationTestHost(t, runtime, operationTestPlugin("operation_resume"), false)
 
-	if _, err := host.vm.RunString(`
+	if _, err := host.runTestJS(`
 var pending = operations.begin({key:'pending', kind:'test.run'});
 var running = operations.begin({key:'running', kind:'test.run'});
 running = operations.claim(running.id, running.revision);
@@ -95,44 +96,44 @@ complete = operations.complete(complete.id, complete.revision, {ok:true});
 `); err != nil {
 		t.Fatal(err)
 	}
-	value, err := host.vm.RunString(`operations.list({kind:'test.run', resumable:true, limit:10}).map(function (item) { return item.key; }).join(',')`)
+	value, err := host.runTestJS(`operations.list({kind:'test.run', resumable:true, limit:10}).map(function (item) { return item.key; }).join(',')`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := value.String(); got != "pending,running" {
 		t.Fatalf("resumable operations = %q", got)
 	}
-	if _, err := host.vm.RunString(`operations.remove(operations.getByKey('running').id)`); err == nil || !strings.Contains(err.Error(), "nonterminal") {
+	if _, err := host.runTestJS(`operations.remove(operations.getByKey('running').id)`); err == nil || !strings.Contains(err.Error(), "nonterminal") {
 		t.Fatalf("nonterminal remove error = %v", err)
 	}
-	if _, err := host.vm.RunString(`operations.remove(operations.getByKey('complete').id)`); err != nil {
+	if _, err := host.runTestJS(`operations.remove(operations.getByKey('complete').id)`); err != nil {
 		t.Fatal(err)
 	}
-	if value, err := host.vm.RunString(`operations.getByKey('complete')`); err != nil || !goja.IsNull(value) {
+	if value, err := host.runTestJS(`operations.getByKey('complete')`); err != nil || !goja.IsNull(value) {
 		t.Fatalf("removed operation = %v, err=%v", value, err)
 	}
 }
 
 func TestPluginOperationsRequirePermissionMainVMAndBoundedPayload(t *testing.T) {
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 
 	noPermission := operationTestPlugin("operation_denied")
 	noPermission.Control.Permissions = nil
 	host := operationTestHost(t, runtime, noPermission, false)
-	if _, err := host.vm.RunString(`operations.list()`); err == nil || !strings.Contains(err.Error(), "permission operation is required") {
+	if _, err := host.runTestJS(`operations.list()`); err == nil || !strings.Contains(err.Error(), "permission operation is required") {
 		t.Fatalf("permission error = %v", err)
 	}
 
 	worker := operationTestHost(t, runtime, operationTestPlugin("operation_worker"), true)
-	if _, err := worker.vm.RunString(`operations.list()`); err == nil || !strings.Contains(err.Error(), "main VM") {
+	if _, err := worker.runTestJS(`operations.list()`); err == nil || !strings.Contains(err.Error(), "main VM") {
 		t.Fatalf("worker operation error = %v", err)
 	}
 
 	bounded := operationTestHost(t, runtime, operationTestPlugin("operation_bounded"), false)
-	bounded.vm.Set("oversized", strings.Repeat("x", pluginOperationMaxFieldBytes+1))
-	if _, err := bounded.vm.RunString(`operations.begin({key:'large', kind:'test.run', input:oversized})`); err == nil || !strings.Contains(err.Error(), "exceeds") {
+	_ = bounded.setTestJSGlobal("oversized", strings.Repeat("x", pluginOperationMaxFieldBytes+1))
+	if _, err := bounded.runTestJS(`operations.begin({key:'large', kind:'test.run', input:oversized})`); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("oversized operation error = %v", err)
 	}
 }
@@ -160,12 +161,12 @@ func TestPluginOperationsRespectCombinedDatabaseQuotas(t *testing.T) {
 			cfg := pluginsEnabledTestConfig(&Config{PluginsResourceLimits: PluginResourceLimitConfig{
 				PluginDatabaseMB: test.pluginLimitMB, GlobalDatabaseMB: test.globalLimitMB,
 			}})
-			runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+			runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 			t.Cleanup(func() { _ = runtime.Close() })
 			plugin := operationTestPlugin("operation_quota")
 			host := operationTestHost(t, runtime, plugin, false)
-			host.vm.Set("largeInput", strings.Repeat("y", 200<<10))
-			if _, err := host.vm.RunString(`operations.begin({key:'large', kind:'test.run', input:{value:largeInput}})`); err == nil || !strings.Contains(err.Error(), test.wantError) {
+			_ = host.setTestJSGlobal("largeInput", strings.Repeat("y", 200<<10))
+			if _, err := host.runTestJS(`operations.begin({key:'large', kind:'test.run', input:{value:largeInput}})`); err == nil || !strings.Contains(err.Error(), test.wantError) {
 				t.Fatalf("operations.begin quota error = %v, want %q", err, test.wantError)
 			}
 			if count, err := store.CountPluginOperations(db, plugin.ID); err != nil || count != 0 {
@@ -178,11 +179,11 @@ func TestPluginOperationsRespectCombinedDatabaseQuotas(t *testing.T) {
 func TestPluginOperationSecretsRotateWithoutLosingState(t *testing.T) {
 	db := openTestDB(t)
 	cfg := pluginsEnabledTestConfig(&Config{})
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	plugin := operationTestPlugin("operation_rotate")
 	host := operationTestHost(t, runtime, plugin, false)
-	if _, err := host.vm.RunString(`operations.begin({key:'rotate', kind:'test.run', input:{token:'private'}})`); err != nil {
+	if _, err := host.runTestJS(`operations.begin({key:'rotate', kind:'test.run', input:{token:'private'}})`); err != nil {
 		t.Fatal(err)
 	}
 	before, err := store.PluginOperationByKey(db, plugin.ID, "rotate")
@@ -206,7 +207,7 @@ func TestPluginOperationSecretsRotateWithoutLosingState(t *testing.T) {
 	if err := json.Unmarshal([]byte(after.InputJSON), &envelope); err != nil || envelope.Secret == nil || envelope.Secret.KeyID == oldKey {
 		t.Fatalf("input envelope after rotation = %s, err=%v", after.InputJSON, err)
 	}
-	value, err := host.vm.RunString(`operations.getByKey('rotate').input.token`)
+	value, err := host.runTestJS(`operations.getByKey('rotate').input.token`)
 	if err != nil || value.String() != "private" {
 		t.Fatalf("decrypted operation after rotation = %v, err=%v", value, err)
 	}
@@ -235,7 +236,7 @@ exports.onReconcile = function () {
 
 	db := openTestDB(t)
 	cfg := isolatedPluginsTestConfig(&Config{PluginsDir: dir})
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	snapshot := runtime.Reconcile(loadPluginCatalogWithState(cfg, db))
 	state, ok := snapshot.stateFor("isolated_operations")
@@ -253,11 +254,11 @@ exports.onReconcile = function () {
 
 func TestPluginOperationsRejectCorruptCiphertext(t *testing.T) {
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	plugin := operationTestPlugin("operation_corrupt")
 	host := operationTestHost(t, runtime, plugin, false)
-	if _, err := host.vm.RunString(`operations.begin({key:'corrupt', kind:'test.run', input:{secret:'private'}})`); err != nil {
+	if _, err := host.runTestJS(`operations.begin({key:'corrupt', kind:'test.run', input:{secret:'private'}})`); err != nil {
 		t.Fatal(err)
 	}
 	item, err := store.PluginOperationByKey(db, plugin.ID, "corrupt")
@@ -268,7 +269,7 @@ func TestPluginOperationsRejectCorruptCiphertext(t *testing.T) {
 	if err := store.RewritePluginOperationPayloads(db, *item); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := host.vm.RunString(`operations.getByKey('corrupt')`); err == nil || !strings.Contains(err.Error(), "authenticate plugin secret") {
+	if _, err := host.runTestJS(`operations.getByKey('corrupt')`); err == nil || !strings.Contains(err.Error(), "authenticate plugin secret") {
 		t.Fatalf("corrupt operation read error = %v", err)
 	}
 }
@@ -276,7 +277,7 @@ func TestPluginOperationsRejectCorruptCiphertext(t *testing.T) {
 func TestPluginOperationWritesDoNotRaceSecretRotation(t *testing.T) {
 	db := openTestDB(t)
 	cfg := pluginsEnabledTestConfig(&Config{})
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	plugin := operationTestPlugin("operation_rotation_race")
 
@@ -293,7 +294,7 @@ func TestPluginOperationWritesDoNotRaceSecretRotation(t *testing.T) {
 		go func(index int) {
 			defer wg.Done()
 			<-start
-			_, err := hosts[index].vm.RunString(fmt.Sprintf(`operations.begin({key:'op_%d', kind:'test.run', input:{secret:'value_%d'}})`, index, index))
+			_, err := hosts[index].runTestJS(fmt.Sprintf(`operations.begin({key:'op_%d', kind:'test.run', input:{secret:'value_%d'}})`, index, index))
 			if err != nil {
 				errors <- err
 			}
@@ -315,7 +316,7 @@ func TestPluginOperationWritesDoNotRaceSecretRotation(t *testing.T) {
 	}
 
 	host := operationTestHost(t, runtime, plugin, false)
-	value, err := host.vm.RunString(`operations.list({limit:100}).every(function (item) { return /^value_[0-9]+$/.test(item.input.secret); })`)
+	value, err := host.runTestJS(`operations.list({limit:100}).every(function (item) { return /^value_[0-9]+$/.test(item.input.secret); })`)
 	if err != nil || !value.ToBoolean() {
 		t.Fatalf("operations after concurrent rotation = %v, err=%v", value, err)
 	}
@@ -328,10 +329,10 @@ func operationTestPlugin(id string) LoadedPlugin {
 	}}
 }
 
-func operationTestHost(t *testing.T, runtime *gojaPluginControlRuntime, plugin LoadedPlugin, worker bool) *pluginControlHost {
+func operationTestHost(t *testing.T, runtime *pluginControlManager, plugin LoadedPlugin, worker bool) *pluginControlHost {
 	t.Helper()
 	host := &pluginControlHost{
-		vm: goja.New(), db: runtime.db, cfg: runtime.cfg, runtime: runtime, plugin: plugin, workerVM: worker,
+		vm: hv.New(), db: runtime.db, cfg: runtime.cfg, runtime: runtime, plugin: plugin, workerVM: worker,
 	}
 	if err := host.install(); err != nil {
 		t.Fatal(err)

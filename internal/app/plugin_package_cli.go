@@ -323,10 +323,8 @@ func validatePluginPackageSource(source string) (LoadedPlugin, error) {
 	if plugin.Status != pluginStatusActive {
 		return LoadedPlugin{}, fmt.Errorf("plugin source is invalid: %s", plugin.Error)
 	}
-	isolation := false
 	plugin, err = registerPluginPackageCandidate(plugin, &Config{
-		PluginsIsolationSetting: &isolation,
-		PluginsMinSandboxLevel:  pluginSandboxLevelNone,
+		PluginsMinSandboxLevel: pluginSandboxLevelNone,
 	})
 	if err != nil {
 		return LoadedPlugin{}, err
@@ -354,9 +352,19 @@ func packPluginDirectory(plugin LoadedPlugin, output string, force bool) (plugin
 	}
 	entries := make([]pluginPackagePackEntry, 0)
 	var totalBytes int64
+	// A native plugin ships its library builds (lib/<triple>/); its Rust
+	// crate and build directory stay out of the package.
+	_, cargoErr := os.Stat(filepath.Join(absSource, "Cargo.toml"))
+	nativeSources := map[string]bool{"src": cargoErr == nil, "target": cargoErr == nil, "Cargo.toml": cargoErr == nil, "Cargo.lock": cargoErr == nil}
 	err = filepath.Walk(absSource, func(current string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		if filepath.Dir(current) == absSource && nativeSources[info.Name()] {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("plugin source contains symbolic link %s", current)

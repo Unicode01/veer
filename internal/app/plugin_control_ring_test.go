@@ -3,13 +3,12 @@ package app
 import (
 	"encoding/json"
 	"errors"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/dop251/goja"
 )
 
 func TestPluginRingSubscribeRegistersBoundedWorkerPush(t *testing.T) {
@@ -20,8 +19,8 @@ func TestPluginRingSubscribeRegistersBoundedWorkerPush(t *testing.T) {
 		},
 		Objects: []PluginObject{{ID: "main"}},
 	}
-	host := &pluginControlHost{vm: goja.New(), plugin: plugin, registrationPhase: true}
-	host.ebpfRingSubscribe(goja.FunctionCall{Arguments: []goja.Value{host.vm.ToValue(map[string]any{
+	host := &pluginControlHost{vm: hv.New(), plugin: plugin, registrationPhase: true}
+	host.ebpfRingSubscribe(hv.FunctionCall{Arguments: []hv.Value{host.vm.ToValue(map[string]any{
 		"id": "events", "object": "main", "map": "events", "worker": "reader", "handler": "onRing",
 	})}})
 	surface := host.surface
@@ -86,7 +85,7 @@ exports.onRing = function (ctx) {
 	}
 }
 
-func waitForPluginRingState(t *testing.T, runtime *gojaPluginControlRuntime, pluginID string, timeout time.Duration, ready func(PluginRingBusState) bool) PluginRingBusState {
+func waitForPluginRingState(t *testing.T, runtime *pluginControlManager, pluginID string, timeout time.Duration, ready func(PluginRingBusState) bool) PluginRingBusState {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
@@ -158,7 +157,7 @@ func (c *pluginRingReadControllerTest) ReadPluginRingBuffer(_ string, _ string, 
 	return pluginEBPFRingReadResult{TimedOut: true}, nil
 }
 
-func newPluginRingRuntimeForTest(t *testing.T, controller *pluginRingReadControllerTest, spec PluginRingSubscription, handler string) (*gojaPluginControlRuntime, LoadedPlugin) {
+func newPluginRingRuntimeForTest(t *testing.T, controller *pluginRingReadControllerTest, spec PluginRingSubscription, handler string) (*pluginControlManager, LoadedPlugin) {
 	t.Helper()
 	dir := t.TempDir()
 	writeTestPlugin(t, dir, "ring_push", `{
@@ -176,7 +175,7 @@ func newPluginRingRuntimeForTest(t *testing.T, controller *pluginRingReadControl
 		t.Fatal(err)
 	}
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
-	runtime := newPluginControlRuntime(openTestDB(t), cfg, controller).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(openTestDB(t), cfg, controller).(*pluginControlManager)
 	runtime.mu.Lock()
 	runtime.plugins = map[string]LoadedPlugin{plugin.ID: plugin}
 	runtime.snapshot = attachedPluginRingSnapshot(plugin.ID)
@@ -191,7 +190,7 @@ func attachedPluginRingSnapshot(pluginID string) pluginRuntimeSnapshot {
 	}}
 }
 
-func waitForPluginMetricValue(t *testing.T, runtime *gojaPluginControlRuntime, pluginID, name string, want float64, timeout time.Duration) {
+func waitForPluginMetricValue(t *testing.T, runtime *pluginControlManager, pluginID, name string, want float64, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {

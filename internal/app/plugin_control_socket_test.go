@@ -60,7 +60,7 @@ exports.onAction = function (ctx) {
 `)
 
 	transport := newPluginControlSocketTestTransport()
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*pluginControlManager)
 	rt.socketRegistry = newPluginControlSocketRegistry(transport)
 	t.Cleanup(func() { _ = rt.Close() })
 	plugin := testPersistentSocketPlugin(dir, "socket_plugin", []string{"net.tcp", "kv"}, []string{"tcp"})
@@ -132,7 +132,7 @@ exports.onAction = function () {
 };
 `)
 	transport := newPluginControlSocketTestTransport()
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*pluginControlManager)
 	rt.socketRegistry = newPluginControlSocketRegistry(transport)
 	t.Cleanup(func() { _ = rt.Close() })
 	plugin := testPersistentSocketPlugin(dir, "socket_denied", []string{"net.tcp"}, []string{"udp"})
@@ -158,7 +158,7 @@ exports.onAction = function () {
 };
 `)
 	transport := newPluginControlSocketTestTransport()
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*pluginControlManager)
 	rt.socketRegistry = newPluginControlSocketRegistry(transport)
 	t.Cleanup(func() { _ = rt.Close() })
 	plugin := testPersistentSocketPlugin(dir, "socket_cleanup", []string{"net.tcp"}, []string{"tcp"})
@@ -202,7 +202,7 @@ exports.onWireData = function (ctx) {
 };
 `)
 	transport := newPluginControlSocketTestTransport()
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*pluginControlManager)
 	rt.socketRegistry = newPluginControlSocketRegistry(transport)
 	t.Cleanup(func() { _ = rt.Close() })
 	plugin := testPersistentSocketPlugin(dir, "socket_watch", []string{"net.tcp", "kv", "worker"}, []string{"tcp"})
@@ -266,7 +266,7 @@ exports.onClientData = function (ctx) {
 };
 `)
 	transport := newPluginControlSocketTestTransport()
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*pluginControlManager)
 	rt.socketRegistry = newPluginControlSocketRegistry(transport)
 	t.Cleanup(func() { _ = rt.Close() })
 	plugin := testPersistentSocketPlugin(dir, "socket_service", []string{"net.tcp", "kv", "worker"}, []string{"tcp"})
@@ -639,7 +639,7 @@ exports.onUpgradeRestore = function (ctx) { socketHandle = (ctx.upgrade.state ||
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
 	transport := newPluginControlSocketTestTransport()
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	rt.socketRegistry = newPluginControlSocketRegistry(transport)
 	t.Cleanup(func() {
 		_ = rt.Close()

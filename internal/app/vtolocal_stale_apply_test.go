@@ -18,6 +18,7 @@ import (
 // afterwards must not bring back the dummy, its addresses and routes, or the
 // deleted link record.
 func TestBundledVToLocalStaleLinkSnapshotAfterTeardownAndDelete(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "vtolocal")
 	dir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, filepath.Join("..", "..", "plugins", "vtolocal"), dir)
 	plugin, err := loadPluginFromDir(dir, "vtolocal")
@@ -28,7 +29,7 @@ func TestBundledVToLocalStaleLinkSnapshotAfterTeardownAndDelete(t *testing.T) {
 	apply := pluginActionByIDForTest(t, plugin, "apply")
 	teardown := pluginActionByIDForTest(t, plugin, "teardown")
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(dir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(dir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })

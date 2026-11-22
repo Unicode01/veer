@@ -123,7 +123,7 @@ Veer 适合把 Linux 宿主机作为 VM/容器的默认转发器或二级路由�
 - SQLite 配置与状态持久化
 - Worker 热重载和 draining
 - TC/XDP 内核态热更新、状态观测和异常恢复
-- 插件系统：Goja 控制面在独立沙箱子进程中运行，数据面支持 TC pipeline、XDP Dispatcher 与原生 Netfilter Hook；插件包签名、TUF 仓库、原子安装与回滚
+- 插件系统：原生控制面（C ABI 共享库，Rust SDK）在插件 worker 进程中运行，数据面支持 TC pipeline、XDP Dispatcher 与原生 Netfilter Hook；插件包签名、TUF 仓库、原子安装与回滚
 - WHMCS addon 插件
 
 共享站点的 QUIC 开关默认关闭。启用后，Veer 会监听同一入口 IP 的 UDP `443`，从 QUIC v1/v2 Initial 中解析 TLS SNI，再把原始数据报转发到 `backend_https_port`；Veer 不终止 TLS，也不替后端校验证书。`deploy.sh` 不会为这个可选功能自动开放 UDP `443`；启用前需确认防火墙允许该端口、后端在同一端口提供 QUIC/HTTP/3，且没有普通 UDP 规则或端口范围占用该监听地址。使用 UFW 时可执行：
@@ -242,8 +242,7 @@ Authorization: Bearer <web_token>
 - `managed_network_auto_repair`：托管网络链路变化后的自动修复
 - `plugins_enabled`：是否扫描并运行外部插件；默认关闭，必须手动设为 `true` 才会启动外部插件控制面；内置 `veer_core` 始终可见
 - `plugins_dataplane_enabled`：是否允许外部插件进入数据面；默认关闭。开启后可使用按 priority 围绕 `Veer Core` 排序的 forward/reply TC 链、XDP Dispatcher 和原生 Netfilter Hook
-- `plugins_isolation`：是否让每个插件控制 VM 和命名 Worker 运行在独立子进程；默认开启，仅受信任的本地调试才应关闭
-- `plugins_min_sandbox_level`：插件 Host 最低隔离等级，允许 `none`、`minimal`、`partial`、`full`；默认 `full`，达不到时在执行插件 JavaScript 前拒绝启动
+- `plugins_min_sandbox_level`：插件托管进程（`process.start`）的资源限制要求，允许 `none`、`minimal`、`partial`、`full`；默认 `full`，无法建立 cgroup 限制时拒绝启动进程
 - `plugins_remote_install_enabled`：是否开放远程插件安装、更新、回滚、卸载、仓库/信任管理和代码重载；默认关闭，WebUI 同步隐藏入口。关闭时可向本地受信任插件授予 `exec` 权限；开启后禁止 exec。只能在本机修改配置并重启生效，插件页面和资源/动作访问不受该开关影响
 - `plugins_require_signed_packages`：是否要求插件包带可独立验证的 Ed25519 签名；默认开启。首次出现的发布者可直接在安装审核中确认，无需预先维护信任列表；开发环境可显式关闭后审批未签名包
 - `plugin_admin_token`：插件安装、信任、启停和热加载使用的独立高权限令牌；留空时相关写 API 禁用，非空时必须不同于 `web_token`

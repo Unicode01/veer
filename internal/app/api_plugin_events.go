@@ -136,12 +136,12 @@ func decodePluginEventDeadLetterMutation(w http.ResponseWriter, r *http.Request)
 	return request, true
 }
 
-func pluginEventControlRuntime(pm *ProcessManager) *gojaPluginControlRuntime {
+func pluginEventControlRuntime(pm *ProcessManager) *pluginControlManager {
 	if pm == nil {
 		return nil
 	}
 	pm.mu.Lock()
-	runtime, _ := pm.pluginControlRuntime.(*gojaPluginControlRuntime)
+	runtime, _ := pm.pluginControlRuntime.(*pluginControlManager)
 	pm.mu.Unlock()
 	return runtime
 }

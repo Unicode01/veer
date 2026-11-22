@@ -38,27 +38,9 @@ func TestManagedRuntimeDriftCheckRunsOnChangeWhileNetlinkIsWatched(t *testing.T)
 	}
 }
 
-func TestPluginHostRSSSampleIntervalByHeadroom(t *testing.T) {
-	const limit = 224 << 20
-	cases := []struct {
-		rss  uint64
-		hard bool
-		want time.Duration
-	}{
-		{10 << 20, true, pluginHostRSSSampleFar},
-		{limit / 2, true, pluginHostRSSSampleNear},
-		{10 << 20, false, pluginHostRSSSampleNear},
-	}
-	for _, c := range cases {
-		if got := pluginHostRSSSampleInterval(c.rss, limit, c.hard); got != c.want {
-			t.Errorf("rss %d hard %v: %v, want %v", c.rss, c.hard, got, c.want)
-		}
-	}
-}
-
 func TestPluginEnabledStateIsCachedUntilItIsWritten(t *testing.T) {
 	db := openTestDB(t)
-	rt := &gojaPluginControlRuntime{db: db}
+	rt := &pluginControlManager{db: db}
 	if err := store.SetPluginEnabled(db, "cached", true); err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +152,7 @@ func TestPluginNetResyncReachesNetSubscribersWhenEventsAreLost(t *testing.T) {
 		t.Fatal("a resync reached a plugin without net.admin")
 	}
 
-	rt := &gojaPluginControlRuntime{
+	rt := &pluginControlManager{
 		plugins:            map[string]LoadedPlugin{"wan": plugin},
 		eventSubscriptions: map[string]*pluginControlEventSubscriptionRuntime{},
 	}

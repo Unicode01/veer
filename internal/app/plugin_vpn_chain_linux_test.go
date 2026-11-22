@@ -188,7 +188,7 @@ func runVPNChainTopology(t *testing.T) {
 	cfg := Config{WebBind: "127.0.0.1", WebPort: freeTCPPort(t), WebToken: egressNATTestToken,
 		PluginAdminToken: "vpn-chain-integration-admin", MaxWorkers: 1, DefaultEngine: ruleEngineKernel,
 		KernelEngineOrder: []string{kernelEngineTC}, PluginsDir: filepath.Join(work, "plugins"),
-		PluginsEnabledSetting: &enabled, PluginsDataplaneSetting: &enabled, PluginsIsolationSetting: &disabled,
+		PluginsEnabledSetting: &enabled, PluginsDataplaneSetting: &enabled,
 		PluginsMinSandboxLevel: pluginSandboxLevelNone, PluginsRequireSigned: &disabled,
 		Experimental: map[string]bool{experimentalFeatureKernelTCPreparedL2: true}}
 	configPath, logPath := writeJSON("config.json", cfg), filepath.Join(work, "veer.log")

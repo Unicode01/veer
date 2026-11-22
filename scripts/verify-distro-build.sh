@@ -32,5 +32,7 @@ python3 scripts/verify-platform-behavior.py
 export PATH="/opt/veer-go/bin:$PATH"
 export CGO_ENABLED=0
 export GOMAXPROCS=2
-VEER_BUILD_PLUGIN_SDK=0 bash release.sh amd64
+# Like bootstrap without VEER_INSTALL_PLUGINS: the bundled native plugins
+# need the Rust cross toolchain, which release builders install.
+VEER_BUILD_PLUGIN_BUNDLE=0 VEER_BUILD_PLUGIN_SDK=0 bash release.sh amd64
 go test ./internal/app ./internal/kernelcap ./internal/tproxysetup -run 'TestEBPFInlineHeadersOverrideWeakSystemMacro|TestPluginHostMountNamespaceOperation|TestEnsureRouting|TestCheckPluginCompatibility' -count=1

@@ -99,7 +99,7 @@ func TestCheckPluginCompatibility(t *testing.T) {
 		OS:             "linux",
 		Arch:           "arm64",
 		KernelRelease:  "6.8.12",
-		Features:       map[string]struct{}{"control.goja.v1": {}, "dataplane.tc_pipeline.v2": {}},
+		Features:       map[string]struct{}{"control.native.v1": {}, "dataplane.tc_pipeline.v2": {}},
 	}
 	compatible := relationshipTestPlugin("compatible", "1.0.0")
 	compatible.Compatibility = &PluginCompatibility{
@@ -108,7 +108,7 @@ func TestCheckPluginCompatibility(t *testing.T) {
 		OS:            []string{"linux"},
 		Architectures: []string{"amd64", "arm64"},
 		Kernel:        ">=6.6.0",
-		Features:      []string{"control.goja.v1"},
+		Features:      []string{"control.native.v1"},
 	}
 	if err := checkPluginCompatibility(compatible, env); err != nil {
 		t.Fatalf("compatible plugin error = %v", err)

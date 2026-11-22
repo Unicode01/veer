@@ -9,7 +9,7 @@ import (
 
 func TestPluginDurableEventSchedulesNextRetryAndIdleRecovery(t *testing.T) {
 	db := openTestDB(t)
-	rt := &gojaPluginControlRuntime{db: db}
+	rt := &pluginControlManager{db: db}
 	sub := &pluginControlEventSubscriptionRuntime{pluginID: "scheduler", spec: PluginEventSubscription{ID: "events", Delivery: pluginEventDeliveryDurable},
 		queue: make(chan pluginControlBusEvent, 2), stop: make(chan struct{}), wake: make(chan struct{}, 1), durableInFlight: make(map[string]struct{})}
 	if delay := rt.enqueueDueDurablePluginEvents(sub); delay != pluginEventDurableRecoveryInterval {

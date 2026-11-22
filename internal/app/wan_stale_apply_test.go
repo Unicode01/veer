@@ -15,6 +15,7 @@ import (
 // snapshot afterwards must not resurrect any record or boundary of the
 // forgotten WAN.
 func TestWANStaleSessionSnapshotAfterForgetLeavesNoRecords(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	dir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, filepath.Join("..", "..", "plugins", "wan_core"), dir)
 	plugin, err := loadPluginFromDir(dir, "wan_core")
@@ -28,7 +29,7 @@ func TestWANStaleSessionSnapshotAfterForgetLeavesNoRecords(t *testing.T) {
 	}
 	sessions := pluginResourceByIDForTest(t, plugin, "sessions")
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(dir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(dir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })

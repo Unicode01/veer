@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dop251/goja"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 )
 
 const (
@@ -112,15 +112,15 @@ type pluginRingSubscriptionRuntime struct {
 	lastError    string
 }
 
-func (h *pluginControlHost) ebpfRingSubscribe(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) ebpfRingSubscribe(call hv.FunctionCall) hv.Value {
 	h.requireRegistrationPermission("ebpf.load", "ebpf.ringSubscribe")
 	if !pluginControlHasPermission(h.plugin, "ebpf.map_read") {
 		h.throwf("ebpf.ringSubscribe requires ebpf.map_read permission")
 	}
-	if !pluginControlHasPermission(h.plugin, "worker") {
+	if !pluginHandlesAsyncEvents(h.plugin) {
 		h.throwf("ebpf.ringSubscribe requires worker permission")
 	}
-	if len(call.Arguments) != 1 || goja.IsUndefined(call.Arguments[0]) || goja.IsNull(call.Arguments[0]) {
+	if len(call.Arguments) != 1 || hv.IsUndefined(call.Arguments[0]) || hv.IsNull(call.Arguments[0]) {
 		h.throwf("ebpf.ringSubscribe: spec is required")
 	}
 	var spec PluginRingSubscription
@@ -142,10 +142,10 @@ func (h *pluginControlHost) ebpfRingSubscribe(call goja.FunctionCall) goja.Value
 		}
 	}
 	h.surface.RingSubscriptions = append(h.surface.RingSubscriptions, spec)
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
-func (h *pluginControlHost) ebpfRingStats(goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) ebpfRingStats(hv.FunctionCall) hv.Value {
 	h.requirePermission("ebpf.map_read")
 	if h.runtime == nil {
 		return h.vm.ToValue(PluginRingBusState{PendingByteLimit: pluginRingPluginPendingByteLimit})
@@ -170,6 +170,11 @@ func normalizePluginRingSubscription(spec *PluginRingSubscription) error {
 	}
 	if reason, reserved := pluginControlReservedMapNames[spec.Map]; reserved {
 		return fmt.Errorf("map %s is reserved for %s", spec.Map, reason)
+	}
+	// As with event subscriptions, no worker means the default one; native
+	// plugins have no workers and leave it out.
+	if strings.TrimSpace(spec.Worker) == "" {
+		spec.Worker = pluginEventDefaultWorker
 	}
 	if spec.Worker, err = pluginPathToken(spec.Worker); err != nil {
 		return fmt.Errorf("worker: %w", err)
@@ -209,7 +214,7 @@ func validatePluginRingSubscriptions(plugin *LoadedPlugin) error {
 	if plugin == nil || len(plugin.RingSubscriptions) == 0 {
 		return nil
 	}
-	if !pluginControlHasPermission(*plugin, "ebpf.load") || !pluginControlHasPermission(*plugin, "ebpf.map_read") || !pluginControlHasPermission(*plugin, "worker") {
+	if !pluginControlHasPermission(*plugin, "ebpf.load") || !pluginControlHasPermission(*plugin, "ebpf.map_read") || !pluginHandlesAsyncEvents(*plugin) {
 		return fmt.Errorf("ring subscriptions require ebpf.load, ebpf.map_read, and worker permissions")
 	}
 	if len(plugin.RingSubscriptions) > pluginRingMaxSubscriptions {
@@ -252,7 +257,7 @@ func pluginHasRingSubscription(plugin LoadedPlugin, objectID, mapName string) bo
 	return false
 }
 
-func (rt *gojaPluginControlRuntime) reconcilePluginRingSubscriptions(plugins map[string]LoadedPlugin, snapshot pluginRuntimeSnapshot) {
+func (rt *pluginControlManager) reconcilePluginRingSubscriptions(plugins map[string]LoadedPlugin, snapshot pluginRuntimeSnapshot) {
 	if rt == nil {
 		return
 	}
@@ -298,7 +303,7 @@ func (rt *gojaPluginControlRuntime) reconcilePluginRingSubscriptions(plugins map
 // there never started, and one whose object was reloaded kept reading the
 // old ring. Handlers do not hold rt.mu while they run, so this is safe to
 // call from inside one.
-func (rt *gojaPluginControlRuntime) ReconcilePluginRingSubscriptionsAfterDataplane(snapshot pluginRuntimeSnapshot) {
+func (rt *pluginControlManager) ReconcilePluginRingSubscriptionsAfterDataplane(snapshot pluginRuntimeSnapshot) {
 	if rt == nil {
 		return
 	}
@@ -308,7 +313,7 @@ func (rt *gojaPluginControlRuntime) ReconcilePluginRingSubscriptionsAfterDatapla
 	rt.reconcilePluginRingSubscriptions(plugins, snapshot)
 }
 
-func (rt *gojaPluginControlRuntime) runPluginRingReader(controller pluginEBPFRingReadController, sub *pluginRingSubscriptionRuntime) {
+func (rt *pluginControlManager) runPluginRingReader(controller pluginEBPFRingReadController, sub *pluginRingSubscriptionRuntime) {
 	defer close(sub.readerDone)
 	retry := pluginRingReadRetryMin
 	for !sub.stopped.Load() {
@@ -351,7 +356,7 @@ func (rt *gojaPluginControlRuntime) runPluginRingReader(controller pluginEBPFRin
 	}
 }
 
-func (rt *gojaPluginControlRuntime) runPluginRingDelivery(sub *pluginRingSubscriptionRuntime) {
+func (rt *pluginControlManager) runPluginRingDelivery(sub *pluginRingSubscriptionRuntime) {
 	defer close(sub.deliveryDone)
 	for {
 		select {
@@ -409,7 +414,7 @@ func pluginRingBatchPayload(spec PluginRingSubscription, result pluginEBPFRingRe
 	})
 }
 
-func (rt *gojaPluginControlRuntime) enqueuePluginRingBatch(sub *pluginRingSubscriptionRuntime, batch pluginRingBatch) bool {
+func (rt *pluginControlManager) enqueuePluginRingBatch(sub *pluginRingSubscriptionRuntime, batch pluginRingBatch) bool {
 	bytes := int64(len(batch.payload))
 	rt.ringMu.Lock()
 	if rt.ringPendingBytes == nil {
@@ -438,7 +443,7 @@ func (rt *gojaPluginControlRuntime) enqueuePluginRingBatch(sub *pluginRingSubscr
 	}
 }
 
-func (rt *gojaPluginControlRuntime) releasePluginRingPending(sub *pluginRingSubscriptionRuntime, bytes int64) {
+func (rt *pluginControlManager) releasePluginRingPending(sub *pluginRingSubscriptionRuntime, bytes int64) {
 	if bytes <= 0 {
 		return
 	}
@@ -453,7 +458,7 @@ func (rt *gojaPluginControlRuntime) releasePluginRingPending(sub *pluginRingSubs
 	rt.ringMu.Unlock()
 }
 
-func (rt *gojaPluginControlRuntime) stopPluginRingSubscriptions(pluginID string) {
+func (rt *pluginControlManager) stopPluginRingSubscriptions(pluginID string) {
 	if rt == nil {
 		return
 	}
@@ -471,7 +476,7 @@ func (rt *gojaPluginControlRuntime) stopPluginRingSubscriptions(pluginID string)
 	waitPluginRingReaders(stopped)
 }
 
-func (rt *gojaPluginControlRuntime) stopAllPluginRingSubscriptions() {
+func (rt *pluginControlManager) stopAllPluginRingSubscriptions() {
 	if rt == nil {
 		return
 	}
@@ -542,7 +547,7 @@ func (sub *pluginRingSubscriptionRuntime) noteRingError(err error) {
 	sub.lastMu.Unlock()
 }
 
-func (rt *gojaPluginControlRuntime) pluginRingBusSnapshot(pluginID string) PluginRingBusState {
+func (rt *pluginControlManager) pluginRingBusSnapshot(pluginID string) PluginRingBusState {
 	state := PluginRingBusState{PendingByteLimit: pluginRingPluginPendingByteLimit}
 	if rt == nil {
 		return state

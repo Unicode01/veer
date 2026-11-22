@@ -76,7 +76,7 @@ usage() {
                         失败时保留临时目录，默认 1
   VEER_SKIP_DEPS       设为 1 时跳过系统依赖安装
   VEER_SKIP_GO         设为 1 时跳过 Go 安装检查
-  VEER_INSTALL_PLUGINS 设为 1 时安装 bundled stable 插件，默认 0
+  VEER_INSTALL_PLUGINS 设为 1 时安装 bundled stable 插件，默认 0；源码构建时需要 Rust 与 cargo-zigbuild
   VEER_SERVICE_MANAGER 服务管理器，auto/systemd/openrc，默认 auto
 
 兼容性:

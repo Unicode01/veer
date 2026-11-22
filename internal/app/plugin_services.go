@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/Masterminds/semver/v3"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 	"github.com/Unicode01/veer/internal/store"
-	"github.com/dop251/goja"
 )
 
 const pluginServiceEndpointLimit = 64
@@ -219,9 +219,9 @@ func validatePluginServiceContractUpgrade(previous, candidate LoadedPlugin) erro
 	return nil
 }
 
-func (h *pluginControlHost) pluginRegisterService(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) pluginRegisterService(call hv.FunctionCall) hv.Value {
 	h.requireRegistrationPermission("plugin.register", "plugin.service")
-	if len(call.Arguments) == 0 || goja.IsUndefined(call.Arguments[0]) || goja.IsNull(call.Arguments[0]) {
+	if len(call.Arguments) == 0 || hv.IsUndefined(call.Arguments[0]) || hv.IsNull(call.Arguments[0]) {
 		h.throwf("plugin.service: spec is required")
 	}
 	var service PluginService
@@ -234,10 +234,10 @@ func (h *pluginControlHost) pluginRegisterService(call goja.FunctionCall) goja.V
 	}
 	h.requirePluginRegistrationCapacity("services", len(h.surface.Services)+1, h.pluginResourceLimits().ServicesPerPlugin)
 	h.surface.Services = append(h.surface.Services, service)
-	return goja.Undefined()
+	return hv.Undefined()
 }
 
-func (h *pluginControlHost) pluginServiceList(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) pluginServiceList(call hv.FunctionCall) hv.Value {
 	h.requireAnyPermission("plugins.services.list", "plugin.action", "plugin.resource")
 	query := h.pluginServiceQuery(call, false, "plugins.services.list")
 	providers := h.pluginServiceProviders(query, "")
@@ -252,7 +252,7 @@ func (h *pluginControlHost) pluginServiceList(call goja.FunctionCall) goja.Value
 	return h.vm.ToValue(values)
 }
 
-func (h *pluginControlHost) pluginServiceResolve(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) pluginServiceResolve(call hv.FunctionCall) hv.Value {
 	h.requireAnyPermission("plugins.services.resolve", "plugin.action", "plugin.resource")
 	query := h.pluginServiceQuery(call, true, "plugins.services.resolve")
 	provider := h.resolvePluginServiceProvider(query, "", "plugins.services.resolve")
@@ -275,9 +275,9 @@ func pluginServiceProviderObject(provider PluginServiceProvider) (map[string]any
 	return value, nil
 }
 
-func (h *pluginControlHost) pluginServiceCall(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) pluginServiceCall(call hv.FunctionCall) hv.Value {
 	h.requirePermission("plugin.action")
-	if len(call.Arguments) == 0 || goja.IsUndefined(call.Arguments[0]) || goja.IsNull(call.Arguments[0]) {
+	if len(call.Arguments) == 0 || hv.IsUndefined(call.Arguments[0]) || hv.IsNull(call.Arguments[0]) {
 		h.throwf("plugins.services.call: request is required")
 	}
 	var request pluginControlServiceCallRequest
@@ -301,9 +301,9 @@ func (h *pluginControlHost) pluginServiceCall(call goja.FunctionCall) goja.Value
 	return h.vm.ToValue(response)
 }
 
-func (h *pluginControlHost) pluginServiceQuery(call goja.FunctionCall, required bool, api string) pluginControlServiceQuery {
+func (h *pluginControlHost) pluginServiceQuery(call hv.FunctionCall, required bool, api string) pluginControlServiceQuery {
 	query := pluginControlServiceQuery{}
-	if len(call.Arguments) > 0 && !goja.IsUndefined(call.Arguments[0]) && !goja.IsNull(call.Arguments[0]) {
+	if len(call.Arguments) > 0 && !hv.IsUndefined(call.Arguments[0]) && !hv.IsNull(call.Arguments[0]) {
 		h.exportJSONValue(call.Arguments[0], &query, api)
 	} else if required {
 		h.throwf("%s: query is required", api)

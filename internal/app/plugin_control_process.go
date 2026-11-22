@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dop251/goja"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 )
 
 const pluginProcessConfigLimit = 1 << 20
@@ -198,7 +198,7 @@ func (h *pluginControlHost) managedProcessRegistry(api string) *pluginProcessReg
 	return h.runtime.processRegistry
 }
 
-func (h *pluginControlHost) processStart(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) processStart(call hv.FunctionCall) hv.Value {
 	const api = "process.start"
 	registry := h.managedProcessRegistry(api)
 	data, err := json.Marshal(h.requiredObjectArg(call, 0, "request").Export())
@@ -226,7 +226,7 @@ func (h *pluginControlHost) processStart(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(status.value())
 }
 
-func (h *pluginControlHost) processStatus(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) processStatus(call hv.FunctionCall) hv.Value {
 	r := h.managedProcessRegistry("process.status")
 	id := h.processIDArg(call)
 	p := r.get(h.plugin.ID, id)
@@ -236,7 +236,7 @@ func (h *pluginControlHost) processStatus(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(p.snapshot().value())
 }
 
-func (h *pluginControlHost) processList(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) processList(call hv.FunctionCall) hv.Value {
 	r := h.managedProcessRegistry("process.list")
 	r.mu.Lock()
 	items := make([]pluginProcessStatus, 0)
@@ -254,7 +254,7 @@ func (h *pluginControlHost) processList(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(values)
 }
 
-func (h *pluginControlHost) processLogs(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) processLogs(call hv.FunctionCall) hv.Value {
 	r := h.managedProcessRegistry("process.logs")
 	p := r.get(h.plugin.ID, h.processIDArg(call))
 	if p == nil {
@@ -265,7 +265,7 @@ func (h *pluginControlHost) processLogs(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(map[string]any{"stdout": stdout, "stderr": stderr, "truncated": outTruncated || errTruncated})
 }
 
-func (h *pluginControlHost) processStop(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) processStop(call hv.FunctionCall) hv.Value {
 	r := h.managedProcessRegistry("process.stop")
 	id := h.processIDArg(call)
 	status := r.Stop(h.plugin.ID, id)
@@ -273,7 +273,7 @@ func (h *pluginControlHost) processStop(call goja.FunctionCall) goja.Value {
 	return h.vm.ToValue(status.value())
 }
 
-func (h *pluginControlHost) processRestart(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) processRestart(call hv.FunctionCall) hv.Value {
 	r := h.managedProcessRegistry("process.restart")
 	id := h.processIDArg(call)
 	p := r.get(h.plugin.ID, id)
@@ -316,7 +316,7 @@ func (r *pluginProcessRegistry) get(owner, id string) *pluginManagedProcess {
 	return r.entries[owner+"/"+id]
 }
 
-func (h *pluginControlHost) processIDArg(call goja.FunctionCall) string {
+func (h *pluginControlHost) processIDArg(call hv.FunctionCall) string {
 	id, ok := call.Argument(0).Export().(string)
 	if !ok || !pluginProcessIDPattern.MatchString(id) {
 		h.throwf("invalid process id")
@@ -431,7 +431,7 @@ func (r *pluginProcessRegistry) Start(owner, generation string, req pluginProces
 		maxRestarts: req.MaxRestarts,
 		status:      pluginProcessStatus{ID: req.ID, State: "starting", ExitCode: -1},
 		limitOwner:  pluginManagedProcessLimitOwner(key), limitConfig: r.cfg,
-		owner:       owner, registry: r,
+		owner: owner, registry: r,
 	}
 	run, cleanup, err := p.launch(req, dir)
 	if err != nil {

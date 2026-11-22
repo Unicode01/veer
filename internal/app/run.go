@@ -72,7 +72,6 @@ func Main(buildNonce string) {
 	workerMode := flag.Bool("worker", false, "run in worker mode")
 	rangeWorkerMode := flag.Bool("range-worker", false, "run in range worker mode")
 	sharedProxyMode := flag.Bool("shared-proxy", false, "run as shared proxy")
-	pluginHostMode := flag.Bool("plugin-host", false, "run isolated plugin control host")
 	pluginProcessKeeperMode := flag.Bool("plugin-process-keeper", false, "keep one managed plugin process")
 	workerIndex := flag.Int("id", 0, "worker slot index")
 	sockPath := flag.String("sock", "", "unix socket path")
@@ -86,13 +85,6 @@ func Main(buildNonce string) {
 		fmt.Fprintf(os.Stderr, "veer: unknown command %q\n\n", flag.Arg(0))
 		writeVeerUsage(os.Stderr)
 		os.Exit(2)
-	}
-
-	if *pluginHostMode {
-		if err := runPluginHostProcess(); err != nil {
-			log.Fatalf("plugin host: %v", err)
-		}
-		return
 	}
 
 	if *pluginProcessKeeperMode {

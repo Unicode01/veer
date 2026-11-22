@@ -49,7 +49,7 @@ func (c *bundledRepairNetAdmin) NeighReplace(req pluginControlNetNeighRequest) e
 	return nil
 }
 
-func newBundledWANRepairFixture(t testing.TB) (*gojaPluginControlRuntime, *bundledRepairNetAdmin) {
+func newBundledWANRepairFixture(t testing.TB) (*pluginControlManager, *bundledRepairNetAdmin) {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, filepath.Join("..", "..", "plugins", "wan_core"), root)
@@ -57,7 +57,7 @@ func newBundledWANRepairFixture(t testing.TB) (*gojaPluginControlRuntime, *bundl
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(root)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(root)}), nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	controller := &bundledRepairNetAdmin{}
 	rt.netAdmin = controller
@@ -90,6 +90,7 @@ func bundledRepairWriteCount(calls []string) int {
 }
 
 func TestBundledWANRepairSkipsStableWritesAndRepairsDrift(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	rt, controller := newBundledWANRepairFixture(t)
 	const untouched = "2000-01-01 00:00:00"
 	if _, err := rt.db.Exec(`UPDATE plugin_owned_resources SET updated_at = ? WHERE plugin_id = 'wan_core'`, untouched); err != nil {
@@ -127,6 +128,7 @@ func TestBundledWANRepairSkipsStableWritesAndRepairsDrift(t *testing.T) {
 }
 
 func TestBundledWANLiveOffloadModeSwitch(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	rt, controller := newBundledWANRepairFixture(t)
 	plugin, err := loadPluginFromDir(filepath.Join(rt.cfg.PluginsDir, "wan_core"), "wan_core")
 	if err != nil {

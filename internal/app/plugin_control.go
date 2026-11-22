@@ -2,6 +2,7 @@ package app
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/netip"
@@ -10,6 +11,26 @@ import (
 )
 
 func resolvePluginControl(plugin *LoadedPlugin) error {
+	err := resolvePluginControlSource(plugin)
+	if err == nil && plugin != nil && plugin.Control != nil {
+		plugin.controlDigest = pluginControlDigest(plugin.Control)
+	}
+	return err
+}
+
+func pluginControlDigest(control *PluginControl) string {
+	data, err := json.Marshal(control)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%x", sum)
+}
+
+func resolvePluginControlSource(plugin *LoadedPlugin) error {
+	if plugin != nil && pluginUsesNativeControl(*plugin) {
+		return resolvePluginNativeControl(plugin)
+	}
 	if plugin == nil || plugin.Control == nil || plugin.Control.Main == "" {
 		return nil
 	}

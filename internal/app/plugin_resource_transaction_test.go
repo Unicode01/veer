@@ -13,7 +13,7 @@ func TestPluginResourceTransactionCommitsAllOrNothing(t *testing.T) {
 	writePluginResourceTransactionFixture(t, dir, false)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	defer runtime.Close()
 	catalog := loadPluginCatalogWithState(cfg, db)
 	assertPluginReconcileSuccess(t, runtime, catalog, "transaction_plugin")
@@ -50,7 +50,7 @@ func TestPluginResourceTransactionRestoresDatabaseAndRuntimeOnApplyFailure(t *te
 	writePluginResourceTransactionFixture(t, dir, true)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	defer runtime.Close()
 	catalog := loadPluginCatalogWithState(cfg, db)
 	assertPluginReconcileSuccess(t, runtime, catalog, "transaction_plugin")
@@ -106,7 +106,7 @@ exports.onAction = function (ctx) { return plugins.resources.transaction(ctx.pay
 `)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	defer runtime.Close()
 	catalog := loadPluginCatalogWithState(cfg, db)
 	snapshot := runtime.Reconcile(catalog)
@@ -169,7 +169,7 @@ exports.onAction = function (ctx) { return resources.transaction(ctx.payload.ope
 `+applyHandler)
 }
 
-func transactionPluginWithRuntimeSurfaceForTest(t *testing.T, runtime *gojaPluginControlRuntime, catalog PluginCatalog, pluginID string) LoadedPlugin {
+func transactionPluginWithRuntimeSurfaceForTest(t *testing.T, runtime *pluginControlManager, catalog PluginCatalog, pluginID string) LoadedPlugin {
 	t.Helper()
 	applyPluginRuntimeSnapshot(&catalog, runtime.Snapshot())
 	plugin := relationshipPluginByIDValue(catalog, pluginID)

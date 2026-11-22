@@ -51,6 +51,16 @@ print(str(value.get("kind") or "control").strip().lower())
 PY
 )
 
+# A native plugin: its Rust tests, then the library builds its manifest
+# lists (VEER_PLUGIN_NATIVE_TARGETS narrows them, e.g. x86_64-linux-gnu).
+if [ -f "$PLUGIN_DIR/Cargo.toml" ]; then
+	command -v cargo >/dev/null 2>&1 || { echo "cargo is required to build a native plugin" >&2; exit 1; }
+	SDK_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../../.." && pwd)
+	cargo test --manifest-path "$PLUGIN_DIR/Cargo.toml"
+	# shellcheck disable=SC2086
+	bash "$SDK_ROOT/sdk/native/build-plugin.sh" "$PLUGIN_DIR" ${VEER_PLUGIN_NATIVE_TARGETS:-}
+fi
+
 case "$kind" in
 	pipeline)
 		if find "$PLUGIN_DIR" -type f -name '*.bpf.c' -print -quit | grep -q .; then

@@ -11,30 +11,14 @@ import (
 	"testing"
 	"time"
 
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 	"github.com/Unicode01/veer/internal/store"
-	"github.com/dop251/goja"
 )
 
-// TestPluginHostProcessEntrypoint is the subprocess entrypoint used by
-// isolated plugin-host tests. os.Exit prevents the test runner from writing
-// PASS output into the framed protocol stream.
-func TestPluginHostProcessEntrypoint(t *testing.T) {
-	if os.Getenv("VEER_PLUGIN_HOST_TEST") != "1" {
-		return
-	}
-	if err := runPluginHostProcess(); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "plugin host: %v\n", err)
-		os.Exit(2)
-	}
-	os.Exit(0)
-}
-
+// isolatedPluginsTestConfig is the plugin test config: script plugins
+// reach the host only through its method dispatch, as native plugins do.
 func isolatedPluginsTestConfig(cfg *Config) *Config {
-	cfg = pluginsEnabledTestConfig(cfg)
-	enabled := true
-	cfg.PluginsIsolationSetting = &enabled
-	cfg.pluginHostTestMode = true
-	return cfg
+	return pluginsEnabledTestConfig(cfg)
 }
 
 func TestPluginHostIsolationKeepsPersistentState(t *testing.T) {
@@ -61,7 +45,7 @@ exports.onAction = function () {
 	cfg := isolatedPluginsTestConfig(&Config{PluginsDir: dir})
 	plugin := loadTestPluginByID(t, cfg, "isolated_state")
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	for i := 0; i < 2; i++ {
 		if err := runtime.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`)); err != nil {
@@ -76,10 +60,6 @@ exports.onAction = function () {
 		if !strings.Contains(record.DataJSON, want) {
 			t.Fatalf("state = %s, want %s", record.DataJSON, want)
 		}
-	}
-	clients := isolatedPluginHostClientsForTest(runtime, plugin.ID)
-	if len(clients) != 1 || clients[0].PID() <= 0 {
-		t.Fatalf("isolated clients = %+v, want one live process", clients)
 	}
 }
 
@@ -117,7 +97,7 @@ exports.onAction = function () {
 	cfg := isolatedPluginsTestConfig(&Config{PluginsDir: dir})
 	plugin := loadTestPluginByID(t, cfg, "isolated_numbers")
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	for i := 0; i < 2; i++ {
 		if err := runtime.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`)); err != nil {
@@ -155,7 +135,7 @@ exports.onAction = function () {
 	cfg := isolatedPluginsTestConfig(&Config{PluginsDir: dir})
 	plugin := loadTestPluginByID(t, cfg, "isolated_crypto")
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	if err := runtime.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("isolated crypto action: %v", err)
@@ -204,7 +184,7 @@ module.exports.next = function () { value++; return value; };
 	cfg := isolatedPluginsTestConfig(&Config{PluginsDir: dir})
 	plugin := loadTestPluginByID(t, cfg, "isolated_modules")
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	for i := 0; i < 2; i++ {
 		if err := runtime.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`)); err != nil {
@@ -220,9 +200,6 @@ module.exports.next = function () { value++; return value; };
 			t.Fatalf("module state = %s, want %s", record.DataJSON, want)
 		}
 	}
-	if clients := isolatedPluginHostClientsForTest(runtime, plugin.ID); len(clients) != 2 {
-		t.Fatalf("isolated module clients = %d, want main and worker", len(clients))
-	}
 }
 
 func TestPluginHostIsolationBrokersTypedServiceDiscoveryAndCall(t *testing.T) {
@@ -232,7 +209,7 @@ func TestPluginHostIsolationBrokersTypedServiceDiscoveryAndCall(t *testing.T) {
 
 	cfg := isolatedPluginsTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	catalog := loadPluginCatalogWithState(cfg, db)
 	applyPluginRuntimeSnapshot(&catalog, runtime.Reconcile(catalog))
@@ -246,9 +223,6 @@ func TestPluginHostIsolationBrokersTypedServiceDiscoveryAndCall(t *testing.T) {
 		if !strings.Contains(string(raw), want) {
 			t.Fatalf("isolated typed service result = %s, missing %s", raw, want)
 		}
-	}
-	if clients := isolatedPluginHostClientsForTest(runtime, "service_consumer"); len(clients) != 1 || clients[0].PID() <= 0 {
-		t.Fatalf("isolated service consumer clients = %+v, want one live process", clients)
 	}
 }
 
@@ -278,7 +252,7 @@ exports.onAction = function () {
 		scanResult: pluginEBPFMapScanResult{Entries: []pluginEBPFMapScanEntry{{Key: []byte{1}, Value: []byte{2}}}, Done: true},
 		ringResult: pluginEBPFRingReadResult{Records: []pluginEBPFRingRecord{{RawSample: []byte{3, 4}}}, Bytes: 2},
 	}
-	runtime := newPluginControlRuntime(openTestDB(t), cfg, controller).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(openTestDB(t), cfg, controller).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	result, err := runtime.QueryPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`))
 	if err != nil {
@@ -313,7 +287,7 @@ exports.onEBPFStateMigrate = function (ctx) {
 	controller := newPluginStateMigrationMapControllerTest()
 	controller.put("", "sessions_v1", []byte{1}, []byte{10})
 	controller.put("", "sessions_v1", []byte{2}, []byte{11})
-	runtime := newPluginControlRuntime(db, cfg, controller).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, controller).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	catalog := loadPluginCatalogWithState(cfg, db)
 	assertPluginReconcileSuccess(t, runtime, catalog, "isolated_state_migrate")
@@ -343,7 +317,7 @@ exports.onEBPFStateMigrate = function () {
 };`)
 	cfg := isolatedPluginsTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, newPluginStateMigrationMapControllerTest()).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, newPluginStateMigrationMapControllerTest()).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	catalog := loadPluginCatalogWithState(cfg, db)
 	assertPluginReconcileSuccess(t, runtime, catalog, "isolated_state_migrate_scope")
@@ -382,7 +356,7 @@ exports.onAction = function () {
 	cfg := isolatedPluginsTestConfig(&Config{PluginsDir: dir})
 	plugin := loadTestPluginByID(t, cfg, "isolated_tuntap")
 	provider := newPluginControlNetworkProviderTest()
-	runtime := newPluginControlRuntime(openTestDB(t), cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(openTestDB(t), cfg, nil).(*pluginControlManager)
 	runtime.netAdmin = provider
 	t.Cleanup(func() { _ = runtime.Close() })
 	result, err := runtime.QueryPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`))
@@ -423,7 +397,7 @@ exports.onWorkerCall = function () {
 	cfg := isolatedPluginsTestConfig(&Config{PluginsDir: dir})
 	plugin := loadTestPluginByID(t, cfg, "isolated_worker")
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	for i := 0; i < 2; i++ {
 		if err := runtime.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`)); err != nil {
@@ -436,10 +410,6 @@ exports.onWorkerCall = function () {
 	}
 	if !strings.Contains(record.DataJSON, `"calls":2`) {
 		t.Fatalf("worker state = %s, want calls=2", record.DataJSON)
-	}
-	clients := isolatedPluginHostClientsForTest(runtime, plugin.ID)
-	if len(clients) != 2 || clients[0].PID() == clients[1].PID() {
-		t.Fatalf("isolated clients = %+v, want separate control and worker processes", clients)
 	}
 }
 
@@ -474,7 +444,7 @@ exports.onResourceApply = function (ctx) {
 	cfg := isolatedPluginsTestConfig(&Config{PluginsDir: dir})
 	plugin := loadTestPluginByID(t, cfg, "isolated_nested")
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	if err := runtime.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("ApplyPluginAction() error = %v", err)
@@ -490,58 +460,10 @@ exports.onResourceApply = function (ctx) {
 	}
 }
 
-func TestPluginHostIsolationTerminatesInfiniteLoop(t *testing.T) {
-	cfg := isolatedPluginsTestConfig(&Config{})
-	plugin := LoadedPlugin{PluginManifest: PluginManifest{
-		ID: "isolated_loop", Control: &PluginControl{Main: "control.js"},
-	}}
-	client, err := startPluginHostClient(cfg, plugin, "control", "", `exports.onAction = function () { for (;;) {} };`, nil)
-	if err != nil {
-		t.Fatalf("startPluginHostClient() error = %v", err)
-	}
-	defer client.Close()
-	started := time.Now()
-	_, err = client.runEvent(pluginHostEventRequest{Handler: "onAction", TimeoutMS: 200, Context: map[string]any{}}, nil, time.Now().Add(time.Second), false)
-	if !errors.Is(err, errPluginHostProcessExited) {
-		t.Fatalf("runEvent() error = %v, want process exit", err)
-	}
-	if elapsed := time.Since(started); elapsed > 3*time.Second {
-		t.Fatalf("infinite loop termination took %s", elapsed)
-	}
-}
-
-func TestPluginHostIsolationContainsMemoryExhaustion(t *testing.T) {
-	if os.Getenv("VEER_PLUGIN_OOM_TEST") != "1" {
-		t.Skip("set VEER_PLUGIN_OOM_TEST=1 to run the isolated OOM check")
-	}
-	cfg := isolatedPluginsTestConfig(&Config{})
-	plugin := LoadedPlugin{PluginManifest: PluginManifest{
-		ID: "isolated_oom", Control: &PluginControl{Main: "control.js"},
-	}}
-	source := `exports.onAction = function () {
-  var blocks = [];
-  for (;;) blocks.push(new Uint8Array(4 * 1024 * 1024));
-};`
-	client, err := startPluginHostClient(cfg, plugin, "control", "", source, nil)
-	if err != nil {
-		t.Fatalf("startPluginHostClient() error = %v", err)
-	}
-	defer client.Close()
-	_, err = client.runEvent(
-		pluginHostEventRequest{Handler: "onAction", TimeoutMS: 12000, Context: map[string]any{}},
-		nil,
-		time.Now().Add(15*time.Second),
-		false,
-	)
-	if !errors.Is(err, errPluginHostProcessExited) {
-		t.Fatalf("memory exhaustion error = %v, want isolated process exit", err)
-	}
-}
-
 func TestPluginHostIsolationDiscardsTimerJournalOnFatalExit(t *testing.T) {
 	db := openTestDB(t)
 	cfg := isolatedPluginsTestConfig(&Config{})
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	plugin := LoadedPlugin{PluginManifest: PluginManifest{ID: "timer_guard", Control: &PluginControl{Main: "control.js"}}}
 	runtime.mu.Lock()
@@ -550,7 +472,7 @@ func TestPluginHostIsolationDiscardsTimerJournalOnFatalExit(t *testing.T) {
 	}
 	runtime.plugins[plugin.ID] = plugin
 	runtime.mu.Unlock()
-	host := &pluginControlHost{vm: goja.New(), runtime: runtime, plugin: plugin}
+	host := &pluginControlHost{vm: hv.New(), runtime: runtime, plugin: plugin}
 	_, _, _, err := host.runRemoteEvent(pluginControlEvent{Kind: "action", Action: &PluginAction{ID: "apply"}}, false, func(pluginHostEventRequest) (pluginHostEventResponse, error) {
 		host.timerOps = append(host.timerOps, pluginControlTimerOperation{
 			op:   pluginControlTimerOperationSet,
@@ -563,77 +485,6 @@ func TestPluginHostIsolationDiscardsTimerJournalOnFatalExit(t *testing.T) {
 	}
 	if timers := runtime.pluginTimerList(plugin.ID); len(timers) != 0 {
 		t.Fatalf("timers after fatal exit = %+v, want none", timers)
-	}
-}
-
-func TestPluginHostIsolationBacksOffAndRestartsAfterCrash(t *testing.T) {
-	dir := t.TempDir()
-	writeTestPlugin(t, dir, "isolated_restart", `{
-  "api_version":"v1",
-  "id":"isolated_restart",
-  "name":"Isolated Restart",
-  "version":"1.0.0",
-  "kind":"control",
-  "stability":"lab",
-  "actions":[{"id":"apply","runtime_update":"runtime_apply"}],
-  "control":{"main":"control.js","permissions":["kv"]}
-}`)
-	writePluginControlScript(t, dir, "isolated_restart", `
-var calls = 0;
-exports.onAction = function () {
-  calls++;
-  kv.set('state', {calls: calls});
-};
-`)
-	cfg := isolatedPluginsTestConfig(&Config{PluginsDir: dir})
-	plugin := loadTestPluginByID(t, cfg, "isolated_restart")
-	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
-	t.Cleanup(func() { _ = runtime.Close() })
-	apply := func() error {
-		return runtime.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`))
-	}
-	if err := apply(); err != nil {
-		t.Fatalf("initial action error = %v", err)
-	}
-	clients := isolatedPluginHostClientsForTest(runtime, plugin.ID)
-	if len(clients) != 1 {
-		t.Fatalf("initial clients = %d, want 1", len(clients))
-	}
-	oldClient := clients[0]
-	oldPID := oldClient.PID()
-	if err := oldClient.command.Process.Kill(); err != nil {
-		t.Fatalf("kill plugin host: %v", err)
-	}
-	select {
-	case <-oldClient.done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("plugin host did not exit after kill")
-	}
-	if err := apply(); !errors.Is(err, errPluginHostProcessExited) {
-		t.Fatalf("first action after crash error = %v, want process exit", err)
-	}
-	if err := apply(); err == nil || !strings.Contains(err.Error(), "restart backoff active") {
-		t.Fatalf("backoff action error = %v", err)
-	}
-	time.Sleep(pluginHostRestartMinBackoff + 100*time.Millisecond)
-	if err := apply(); err != nil {
-		t.Fatalf("action after backoff error = %v", err)
-	}
-	clients = isolatedPluginHostClientsForTest(runtime, plugin.ID)
-	if len(clients) != 1 || clients[0].PID() == oldPID {
-		t.Fatalf("restarted clients = %+v, old pid = %d", clients, oldPID)
-	}
-	record, err := store.GetPluginRecord(db, plugin.ID, pluginControlKVResourceID, "state")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(record.DataJSON, `"calls":1`) {
-		t.Fatalf("state after restart = %s, want non-replayed fresh call", record.DataJSON)
-	}
-	isolation := runtime.pluginHostIsolationSnapshot(plugin.ID)
-	if !isolation.Enabled || isolation.RestartCount != 1 || isolation.ProcessCount != 1 {
-		t.Fatalf("isolation state = %+v", isolation)
 	}
 }
 
@@ -662,7 +513,7 @@ exports.onUpgradeRestore = function (ctx) { calls = (ctx.upgrade.state || {}).ca
 	writeVersion(1)
 	cfg := isolatedPluginsTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	catalog := loadPluginCatalogWithState(cfg, db)
 	applyPluginRuntimeSnapshot(&catalog, runtime.Reconcile(catalog))
@@ -718,27 +569,4 @@ exports.onReconcile = function () {};
 	if stage.PluginID != "isolated_package" || stage.Version != "1.0.0" {
 		t.Fatalf("stage = %+v", stage)
 	}
-}
-
-func isolatedPluginHostClientsForTest(runtime *gojaPluginControlRuntime, pluginID string) []*pluginHostClient {
-	runtime.mu.Lock()
-	vms := make([]*pluginControlVM, 0)
-	for _, vm := range runtime.controlVMs {
-		if vm.pluginID == pluginID {
-			vms = append(vms, vm)
-		}
-	}
-	for _, vm := range runtime.pluginWorkers {
-		if vm.pluginID == pluginID {
-			vms = append(vms, vm)
-		}
-	}
-	runtime.mu.Unlock()
-	clients := make([]*pluginHostClient, 0, len(vms))
-	for _, vm := range vms {
-		if client := vm.currentPluginHost(); client != nil {
-			clients = append(clients, client)
-		}
-	}
-	return clients
 }

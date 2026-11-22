@@ -33,6 +33,15 @@ jobs:
           cache-dependency-path: veer-source/go.sum
       - name: Install eBPF build dependencies
         run: sudo apt-get update && sudo apt-get install -y clang llvm linux-libc-dev python3
+      - name: Install native plugin toolchain
+        # The plugin library is built for glibc 2.17 and musl on amd64 and
+        # arm64 (the targets control.library lists) through cargo-zigbuild.
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-gnu aarch64-unknown-linux-musl
+          python3 -m pip install --user ziglang cargo-zigbuild
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Build Veer and plugin SDK
         run: |
           cd veer-source

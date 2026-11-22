@@ -60,7 +60,7 @@ Linux 集成测试通过实际插件 API 验证 WG、Mihomo、sing-box 探测及
 | `sing_box` | sing-box TUN / gVisor 与代理协议 | 页面安装或本机预装 sing-box，带 gVisor |
 | `tun` | 外部 TUN 提供者 | 提供者自行运行 |
 
-各驱动共用 WAN Core 和双向 TC L2/L3 适配，JavaScript 不逐包转发，无需关闭 Veer 快速 NAT。
+各驱动共用 WAN Core 和双向 TC L2/L3 适配，控制面不逐包转发，无需关闭 Veer 快速 NAT。
 
 0.9.0 配合 `wan_core >=1.5.6` 自动选择两种数据路径。宿主编译了可选 helper、实际加载的模块提供 `dataplane.kfuncs.handoff_ingress.v1`，且插件含 `tunnel_adapter-direct.o` 时，本机 WAN 使用单个 dummy 边界，TC egress 送入隧道，helper 将回包送回该边界的 ingress；每个出口只有本机边界和实际隧道两个接口。未满足这些条件时使用 veth 兼容路径，旧 helper 继续使用原有交接能力。
 
@@ -171,7 +171,7 @@ sudo env "PATH=$PATH" sh scripts/verify-vpn-cores.sh
 回包：内核 WG 解密 → TC 补回 Ethernet → WAN local ingress → Veer reply flow → 下游
 ```
 
-JavaScript 负责配置和恢复，不参与逐包转发。无需关闭 Veer 快速 NAT；不创建源地址策略规则、不安装全局默认路由，不使用 `wg-quick`。加密后的外层 UDP 使用主机原有路由，因此上游仍可为物理 WAN 或 PPPoE。
+控制面负责配置和恢复，不参与逐包转发。无需关闭 Veer 快速 NAT；不创建源地址策略规则、不安装全局默认路由，不使用 `wg-quick`。加密后的外层 UDP 使用主机原有路由，因此上游仍可为物理 WAN 或 PPPoE。
 
 ## 安装
 

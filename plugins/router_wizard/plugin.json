@@ -2,14 +2,21 @@
   "api_version": "v1",
   "id": "router_wizard",
   "name": "Router Wizard",
-  "version": "0.4.4",
+  "version": "0.5.0",
   "kind": "control",
   "stability": "lab",
   "description": "Single WAN/LAN router configuration page. It owns no dataplane program and only calls explicitly granted plugin resources/actions.",
   "compatibility": {
     "runtime": ">=1.0.0 <2.0.0",
     "control_api_abi": 1,
-    "features": ["control.durable_operations.v1", "control.plugin_interop", "control.typed_services.v1", "ui.bridge.v1", "ui.capabilities.v1"]
+    "features": [
+      "control.durable_operations.v1",
+      "control.native.v1",
+      "control.plugin_interop",
+      "control.typed_services.v1",
+      "ui.bridge.v1",
+      "ui.capabilities.v1"
+    ]
   },
   "dependencies": [
     {
@@ -33,57 +40,220 @@
     }
   ],
   "control": {
-    "main": "control.js",
-    "permissions": ["operation", "plugin.register", "plugin.resource", "plugin.action", "resource", "timer", "ui"],
+    "library": {
+      "x86_64-linux-gnu": {
+        "path": "lib/x86_64-linux-gnu/librouter_wizard.so"
+      },
+      "x86_64-linux-musl": {
+        "path": "lib/x86_64-linux-musl/librouter_wizard.so"
+      },
+      "aarch64-linux-gnu": {
+        "path": "lib/aarch64-linux-gnu/librouter_wizard.so"
+      },
+      "aarch64-linux-musl": {
+        "path": "lib/aarch64-linux-musl/librouter_wizard.so"
+      }
+    },
+    "worker": "shared",
+    "permissions": [
+      "operation",
+      "plugin.register",
+      "plugin.resource",
+      "plugin.action",
+      "resource",
+      "timer",
+      "ui"
+    ],
     "resource_access": [
       {
         "plugin": "wan_core",
         "resource": "status",
-        "methods": ["get", "list"]
+        "methods": [
+          "get",
+          "list"
+        ]
       },
       {
         "plugin": "lan_core",
         "resource": "status",
-        "methods": ["get", "list"]
+        "methods": [
+          "get",
+          "list"
+        ]
       },
       {
         "plugin": "lan_core",
         "resource": "egress_nat_plans",
-        "methods": ["get", "list"]
+        "methods": [
+          "get",
+          "list"
+        ]
       },
       {
         "plugin": "pppoe_client",
         "resource": "sessions",
-        "methods": ["get", "list"]
+        "methods": [
+          "get",
+          "list"
+        ]
       },
       {
         "plugin": "pppoe_client",
         "resource": "wan_links",
-        "methods": ["get", "list"]
+        "methods": [
+          "get",
+          "list"
+        ]
       },
       {
         "plugin": "vtolocal",
         "resource": "status",
-        "methods": ["get", "list"]
+        "methods": [
+          "get",
+          "list"
+        ]
       }
     ],
     "action_access": [
       {
         "plugin": "pppoe_client",
-        "actions": ["dial", "disconnect", "clear_state"]
+        "actions": [
+          "dial",
+          "disconnect",
+          "clear_state"
+        ]
       },
       {
         "plugin": "wan_core",
-        "actions": ["apply_session", "prepare_handoff", "teardown"]
+        "actions": [
+          "apply_session",
+          "prepare_handoff",
+          "teardown"
+        ]
       },
       {
         "plugin": "lan_core",
-        "actions": ["apply_network", "teardown"]
+        "actions": [
+          "apply_network",
+          "teardown"
+        ]
       },
       {
         "plugin": "vtolocal",
-        "actions": ["apply", "teardown"]
+        "actions": [
+          "apply",
+          "teardown"
+        ]
       }
-    ]
+    ],
+    "register": {
+      "capabilities": [
+        "router_wizard",
+        "orchestration",
+        "wan_lan",
+        "control"
+      ],
+      "resources": [
+        {
+          "id": "config",
+          "description": "Single router configuration. It contains only WAN and LAN intent; runtime changes are delegated to existing plugins.",
+          "methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "manual",
+          "max_records": 1,
+          "max_record_bytes": 32768,
+          "secret_fields": [
+            "password",
+            "pppoe_password"
+          ]
+        },
+        {
+          "id": "status",
+          "description": "Last orchestration result and compact downstream plugin status snapshot.",
+          "methods": [
+            "list",
+            "get"
+          ],
+          "control_methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "manual",
+          "max_records": 1,
+          "max_record_bytes": 32768
+        }
+      ],
+      "actions": [
+        {
+          "id": "apply_router",
+          "description": "Save the WAN/LAN config and apply the selected orchestration steps.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 32768
+        },
+        {
+          "id": "teardown_router",
+          "description": "Disable LAN and optional PPPoE/WAN handoff in safe order.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 32768
+        },
+        {
+          "id": "refresh_status",
+          "description": "Refresh the wizard status snapshot without applying network changes.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 8192
+        }
+      ],
+      "services": [
+        {
+          "id": "router.orchestrator",
+          "version": "1.0.0",
+          "description": "Transactional WAN and LAN router orchestration service.",
+          "actions": [
+            "apply_router",
+            "teardown_router",
+            "refresh_status"
+          ],
+          "resources": [
+            "config",
+            "status"
+          ]
+        }
+      ],
+      "ui": {
+        "static_dir": "ui",
+        "entry": "index.html",
+        "page": "router",
+        "page_title": "Router",
+        "resources": [
+          {
+            "resource": "config",
+            "methods": [
+              "get",
+              "create",
+              "update"
+            ]
+          },
+          {
+            "resource": "status",
+            "methods": [
+              "get"
+            ]
+          }
+        ],
+        "actions": [
+          "apply_router",
+          "teardown_router",
+          "refresh_status"
+        ]
+      }
+    }
   }
 }

@@ -16,6 +16,7 @@ import (
 // profile would recreate the bridge, re-enslave its ports and re-enable the
 // plans of a LAN that is gone, and nothing would tear them down again.
 func TestBundledLANCoreStaleProfileSnapshotAfterTeardownAndDelete(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	dir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, filepath.Join("..", "..", "plugins", "lan_core"), dir)
 	plugin, err := loadPluginFromDir(dir, "lan_core")
@@ -27,7 +28,7 @@ func TestBundledLANCoreStaleProfileSnapshotAfterTeardownAndDelete(t *testing.T) 
 	apply := pluginActionByIDForTest(t, plugin, "apply_network")
 	teardown := pluginActionByIDForTest(t, plugin, "teardown")
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(dir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(dir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{
 		listNames: []string{"brlan0", "lanp0"},
 		getErrors: map[string]error{"brlan0": fmt.Errorf("link not found")},

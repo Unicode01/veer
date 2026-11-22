@@ -467,7 +467,7 @@ func (store *pluginSecretStore) decryptRecords(records []storepkg.PluginRecord, 
 	return out, nil
 }
 
-func (rt *gojaPluginControlRuntime) requirePluginSecretStore() (*pluginSecretStore, error) {
+func (rt *pluginControlManager) requirePluginSecretStore() (*pluginSecretStore, error) {
 	if rt == nil {
 		return nil, fmt.Errorf("plugin secret store is unavailable")
 	}
@@ -482,7 +482,7 @@ func (rt *gojaPluginControlRuntime) requirePluginSecretStore() (*pluginSecretSto
 
 func pluginSecretStoreForRequest(db *sql.DB, pm *ProcessManager) (*pluginSecretStore, error) {
 	if pm != nil && pm.pluginControlRuntime != nil {
-		if rt, ok := pm.pluginControlRuntime.(*gojaPluginControlRuntime); ok {
+		if rt, ok := pm.pluginControlRuntime.(*pluginControlManager); ok {
 			return rt.requirePluginSecretStore()
 		}
 	}

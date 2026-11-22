@@ -4,8 +4,6 @@ package app
 
 import (
 	"fmt"
-	"os/exec"
-	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -13,27 +11,8 @@ import (
 
 const pluginHostProcessRSSMax = 224 << 20
 
-func configurePluginHostCommand(command *exec.Cmd) error {
-	if command == nil {
-		return fmt.Errorf("plugin host command is nil")
-	}
-	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	return nil
-}
-
-func preparePluginHostFilesystemRoot() (string, func(), error) {
-	return "", func() {}, nil
-}
-
 func preparePluginHostResourceLimitRoot() error {
 	return nil
-}
-
-func applyPluginHostChildSandbox() (PluginHostSandboxState, error) {
-	return PluginHostSandboxState{
-		Platform: "windows", Mode: "job_object", Level: "partial",
-		Degraded: []string{"Windows plugin host uses a Job Object but not a restricted access token"},
-	}, nil
 }
 
 func attachPluginHostResourceLimits(pid int, _ string, resourceLimits pluginHostResourceLimits) (func(), string, error) {
@@ -79,8 +58,4 @@ func attachPluginHostResourceLimits(pid int, _ string, resourceLimits pluginHost
 
 func pluginHostProcessRSS(_ int) (uint64, error) {
 	return 0, fmt.Errorf("plugin host RSS monitoring is unavailable on windows")
-}
-
-func pluginHostResourceLimitMode() string {
-	return "job_object"
 }

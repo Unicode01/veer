@@ -225,9 +225,10 @@ TCP SYN 且无 ACK 且策略有限速：窗口计数 +1，超限写封禁 ... DR
                  "ebpf.map_state.v1", "ebpf.map_transactions.v1", "ui.capabilities.v1"]
   },
   "control": {
-    "main": "control.js",
+    "library": {"x86_64-linux-gnu": {"path": "lib/x86_64-linux-gnu/libfirewall.so"}, "...": {}},
     "permissions": ["plugin.register", "resource", "kv", "timer", "ui", "crypto", "net.admin",
-                    "ebpf.load", "ebpf.map_read", "ebpf.map_write", "hook.attach", "worker"]
+                    "ebpf.load", "ebpf.map_read", "ebpf.map_write", "hook.attach", "worker"],
+    "register": {"ebpf_objects": ["..."], "hooks": ["..."], "resources": ["..."], "actions": ["..."], "ui": {}}
   }
 }
 ```
@@ -349,7 +350,7 @@ XDP 在 nftables、iptables 和 pve-firewall 之前执行，只会丢弃、不�
 已实现的测试（Linux 测试都要求 root，并在 `scripts/verify-plugin-release.sh` 里出现 skip 即失败）：
 
 - **控制面单元测试**（node，`plugins/firewall/test-*.test.js`，33 个）：编译与 map 布局、端口区间与冲突、提示规则和 token、SYN 限速校验与掩码、封禁和日志解码；apply / confirm / 截止回滚 / 重启恢复 / 热重启保留、check 与 accept_warnings、限速与日志配置写入、bans / unban / events、槽位复用清理、宿主按 key 排序存储后的草稿比较、挂载状态与核心引擎、挂载失败回滚。
-- **BPF 单元测试**（`BPF_PROG_TEST_RUN`）：`TestFirewallProgramVerdicts`（IPv4/IPv6、单层和两层 VLAN、PPPoE 会话、发现帧与 LCP、IPv4/IPv6 首片和非首片、扩展头与过多扩展头、截断包、L3 接口、最长前缀、信任来源、带目标的策略）、`TestFirewallProgramWithoutConfigPasses`、`TestFirewallMapKeysMatchCompiler`（Go 与 compile.js 的 key 字节一致）、`TestFirewallProgramSynLimit`（窗口内放行、超限丢弃并封禁、封禁对已建立连接生效、其他策略不受影响、ACK 与 SYN-ACK 不计数、信任来源不受限、规则丢弃不计入限速、IPv6 按 /64 聚合、过期封禁失效、`ban_seconds` 为 0 只丢不封、日志事件内容、日志限流与关闭）。以上对 clang 14、18、21 编出的 object 都跑过。 每个程序测试都分 `xdp`、`tc` 两个子测试，分别跑 `xdp_firewall` 和 `tc_firewall`（测试机 69 个通过）；TC 下 30 字节截断帧跳过（`BPF_PROG_RUN` 拒收 34 字节以下、IP 头不完整的 TC 帧），线性区之外的头部也测不了（`BPF_PROG_RUN` 只造线性 skb），拉取路径由性能测试里的 GSO 聚合包间接覆盖（受保护端口的包全部按策略放行计数）。
+- **BPF 单元测试**（`BPF_PROG_TEST_RUN`）：`TestFirewallProgramVerdicts`（IPv4/IPv6、单层和两层 VLAN、PPPoE 会话、发现帧与 LCP、IPv4/IPv6 首片和非首片、扩展头与过多扩展头、截断包、L3 接口、最长前缀、信任来源、带目标的策略）、`TestFirewallProgramWithoutConfigPasses`、`TestFirewallMapKeysMatchCompiler`（Go 与插件 `src/compile.rs` 的 key 字节一致）、`TestFirewallProgramSynLimit`（窗口内放行、超限丢弃并封禁、封禁对已建立连接生效、其他策略不受影响、ACK 与 SYN-ACK 不计数、信任来源不受限、规则丢弃不计入限速、IPv6 按 /64 聚合、过期封禁失效、`ban_seconds` 为 0 只丢不封、日志事件内容、日志限流与关闭）。以上对 clang 14、18、21 编出的 object 都跑过。 每个程序测试都分 `xdp`、`tc` 两个子测试，分别跑 `xdp_firewall` 和 `tc_firewall`（测试机 69 个通过）；TC 下 30 字节截断帧跳过（`BPF_PROG_RUN` 拒收 34 字节以下、IP 头不完整的 TC 帧），线性区之外的头部也测不了（`BPF_PROG_RUN` 只造线性 skb），拉取路径由性能测试里的 GSO 聚合包间接覆盖（受保护端口的包全部按策略放行计数）。
 - **宿主 TC 兜底**：`TestKernelXDPPluginTCFallbackRunsAheadOfCore`（tcx 和 cls_bpf 两种挂法：兜底排在一个模拟核心的程序之前，丢弃的包核心收不到；同接口排在后面的 Hook 没有兜底时整体改用 generic；排在前面时 XDP 和 TC 同时挂，前面的 Hook 在 generic Dispatcher 里、防火墙在 TC，各只执行一次；去掉后回到纯 TC，没有残留）、`TestKernelXDPPluginTCFallbackHotRestartHandsOffInPlace`（旧进程退出后兜底继续丢包；新进程接管同一个 tcx link 或 cls_bpf 位置并换上自己的程序，pin 被清理），以及字段校验、同 object 规则和特性要求的单元测试。
 - **verifier 矩阵**：clang 14 / 18 / 21 × 6.12（原生）/ 5.10.0-32 / 5.15.0-25（QEMU），数字见 4.9。CI 的 kernel-load-matrix 用 `TestLoadBundledPluginObjectsSmoke` 在各 runner 内核（含 7.x）和来宾内核里加载 `firewall.o`。
 - **集成测试**（真实 daemon）：

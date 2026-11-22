@@ -154,7 +154,7 @@ func applyPluginControlRegistrationSurfaces(catalog *PluginCatalog, cfg *Config)
 	if catalog == nil {
 		return
 	}
-	rt, ok := newPluginControlRuntime(nil, cfg, nil).(*gojaPluginControlRuntime)
+	rt, ok := newPluginControlRuntime(nil, cfg, nil).(*pluginControlManager)
 	if !ok || rt == nil {
 		return
 	}

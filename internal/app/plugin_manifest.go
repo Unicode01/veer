@@ -52,7 +52,7 @@ func (manifest *PluginManifest) UnmarshalJSON(data []byte) error {
 	}
 	for field := range fields {
 		if _, forbidden := pluginManifestRuntimeFields[field]; forbidden {
-			return fmt.Errorf("manifest field %q is runtime-owned; register it from control.js instead", field)
+			return fmt.Errorf("manifest field %q is runtime-owned; declare it under control.register instead", field)
 		}
 		if _, allowed := pluginManifestStaticFields[field]; !allowed {
 			return fmt.Errorf("unknown manifest field %q", field)
@@ -130,7 +130,7 @@ func normalizePluginManifest(manifest *PluginManifest) error {
 		if err := normalizePluginControl(manifest.Control); err != nil {
 			return fmt.Errorf("control: %w", err)
 		}
-		if manifest.Control.Main == "" && len(manifest.Control.Permissions) == 0 {
+		if manifest.Control.Main == "" && len(manifest.Control.Library) == 0 && manifest.Control.Register == nil && len(manifest.Control.Permissions) == 0 {
 			manifest.Control = nil
 		}
 	}
@@ -143,12 +143,21 @@ func normalizePluginControl(control *PluginControl) error {
 	if err != nil {
 		return fmt.Errorf("main: %w", err)
 	}
-	if control.Main == "" {
-		return fmt.Errorf("main is required")
-	}
 	control.SHA256 = strings.TrimSpace(strings.ToLower(control.SHA256))
-	if control.SHA256 != "" && !pluginHashPattern.MatchString(control.SHA256) {
-		return fmt.Errorf("sha256 must be a lowercase 64-character hex digest")
+	if len(control.Library) > 0 || (control.Main == "" && control.Register != nil) {
+		if err := normalizePluginNativeControl(control); err != nil {
+			return err
+		}
+	} else {
+		if control.Main == "" {
+			return fmt.Errorf("main or library is required")
+		}
+		if control.SHA256 != "" && !pluginHashPattern.MatchString(control.SHA256) {
+			return fmt.Errorf("sha256 must be a lowercase 64-character hex digest")
+		}
+		if control.Worker != "" || control.UpgradeState || control.Register != nil {
+			return fmt.Errorf("worker, upgrade_state and register require a native library")
+		}
 	}
 	control.ResolvedSHA256 = ""
 	permissions, err := normalizePluginTokens(control.Permissions, "permission")

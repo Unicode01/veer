@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dop251/goja"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 )
 
 const (
@@ -834,7 +834,7 @@ func (h *pluginControlHost) managedBinaryStore(api string) *pluginBinaryStore {
 	return r.binaries
 }
 
-func (h *pluginControlHost) processBinaryInstall(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) processBinaryInstall(call hv.FunctionCall) hv.Value {
 	s := h.managedBinaryStore("process.binaryInstall")
 	data, err := json.Marshal(h.requiredObjectArg(call, 0, "request").Export())
 	if err != nil || len(data) > 8192 {
@@ -854,7 +854,7 @@ func (h *pluginControlHost) processBinaryInstall(call goja.FunctionCall) goja.Va
 	return h.vm.ToValue(status.value())
 }
 
-func (h *pluginControlHost) processBinaryStatus(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) processBinaryStatus(call hv.FunctionCall) hv.Value {
 	s := h.managedBinaryStore("process.binaryStatus")
 	status, err := s.Status(h.plugin.ID, h.processIDArg(call))
 	if err != nil {
@@ -863,7 +863,7 @@ func (h *pluginControlHost) processBinaryStatus(call goja.FunctionCall) goja.Val
 	return h.vm.ToValue(status.value())
 }
 
-func (h *pluginControlHost) processBinarySelect(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) processBinarySelect(call hv.FunctionCall) hv.Value {
 	s := h.managedBinaryStore("process.binarySelect")
 	obj := h.requiredObjectArg(call, 0, "request")
 	id, version := h.requiredStringObjectField(obj, "id"), h.requiredStringObjectField(obj, "version")
@@ -875,7 +875,7 @@ func (h *pluginControlHost) processBinarySelect(call goja.FunctionCall) goja.Val
 	return h.vm.ToValue(status.value())
 }
 
-func (h *pluginControlHost) processBinaryRemove(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) processBinaryRemove(call hv.FunctionCall) hv.Value {
 	s := h.managedBinaryStore("process.binaryRemove")
 	obj := h.requiredObjectArg(call, 0, "request")
 	id, version := h.requiredStringObjectField(obj, "id"), h.requiredStringObjectField(obj, "version")

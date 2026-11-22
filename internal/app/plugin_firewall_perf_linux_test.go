@@ -673,7 +673,6 @@ func startFirewallPerfDaemon(t *testing.T, binary, pluginDir string, noTCFallbac
 		cfg.PluginsDir = filepath.Join(dir, "plugins")
 		cfg.PluginsEnabledSetting = &enabled
 		cfg.PluginsDataplaneSetting = &enabled
-		cfg.PluginsIsolationSetting = &disabled
 		cfg.PluginsMinSandboxLevel = pluginSandboxLevelNone
 		cfg.PluginsRequireSigned = &disabled
 	}

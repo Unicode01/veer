@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dop251/goja"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 )
 
 const (
@@ -40,7 +40,7 @@ type pluginExecResult struct {
 	Truncated bool
 }
 
-func (h *pluginControlHost) processExec(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) processExec(call hv.FunctionCall) hv.Value {
 	const api = "process.exec"
 	h.requirePermission("exec")
 	if !h.cfg.PluginExecEnabled() {

@@ -54,7 +54,6 @@ type Config struct {
 	ManagedNetworkAutoRepair               *bool                     `json:"managed_network_auto_repair,omitempty"`
 	PluginsEnabledSetting                  *bool                     `json:"plugins_enabled,omitempty"`
 	PluginsDataplaneSetting                *bool                     `json:"plugins_dataplane_enabled,omitempty"`
-	PluginsIsolationSetting                *bool                     `json:"plugins_isolation,omitempty"`
 	PluginsMinSandboxLevel                 string                    `json:"plugins_min_sandbox_level,omitempty"`
 	PluginsRequireSigned                   *bool                     `json:"plugins_require_signed_packages,omitempty"`
 	PluginsRemoteInstallEnabled            bool                      `json:"plugins_remote_install_enabled"`
@@ -76,8 +75,6 @@ type Config struct {
 	XDPGenericSetting                      *bool                     `json:"xdp_generic,omitempty"`
 	Experimental                           map[string]bool           `json:"experimental_features"`
 	Tags                                   []string                  `json:"tags"`
-
-	pluginHostTestMode bool
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -321,17 +318,7 @@ func (cfg *Config) PluginsDataplaneEnabled() bool {
 	return *cfg.PluginsDataplaneSetting
 }
 
-func (cfg *Config) PluginsIsolationEnabled() bool {
-	if cfg == nil || cfg.PluginsIsolationSetting == nil {
-		return true
-	}
-	return *cfg.PluginsIsolationSetting
-}
-
 func (cfg *Config) PluginMinimumSandboxLevel() string {
-	if cfg != nil && cfg.pluginHostTestMode {
-		return pluginSandboxLevelMinimal
-	}
 	if cfg == nil {
 		return pluginSandboxLevelFull
 	}

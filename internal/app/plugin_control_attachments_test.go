@@ -86,7 +86,7 @@ type pluginAttachmentStatusTestResult struct {
 func queryPluginAttachmentStatusForTest(t *testing.T, cfg *Config, controller pluginEBPFMapController, id string) pluginAttachmentStatusTestResult {
 	t.Helper()
 	plugin := loadTestPluginByID(t, cfg, id)
-	runtime := newPluginControlRuntime(openTestDB(t), cfg, controller).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(openTestDB(t), cfg, controller).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	value, err := runtime.QueryPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`))
 	if err != nil {

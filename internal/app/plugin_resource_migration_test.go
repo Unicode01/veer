@@ -13,6 +13,7 @@ import (
 )
 
 func TestBundledVPNProfileSourceIPUpgradePreservesExistingRecords(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "vpn_core")
 	plugin, err := loadPluginFromDir(filepath.Join("..", "..", "plugins", "vpn_core"), "vpn_core")
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +62,7 @@ func TestBundledVPNProfileSourceIPUpgradePreservesExistingRecords(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: t.TempDir()}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: t.TempDir()}), nil).(*pluginControlManager)
 	defer rt.Close()
 	if err := rt.BeginPluginResourceMigrationTransaction(); err != nil {
 		t.Fatal(err)
@@ -88,7 +89,7 @@ func TestPluginResourceMigrationCommitsAfterSuccessfulReconcile(t *testing.T) {
 	db := openTestDB(t)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	writeResourceMigrationPlugin(t, dir, "1.0.0", 1, migrationSchemaV1, ``)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	defer runtime.Close()
 	assertPluginReconcileSuccess(t, runtime, loadPluginCatalogWithState(cfg, db), "migration_plugin")
 	if _, err := store.AddPluginRecord(db, &store.PluginRecord{
@@ -124,7 +125,7 @@ func TestPluginResourceMigrationRollsBackWhenReconcileFails(t *testing.T) {
 	db := openTestDB(t)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	writeResourceMigrationPlugin(t, dir, "1.0.0", 1, migrationSchemaV1, ``)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	defer runtime.Close()
 	assertPluginReconcileSuccess(t, runtime, loadPluginCatalogWithState(cfg, db), "migration_plugin")
 	if _, err := store.AddPluginRecord(db, &store.PluginRecord{
@@ -178,7 +179,7 @@ func TestPluginResourceMigrationSurvivesCrashAndBlocksConcurrentWrites(t *testin
 	db := openTestDB(t)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir, WebToken: "migration-token"})
 	writeResourceMigrationPlugin(t, dir, "1.0.0", 1, migrationSchemaV1, ``)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	defer runtime.Close()
 	assertPluginReconcileSuccess(t, runtime, loadPluginCatalogWithState(cfg, db), "migration_plugin")
 	if _, err := store.AddPluginRecord(db, &store.PluginRecord{
@@ -259,7 +260,7 @@ exports.onResourceApply = function (ctx) {
 		t.Fatal(err)
 	}
 
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	defer runtime.Close()
 	if err := runtime.BeginPluginResourceMigrationTransaction(); err != nil {
 		t.Fatal(err)
@@ -296,7 +297,7 @@ func TestPluginResourceSchemaChangeRequiresVersionBump(t *testing.T) {
 	db := openTestDB(t)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	writeResourceMigrationPlugin(t, dir, "1.0.0", 1, migrationSchemaV1, ``)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	defer runtime.Close()
 	assertPluginReconcileSuccess(t, runtime, loadPluginCatalogWithState(cfg, db), "migration_plugin")
 	writeResourceMigrationPlugin(t, dir, "1.1.0", 1, migrationSchemaV2, ``)
@@ -312,7 +313,7 @@ func TestPluginResourceMigrationCannotUseSideEffectAPIs(t *testing.T) {
 	db := openTestDB(t)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	writeResourceMigrationPlugin(t, dir, "1.0.0", 1, migrationSchemaV1, ``)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	defer runtime.Close()
 	assertPluginReconcileSuccess(t, runtime, loadPluginCatalogWithState(cfg, db), "migration_plugin")
 	writeResourceMigrationPlugin(t, dir, "2.0.0", 2, migrationSchemaV2, `
@@ -370,7 +371,7 @@ exports.onReconcile = function () {};
 	writePluginControlScript(t, dir, "migration_plugin", control)
 }
 
-func assertPluginReconcileSuccess(t *testing.T, runtime *gojaPluginControlRuntime, catalog PluginCatalog, pluginID string) {
+func assertPluginReconcileSuccess(t *testing.T, runtime *pluginControlManager, catalog PluginCatalog, pluginID string) {
 	t.Helper()
 	snapshot := runtime.Reconcile(catalog)
 	state, ok := snapshot.stateFor(pluginID)

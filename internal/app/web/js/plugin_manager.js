@@ -1871,12 +1871,7 @@
     const isolationDetail = isolation ? [
       isolation.platform,
       Array.isArray(isolation.pids) && isolation.pids.length ? 'PID ' + isolation.pids.join(', ') : '',
-      isolation.resource_limit_mode,
-	  isolation.sandbox_level ? app.t('plugins.manager.sandboxLevel') + ': ' + app.t('plugins.manager.sandbox.' + isolation.sandbox_level) : '',
-	  isolation.sandbox_mode,
       isolation.restart_backoff_until ? app.t('plugins.manager.backoffUntil') + ': ' + isolation.restart_backoff_until : '',
-      isolation.resource_limit_degraded,
-	  isolation.sandbox_degraded,
       isolation.last_error
     ].filter(Boolean).join(' | ') : '';
     managerSetHeader(plugin.name || plugin.id, [plugin.id, plugin.version].filter(Boolean).join(' / '));
@@ -1901,7 +1896,7 @@
       { label: app.t('plugins.manager.events'), value: String(Number(eventBus.delivered || 0)) + ' / ' + app.t('plugins.manager.dropped') + ' ' + String(Number(eventBus.dropped || 0)) },
 	  operationState ? { label: app.t('plugins.manager.operations'), value: String(Number(operationState.total || 0)) + ' / ' + app.t('plugins.manager.resumable') + ' ' + String(Number(operationState.resumable || 0)), title: operationDetail } : null,
       { label: app.t('plugins.manager.leases'), value: String(leases.length), title: leaseDetail },
-      isolation ? { label: app.t('plugins.manager.isolation'), value: isolation.enabled ? (app.t('common.yes') + (isolation.sandbox_level ? ' · ' + app.t('plugins.manager.sandbox.' + isolation.sandbox_level) : '')) : app.t('common.no'), title: isolationDetail } : null,
+      isolation ? { label: app.t('plugins.manager.isolation'), value: isolation.enabled ? app.t('common.yes') : app.t('common.no'), title: isolationDetail } : null,
       isolation ? { label: app.t('plugins.manager.hostProcesses'), value: String(Number(isolation.process_count || 0)) + ' / ' + app.t('plugins.manager.restarts') + ' ' + String(Number(isolation.restart_count || 0)), title: isolationDetail } : null,
       isolation ? { label: app.t('plugins.manager.hostMemory'), value: app.formatBytes(Number(isolation.rss_bytes || 0)), title: isolationDetail } : null
     ]);

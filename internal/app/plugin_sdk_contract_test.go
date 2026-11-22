@@ -195,30 +195,9 @@ func TestPluginSDKContractMatchesGojaHost(t *testing.T) {
 
 	db := openTestDB(t)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	defer runtime.Close()
 	assertPluginReconcileSuccess(t, runtime, loadPluginCatalogWithState(cfg, db), "sdk_contract")
-}
-
-func TestPluginSDKGeneratedMethodTypesMatchHostRegistry(t *testing.T) {
-	path := filepath.Join("..", "..", "sdk", "plugin", "methods.d.ts")
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, err := encodePluginSDKMethodTypes(pluginHostControlMethods)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(want) {
-		t.Fatalf("checked-in plugin method types differ from runtime; regenerate with veer plugin contract --types-output %s --force", path)
-	}
-	for _, method := range pluginHostControlMethods {
-		declaration := fmt.Sprintf("%q: typeof %s;", method, method)
-		if strings.Count(string(got), declaration) != 1 {
-			t.Fatalf("generated method types contain %d declarations for %s", strings.Count(string(got), declaration), method)
-		}
-	}
 }
 
 func TestPluginSDKPublicDeclarationsDoNotUseAny(t *testing.T) {
@@ -260,24 +239,6 @@ func assertPluginSDKCapability(t *testing.T, contract pluginSDKAPIContract, meth
 
 func assertPluginSDKTextContract(t *testing.T, contract pluginSDKAPIContract) {
 	t.Helper()
-	typesPath := filepath.Join("..", "..", "sdk", "plugin", "control.d.ts")
-	types, err := os.ReadFile(typesPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, value := range append(append([]string(nil), contract.TCPipeline.HookStages...), contract.TCPipeline.Phases...) {
-		if !strings.Contains(string(types), "'"+value+"'") {
-			t.Fatalf("SDK TypeScript contract is missing pipeline value %q", value)
-		}
-	}
-	for _, values := range [][]string{contract.NetfilterPipeline.Families, contract.NetfilterPipeline.Hooks, contract.NetfilterPipeline.Phases} {
-		for _, value := range values {
-			if !strings.Contains(string(types), "'"+value+"'") {
-				t.Fatalf("SDK TypeScript contract is missing Netfilter value %q", value)
-			}
-		}
-	}
-
 	helpersPath := filepath.Join("..", "..", "plugins", "include", "veer_plugin_helpers.h")
 	helpers, err := os.ReadFile(helpersPath)
 	if err != nil {

@@ -372,7 +372,7 @@ func (watch *pluginControlSocketWatchRuntime) info() pluginControlSocketWatchInf
 	}
 }
 
-func (rt *gojaPluginControlRuntime) deliverPluginControlSocketEvent(owner pluginControlSocketOwner, spec pluginControlSocketWatchSpec, event pluginControlSocketEvent) error {
+func (rt *pluginControlManager) deliverPluginControlSocketEvent(owner pluginControlSocketOwner, spec pluginControlSocketWatchSpec, event pluginControlSocketEvent) error {
 	if rt == nil {
 		return errPluginRuntimeTargetNotLoaded
 	}
@@ -391,7 +391,7 @@ func (rt *gojaPluginControlRuntime) deliverPluginControlSocketEvent(owner plugin
 	if closed || plugin.ID == "" || control == nil || control.key != owner.generation {
 		return errPluginRuntimeTargetNotLoaded
 	}
-	if !pluginControlHasPermission(plugin, "worker") {
+	if !pluginHandlesAsyncEvents(plugin) {
 		return fmt.Errorf("socket watcher requires worker permission")
 	}
 	if err := validatePluginControlSocketEventAccess(plugin, event); err != nil {

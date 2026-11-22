@@ -1,0 +1,18 @@
+[package]
+name = "veer-plugin-example-echo"
+version = "1.0.0"
+# Self-contained, so the SDK crate builds outside this workspace too.
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Minimal native plugin used by the ABI conformance tests"
+
+[lib]
+name = "native_echo"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+veer-plugin = { path = "../../rust/veer-plugin" }
+
+[dev-dependencies]
+veer-plugin = { path = "../../rust/veer-plugin", features = ["testing"] }

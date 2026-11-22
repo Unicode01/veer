@@ -183,7 +183,7 @@ exports.onAction = function () {
 };`)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	provider := newPluginControlNetworkProviderTest()
 	runtime.netAdmin = provider
 	defer runtime.Close()
@@ -228,7 +228,7 @@ exports.onReconcile = function () {};
 exports.onAction = function () { return net.tuntap.ensure({name:"tun0", namespace:"veer-denied", mode:"tun"}); };`)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	provider := newPluginControlNetworkProviderTest()
 	runtime.netAdmin = provider
 	defer runtime.Close()
@@ -263,7 +263,7 @@ exports.onAction = function () {
 };`)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	provider := newPluginControlNetworkProviderTest()
 	provider.namespaces["veer-test"] = pluginControlNetNamespaceInfo{
 		Name: "veer-test", Identity: pluginControlNetNamespaceIdentity{Device: 7, Inode: 101},
@@ -363,7 +363,7 @@ exports.onAction = function () {
 };`)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	provider := newPluginControlNetworkProviderTest()
 	provider.namespaces["veer-a"] = pluginControlNetNamespaceInfo{Name: "veer-a", Identity: pluginControlNetNamespaceIdentity{Device: 7, Inode: 101}}
 	provider.namespaces["veer-b"] = pluginControlNetNamespaceInfo{Name: "veer-b", Identity: pluginControlNetNamespaceIdentity{Device: 7, Inode: 102}}
