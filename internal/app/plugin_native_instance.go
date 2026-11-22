@@ -38,6 +38,9 @@ type pluginNativeWorker struct {
 
 	done     chan struct{}
 	doneOnce sync.Once
+	// exited closes once the process is reaped; done can close earlier, when
+	// the worker drops its socket while it is still exiting.
+	exited   chan struct{}
 	exitErr  atomic.Value
 	stopping atomic.Bool
 }
@@ -66,9 +69,18 @@ func startPluginNativeWorker(pool *pluginNativeWorkerPool, group string, deadlin
 		startedAt: time.Now(),
 		instances: make(map[uint32]*pluginNativeInstance),
 		done:      make(chan struct{}),
+		exited:    make(chan struct{}),
 	}
 	if pool.cfg != nil {
-		if cleanup, warning, limitErr := attachPluginHostResourceLimits(command.Process.Pid, "worker-"+strings.ReplaceAll(group, ":", "-"), pluginHostResourceLimitsFromConfig(pool.cfg)); limitErr != nil {
+		// A delegated service cgroup can only enable controllers for the
+		// worker cgroups once Veer itself has moved into a leaf of its own.
+		limitErr := preparePluginHostResourceLimitRoot()
+		var cleanup func()
+		var warning string
+		if limitErr == nil {
+			cleanup, warning, limitErr = attachPluginHostResourceLimits(command.Process.Pid, "worker-"+strings.ReplaceAll(group, ":", "-"), pluginHostResourceLimitsFromConfig(pool.cfg))
+		}
+		if limitErr != nil {
 			if pool.limitWarned.CompareAndSwap(false, true) {
 				log.Printf("plugin worker resource limits unavailable: %v", limitErr)
 			}
@@ -77,8 +89,9 @@ func startPluginNativeWorker(pool *pluginNativeWorkerPool, group string, deadlin
 				log.Printf("plugin worker %s resource limits partially applied: %s", group, warning)
 			}
 			if cleanup != nil {
+				// A cgroup can only be removed once it has no processes.
 				go func() {
-					<-worker.done
+					<-worker.exited
 					cleanup()
 				}()
 			}
@@ -231,6 +244,7 @@ func (worker *pluginNativeWorker) stderrLoop(stderr io.ReadCloser) {
 
 func (worker *pluginNativeWorker) waitLoop() {
 	err := worker.command.Wait()
+	close(worker.exited)
 	if err == nil {
 		err = fmt.Errorf("plugin worker %s exited", worker.group)
 	} else {

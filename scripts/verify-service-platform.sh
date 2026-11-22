@@ -75,7 +75,7 @@ cat >> "$SERVICE_FILE" <<EOF
 [Service]
 Type=oneshot
 Restart=no
-ExecStart=${INSTALL_DIR}/veer -test.v -test.run=^(TestPluginHostLinuxSandboxIdentityAndCgroup|TestPluginHostLinuxSandboxEnforcementProbe|TestPluginHostLinuxChrootFallbackEnforcementProbe)$ -test.count=1 -test.timeout=2m
+ExecStart=${INSTALL_DIR}/veer -test.v -test.run=^TestPluginNativeWorkerServiceLaunch$ -test.count=1 -test.timeout=2m
 EOF
 prepare_selinux_labels
 systemd-analyze verify "$SERVICE_FILE"
@@ -83,10 +83,8 @@ systemctl daemon-reload
 systemctl start "$SERVICE_NAME"
 journalctl -u "$SERVICE_NAME" --no-pager -o cat > "${INSTALL_DIR}/service.log"
 if grep -F -- '--- SKIP:' "${INSTALL_DIR}/service.log"; then
-    echo 'deployment service sandbox test was skipped' >&2
+    echo 'deployment service plugin worker test was skipped' >&2
     exit 1
 fi
-for test_name in TestPluginHostLinuxSandboxIdentityAndCgroup TestPluginHostLinuxSandboxEnforcementProbe TestPluginHostLinuxChrootFallbackEnforcementProbe; do
-    grep -F -- "--- PASS: ${test_name}" "${INSTALL_DIR}/service.log"
-done
-echo 'deployment service plugin sandbox: passed'
+grep -F -- '--- PASS: TestPluginNativeWorkerServiceLaunch' "${INSTALL_DIR}/service.log"
+echo 'deployment service plugin worker: passed'
