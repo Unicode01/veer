@@ -618,6 +618,7 @@ func (pm *ProcessManager) initializePluginCatalogSnapshot() {
 		pm.pluginCatalogLastCheckError = err.Error()
 	}
 	pm.mu.Unlock()
+	pm.invalidatePluginCatalogCache()
 	if err != nil {
 		log.Printf("plugin update monitor: initialize applied snapshot failed; external plugins remain disabled until a manual reload succeeds: %v", err)
 	}
@@ -633,12 +634,32 @@ func (pm *ProcessManager) cleanupPluginCatalogSnapshot() {
 	dir := pm.pluginCatalogAppliedDir
 	pm.pluginCatalogAppliedDir = ""
 	pm.mu.Unlock()
+	pm.invalidatePluginCatalogCache()
 	if err := removePluginCatalogSnapshot(dir); err != nil {
 		log.Printf("plugin update monitor: clean applied snapshot: %v", err)
 	}
 }
 
 func (pm *ProcessManager) appliedPluginCatalogConfig(fallback *Config) (*Config, string) {
+	source := pm.appliedPluginCatalogSource(fallback)
+	return source.cfg, source.sourceDir
+}
+
+// pluginCatalogSource is where the running catalog is read from.
+type pluginCatalogSource struct {
+	// cfg is the configuration with plugins_dir pointing at the applied
+	// snapshot, when there is one.
+	cfg *Config
+	// sourceDir is the configured plugins directory the catalog reports.
+	sourceDir string
+	// fixed is set when nothing changes cfg's plugin directory under the
+	// process: it is the applied snapshot, which only the update monitor's
+	// apply replaces, or external plugins are off. A configured directory
+	// read in place (a process manager without a snapshot) is not.
+	fixed bool
+}
+
+func (pm *ProcessManager) appliedPluginCatalogSource(fallback *Config) pluginCatalogSource {
 	base := fallback
 	if pm != nil && pm.cfg != nil {
 		base = pm.cfg
@@ -647,15 +668,16 @@ func (pm *ProcessManager) appliedPluginCatalogConfig(fallback *Config) (*Config,
 		base = &Config{}
 	}
 	out := *base
-	sourceDir := normalizePluginsDir(out.PluginsDir)
+	source := pluginCatalogSource{sourceDir: normalizePluginsDir(out.PluginsDir)}
 	disableExternalPlugins := false
 	if pm != nil {
 		pm.mu.Lock()
 		if pm.pluginCatalogSourceDir != "" {
-			sourceDir = pm.pluginCatalogSourceDir
+			source.sourceDir = pm.pluginCatalogSourceDir
 		}
 		if pm.pluginCatalogAppliedDir != "" {
 			out.PluginsDir = pm.pluginCatalogAppliedDir
+			source.fixed = true
 		} else if out.PluginsEnabled() && pm.pluginCatalogLastCheckResult == pluginCatalogHotReloadResultError && pm.pluginCatalogLastCheckError != "" {
 			disableExternalPlugins = true
 		}
@@ -666,7 +688,11 @@ func (pm *ProcessManager) appliedPluginCatalogConfig(fallback *Config) (*Config,
 		out.PluginsEnabledSetting = &disabled
 		out.PluginsDataplaneSetting = &disabled
 	}
-	return &out, sourceDir
+	if !out.PluginsEnabled() {
+		source.fixed = true
+	}
+	source.cfg = &out
+	return source
 }
 
 func pluginCatalogConfigForProcess(pm *ProcessManager, fallback *Config) *Config {
@@ -937,6 +963,7 @@ func (pm *ProcessManager) applyPluginCatalogUpdateSelection(pluginIDs []string) 
 	pm.pluginCatalogAppliedDir = candidateDir
 	pm.pluginCatalogAppliedFingerprint = candidateFingerprint
 	pm.mu.Unlock()
+	pm.invalidatePluginCatalogCache()
 
 	_, applyErr := pm.reconcilePluginsForRuntimeWithError()
 	if applyErr != nil {
@@ -944,6 +971,7 @@ func (pm *ProcessManager) applyPluginCatalogUpdateSelection(pluginIDs []string) 
 		pm.pluginCatalogAppliedDir = previousDir
 		pm.pluginCatalogAppliedFingerprint = previousFingerprint
 		pm.mu.Unlock()
+		pm.invalidatePluginCatalogCache()
 		_, rollbackErr := pm.reconcilePluginsForRuntimeWithError()
 		if rollbackErr != nil {
 			applyErr = fmt.Errorf("%v; rollback previous plugin catalog: %w", applyErr, rollbackErr)

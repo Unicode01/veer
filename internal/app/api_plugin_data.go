@@ -173,7 +173,12 @@ func handlePluginStateAPI(w http.ResponseWriter, r *http.Request, cfg *Config, d
 }
 
 func externalPluginExists(cfg *Config, pm *ProcessManager, pluginID string) bool {
-	catalog := loadPluginCatalog(pluginCatalogConfigForProcess(pm, cfg))
+	var catalog PluginCatalog
+	if pm != nil {
+		catalog, _, _ = pm.pluginCatalogWithState(cfg)
+	} else {
+		catalog = loadPluginCatalog(cfg)
+	}
 	for _, plugin := range catalog.Plugins {
 		if plugin.ID == pluginID && !plugin.Builtin {
 			return true
@@ -182,10 +187,22 @@ func externalPluginExists(cfg *Config, pm *ProcessManager, pluginID string) bool
 	return false
 }
 
-func pluginStateResponseForID(cfg *Config, db *sql.DB, pm *ProcessManager, pluginID string) pluginStateResponse {
-	catalog := loadPluginCatalogWithControlRegistrationAndState(cfg, db)
+// controlAPIPluginCatalog is the catalog the plugin data API answers from:
+// the running process's, or one loaded from disk when there is none. Every
+// resource and action request needs it, so it must not rescan the plugins,
+// and it leaves out the database usage (a scan of every plugin record),
+// which only responses that show a plugin add.
+func controlAPIPluginCatalog(cfg *Config, db *sql.DB, pm *ProcessManager) PluginCatalog {
 	if pm != nil {
-		catalog = pm.pluginCatalogWithConfig(cfg)
+		return pm.pluginCatalogWithRuntimeState(cfg)
+	}
+	return loadPluginCatalogWithControlRegistrationAndState(cfg, db)
+}
+
+func pluginStateResponseForID(cfg *Config, db *sql.DB, pm *ProcessManager, pluginID string) pluginStateResponse {
+	catalog := controlAPIPluginCatalog(cfg, db, pm)
+	if pm != nil {
+		applyPluginCatalogDatabaseUsage(&catalog, pm.db)
 	}
 	for _, plugin := range catalog.Plugins {
 		if plugin.ID == pluginID {
@@ -743,10 +760,7 @@ func pluginActionForRequest(w http.ResponseWriter, cfg *Config, db *sql.DB, pm *
 }
 
 func loadedPluginForControlAPI(cfg *Config, db *sql.DB, pm *ProcessManager, pluginID string) (LoadedPlugin, bool) {
-	catalog := loadPluginCatalogWithControlRegistrationAndState(cfg, db)
-	if pm != nil {
-		catalog = pm.pluginCatalogWithConfig(cfg)
-	}
+	catalog := controlAPIPluginCatalog(cfg, db, pm)
 	for _, plugin := range catalog.Plugins {
 		if plugin.ID == pluginID && plugin.Status == pluginStatusActive {
 			return plugin, true

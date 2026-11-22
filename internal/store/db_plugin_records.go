@@ -37,7 +37,9 @@ func DeletePluginData(db *sql.DB, pluginID string) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	err = tx.Commit()
+	pluginStateGeneration.Add(1)
+	return err
 }
 
 const (

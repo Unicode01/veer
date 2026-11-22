@@ -655,12 +655,20 @@ func loadPluginCatalogWithState(cfg *Config, db store.RuleStore) PluginCatalog {
 }
 
 func applyPluginStatesFromDB(catalog PluginCatalog, db store.RuleStore) PluginCatalog {
+	catalog = applyPluginEnabledStatesFromDB(catalog, db)
+	if !pluginRuleStoreIsNil(db) {
+		applyPluginDatabaseResourceUsage(&catalog, db)
+	}
+	return catalog
+}
+
+// applyPluginEnabledStatesFromDB disables the plugins whose stored state
+// says so. Unlike applyPluginStatesFromDB it leaves out the database usage,
+// which only the API views show and which costs a scan of every record.
+func applyPluginEnabledStatesFromDB(catalog PluginCatalog, db store.RuleStore) PluginCatalog {
 	clearPluginResolutionErrors(&catalog)
 	for i := range catalog.Plugins {
 		catalog.Plugins[i].Enabled = true
-		if catalog.Plugins[i].Builtin {
-			continue
-		}
 	}
 	if pluginRuleStoreIsNil(db) {
 		return resolvePluginCatalogRelationships(catalog, currentPluginHostEnvironment())
@@ -668,9 +676,7 @@ func applyPluginStatesFromDB(catalog PluginCatalog, db store.RuleStore) PluginCa
 	states, err := store.GetPluginStates(db)
 	if err != nil {
 		logPluginStateLoadError(err)
-		catalog = resolvePluginCatalogRelationships(catalog, currentPluginHostEnvironment())
-		applyPluginDatabaseResourceUsage(&catalog, db)
-		return catalog
+		return resolvePluginCatalogRelationships(catalog, currentPluginHostEnvironment())
 	}
 	enabledByPlugin := make(map[string]bool, len(states))
 	for _, state := range states {
@@ -693,9 +699,7 @@ func applyPluginStatesFromDB(catalog PluginCatalog, db store.RuleStore) PluginCa
 		}
 		disableLoadedPlugin(plugin)
 	}
-	catalog = resolvePluginCatalogRelationships(catalog, currentPluginHostEnvironment())
-	applyPluginDatabaseResourceUsage(&catalog, db)
-	return catalog
+	return resolvePluginCatalogRelationships(catalog, currentPluginHostEnvironment())
 }
 
 func pluginRuleStoreIsNil(db store.RuleStore) bool {

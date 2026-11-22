@@ -276,6 +276,7 @@ type ProcessManager struct {
 	pluginCatalogWatch                             *pluginCatalogWatcher         // mu
 	pluginCatalogWatchOpenAt                       time.Time                     // mu
 	pluginCatalogScanMode                          pluginCatalogScanMode         // mu
+	pluginCatalogCache                             pluginCatalogCache
 	pluginPackageMu                                sync.Mutex
 	dataplaneReconcileMu                           sync.Mutex
 	pluginReconcileMu                              sync.Mutex
@@ -637,7 +638,10 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 			_ = os.Remove(sockPath)
 			return nil, fmt.Errorf("initialize plugin secret store: %w", err)
 		}
-		catalog := loadPluginCatalogWithControlRegistrationAndState(pluginCatalogConfigForProcess(pm, cfg), db)
+		// Read through the cache, so the first reconcile does not scan again.
+		catalog, catalogCfg, _ := pm.pluginCatalogWithState(cfg)
+		applyPluginControlRegistrationSurfaces(&catalog, catalogCfg)
+		catalog = resolvePluginCatalogAfterRuntimeSurfaces(catalog)
 		if err := secrets.migratePluginSecrets(catalog); err != nil {
 			_ = pm.pluginControlRuntime.Close()
 			_ = ln.Close()

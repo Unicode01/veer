@@ -203,25 +203,26 @@ func resolvePluginObjectRealPath(plugin *LoadedPlugin, object PluginObject) (str
 }
 
 func resolvePluginObjectSpec(object *PluginObject, objectPath, expectedSHA256 string, limits PluginResourceLimits) error {
-	spec, err := loadVerifiedPluginObjectCollectionSpec(objectPath, expectedSHA256)
+	summary, err := loadVerifiedPluginObjectSpecSummary(objectPath, expectedSHA256)
 	if err != nil {
 		return fmt.Errorf("parse eBPF object: %w", err)
 	}
-	object.ProgramCount = len(spec.Programs)
-	object.MapCount = len(spec.Maps)
+	object.ProgramCount = summary.programCount
+	object.MapCount = summary.mapCount
 	if limits.ObjectsPerPlugin == 0 {
 		limits = pluginResourceLimitsFromConfig(nil)
 	}
-	usage, err := pluginObjectResourceUsageFromSpec(spec, limits)
+	usage, err := summary.resourceUsage(limits)
 	if err != nil {
 		return fmt.Errorf("resource budget: %w", err)
 	}
 	object.ResourceUsage = usage
-	if err := validatePluginObjectStateMapSpecs(object.StateMaps, spec); err != nil {
+	if err := summary.validateStateMaps(object.StateMaps); err != nil {
 		return err
 	}
 
-	discoveredPrograms := pluginObjectProgramsFromSpec(spec)
+	// A copy: the summary is shared by every catalog read.
+	discoveredPrograms := append([]PluginObjectProgram(nil), summary.programs...)
 	if len(object.Programs) == 0 {
 		object.Programs = discoveredPrograms
 		return nil
@@ -254,19 +255,7 @@ func validatePluginObjectStateMapSpecs(contracts []PluginObjectStateMap, spec *e
 	if spec == nil {
 		return fmt.Errorf("state map validation requires an eBPF collection spec")
 	}
-	for _, contract := range contracts {
-		if contract.Policy != pluginObjectMapPreserve && contract.Policy != pluginObjectMapMigrate {
-			continue
-		}
-		mapSpec := spec.Maps[contract.Name]
-		if mapSpec == nil {
-			return fmt.Errorf("state map %q with policy %s is not present in the object", contract.Name, contract.Policy)
-		}
-		if !pluginObjectMapTypeSupportsStatePreservation(mapSpec.Type) {
-			return fmt.Errorf("state map %q with policy %s uses unsupported map type %s", contract.Name, contract.Policy, mapSpec.Type)
-		}
-	}
-	return nil
+	return summarizePluginObjectSpec(spec).validateStateMaps(contracts)
 }
 
 func pluginObjectMapTypeSupportsStatePreservation(mapType ebpf.MapType) bool {

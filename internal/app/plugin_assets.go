@@ -102,10 +102,7 @@ func handlePluginAsset(w http.ResponseWriter, r *http.Request, cfg *Config, db *
 	}
 
 	id := parts[0]
-	catalog := loadPluginCatalogWithControlRegistrationAndState(cfg, db)
-	if pm != nil {
-		catalog = pm.pluginCatalogWithConfig(cfg)
-	}
+	catalog := controlAPIPluginCatalog(cfg, db, pm)
 	for _, plugin := range catalog.Plugins {
 		if plugin.ID != id || plugin.Status != pluginStatusActive || plugin.staticDir == "" || plugin.AssetBasePath == "" {
 			continue
