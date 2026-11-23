@@ -2728,7 +2728,7 @@
   // until it has loaded, the address the browser used stands in.
   app.documentTitlePage = '';
   app.updateDocumentTitle = function updateDocumentTitle() {
-    const host = (app.hostSummary && app.hostSummary.name) || window.location.hostname || '';
+    const host = (app.hostSummary && app.hostSummary.name) || (window.location && window.location.hostname) || '';
     document.title = [host, app.documentTitlePage, app.t('app.title')].filter(Boolean).join(' - ');
   };
 
