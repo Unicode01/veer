@@ -1538,6 +1538,42 @@ test('signing out and an expired session return to the sign-in form', async ({ p
   allowUnauthorizedResponses(page);
 });
 
+test('the tab title names the host first, then the page', async ({ page }, testInfo) => {
+  // Several Veer tabs in one browser must stay apart: "<host> - <page> - Veer".
+  await openSignIn(page, testInfo);
+  await expect(page.locator('#tokenModal')).toBeVisible();
+  // Signed out, only the address the browser used is known.
+  await expect(page).toHaveTitle('127.0.0.1 - Veer');
+
+  await page.locator('#loginPassword').fill('correct horse');
+  await page.locator('#loginPassword').press('Enter');
+  await expect(page.locator('#app')).toBeVisible();
+  const titleFor = async () => 'pve-node-03 - ' + (await page.locator('#pageTitle').textContent()) + ' - Veer';
+  await expect.poll(() => page.title()).toBe(await titleFor());
+
+  const openSidebar = async () => {
+    if (page.viewportSize().width < 860 && await page.locator('.sidebar-backdrop').isHidden()) await page.locator('#sidebarToggle').click();
+  };
+  await openSidebar();
+  await page.locator('#tab-plugins-button').click();
+  const plugins = await page.evaluate(() => window.VeerApp.t('tab.plugins'));
+  await expect(page.locator('#pageTitle')).toHaveText(plugins);
+  await expect(page).toHaveTitle('pve-node-03 - ' + plugins + ' - Veer');
+
+  // A language change re-translates the page name and keeps the host.
+  const other = testInfo.project.name.startsWith('mobile') ? 'zh-CN' : 'en-US';
+  await page.evaluate((locale) => window.VeerApp.setLocale(locale), other);
+  const translated = await page.evaluate(() => window.VeerApp.t('tab.plugins'));
+  await expect(page).toHaveTitle('pve-node-03 - ' + translated + ' - Veer');
+
+  // A tab whose session ended still names its host.
+  await openSidebar();
+  await page.locator('#logoutBtn').click();
+  await page.locator('#confirmSubmitBtn').click();
+  await expect(page.locator('#tokenModal')).toBeVisible();
+  await expect(page).toHaveTitle('pve-node-03 - Veer');
+});
+
 test('firewall page edits ICMP and catch-all policies, sets and connection tracking through the real UI', async ({ page }, testInfo) => {
   test.setTimeout(60000);
   await openDashboard(page, testInfo);

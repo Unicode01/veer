@@ -431,6 +431,8 @@
     crumbs.push(node('strong', { text: network ? network.name || network.bridge || '#' + network.id : title }));
     shell.breadcrumb.replaceChildren(...crumbs);
     app.$('pageTitle').textContent = network ? network.name || network.bridge || '#' + network.id : title;
+    app.documentTitlePage = app.$('pageTitle').textContent;
+    if (typeof app.updateDocumentTitle === 'function') app.updateDocumentTitle();
     app.$('pageEyebrow').textContent = network ? title : text(groupKey(tab));
     app.$('pageDescription').textContent = network ? [network.bridge, network.ipv4_cidr, network.ipv6_parent_prefix].filter(Boolean).join(' · ') : text('patchbay.desc.' + (cfg ? cfg.state : tab === 'diagnostics' ? 'diagnostics' : 'plugins'));
     app.$('pageDescription').classList.toggle('mono', !!network);
