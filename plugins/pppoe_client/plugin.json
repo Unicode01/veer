@@ -2,7 +2,7 @@
   "api_version": "v1",
   "id": "pppoe_client",
   "name": "PPPoE Client",
-  "version": "1.9.2",
+  "version": "1.10.0",
   "kind": "pipeline",
   "stability": "stable",
   "description": "PPPoE WAN control and bidirectional TC pipeline integration.",

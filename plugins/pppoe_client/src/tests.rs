@@ -809,6 +809,40 @@ impl T {
         w.l2_recvs.len() - w.recvs_at_client_ipcp_ack
     }
 
+    /// What the tunnel counted for its session: control frames,
+    /// Terminate-Requests and PADTs from the AC.
+    fn set_session_events(&self, control: u64, terminate: u64, padt: u64) {
+        self.w().map_values.insert("pppoe_tunnel/pppoe_session_events/00000000".to_string(), format!("{}{}{}", u64le(control), u64le(terminate), u64le(padt)));
+    }
+
+    fn session_events(&self) -> (u64, u64, u64) {
+        let hex = self.w().map_values.get("pppoe_tunnel/pppoe_session_events/00000000").cloned().unwrap_or_default();
+        let at = |i: usize| hex.get(i * 16..i * 16 + 16).map(|part| u64::from_le_bytes(hex_to_bytes(part).try_into().unwrap_or([0; 8]))).unwrap_or(0);
+        (at(0), at(1), at(2))
+    }
+
+    fn padts_sent(&self) -> usize {
+        self.w().l2_sends.iter().filter(|req| discovery_code(&js::text(&req["payload"])) == CODE_PADT).count()
+    }
+
+    /// The magic numbers of the LCP Echo-Requests the client sent.
+    fn lcp_echo_requests(&self) -> Vec<String> {
+        let w = self.w();
+        w.l2_sends
+            .iter()
+            .chain(w.l2_exchanges.iter())
+            .filter_map(|req| {
+                let payload = js::text(&req["payload"]);
+                if js::text(&req["ethertype"]) != SESS || payload.is_empty() {
+                    return None;
+                }
+                let parsed = parse_session_frame(&json!({"payload_hex": payload})).ok()?;
+                let cp = parse_cp(&parsed.payload);
+                (parsed.protocol == PPP_LCP && cp.code == 9).then(|| cp.data_hex.clone())
+            })
+            .collect()
+    }
+
     /// A session that is up, with its WAN link, as a dial leaves them.
     fn seed_up_session(&self, link: Value) {
         self.set("sessions", "last", json!({"phase": "session_probe", "session_id": SESSION_ID, "ac_mac": AC_MAC, "lcp_ready": true}));
@@ -1419,9 +1453,10 @@ fn chap_dial_keepalive_and_secret_boundary() {
     assert_eq!(t.w().secrets.get("pppoe-password-default"), Some(&json!("chap-pass")));
     let persisted = t.data("profiles", "default");
     assert_eq!(persisted["username"], "chap-user");
-    assert_eq!(persisted["keepalive_failure_threshold"], 5);
-    assert_eq!(persisted["keepalive_failure_grace_ms"], 60000);
+    assert_eq!(persisted["keepalive_failure_threshold"], 3);
+    assert_eq!(persisted["keepalive_failure_grace_ms"], 0);
     assert_eq!(persisted["keepalive_confirm_timeout_ms"], 5000);
+    assert_eq!(persisted["keepalive_adaptive"], true);
     assert!(persisted.get("password").is_none(), "runtime profile must not persist plaintext credentials");
     let timer = t.timer_payload("lcp_echo");
     assert!(!timer.to_string().contains("chap-pass"), "keepalive timer payload must not contain the password");
@@ -1689,6 +1724,156 @@ fn link_local_sources_keep_leading_zero_groups() {
     assert_eq!(ipv6_text_to_hex("ff02::2").unwrap(), "ff020000000000000000000000000002");
     assert_eq!(ipv6_text_to_hex("fe80::1").unwrap(), "fe800000000000000000000000000001");
     assert!(ipv6_text_to_hex("fe80::1::2").is_err());
+}
+
+fn tunnel_dial(extra: Value) -> Value {
+    js::merge(
+        &json!({
+            "interface": "eth0", "username": "user", "password": "pass", "auth": "pap", "timeout_ms": 50, "control_ack_timeout_ms": 10,
+            "control_idle_timeout_ms": 1, "max_frames": 4, "negotiate_ipv4": true, "negotiate_ipv6": false, "send_padt": false,
+            "post_session_control_ms": 0, "keepalive_interval_ms": 10000, "auto_redial": true, "redial_retry_initial_ms": 2000,
+            "redial_retry_max_ms": 30000, "local_interface": "veerlocal0", "pipeline_interface": PIPELINE, "wan_core_sync": false,
+        }),
+        &extra,
+    )
+}
+
+#[test]
+fn keepalive_defaults_find_a_silent_loss_sooner() {
+    // Echo every 10 s, 3 misses, no grace, one 5 s confirmation, adaptive.
+    let mut t = T::new(Opts { echo_replies: true, ..auth("none") });
+    t.run("dial", plain_dial(json!({"auth": "none"})));
+    let timer = t.h.fake.timer("lcp_echo").expect("keepalive should be on by default");
+    assert_eq!(timer["delay_ms"], 10000);
+    let payload = &timer["payload"];
+    assert_eq!(payload["keepalive_failure_threshold"], 3);
+    assert_eq!(payload["keepalive_failure_grace_ms"], 0);
+    assert_eq!(payload["keepalive_confirm_timeout_ms"], 5000);
+    assert_eq!(payload["keepalive_adaptive"], true);
+
+    // What a profile sets stays as it is.
+    let mut t = T::new(Opts { echo_replies: true, ..auth("none") });
+    t.run("dial", plain_dial(json!({"auth": "none", "keepalive_interval_ms": 15000, "keepalive_failure_threshold": 5,
+        "keepalive_failure_grace_ms": 60000, "keepalive_adaptive": false})));
+    let timer = t.h.fake.timer("lcp_echo").unwrap();
+    assert_eq!(timer["delay_ms"], 15000);
+    assert_eq!(timer["payload"]["keepalive_failure_threshold"], 5);
+    assert_eq!(timer["payload"]["keepalive_failure_grace_ms"], 60000);
+    assert_eq!(timer["payload"]["keepalive_adaptive"], false);
+}
+
+#[test]
+fn adaptive_keepalive_skips_the_echo_while_the_peer_sends() {
+    let mut t = T::new(Opts { echo_replies: true, ..auth("none") });
+    t.run("dial", plain_dial(json!({"auth": "none", "keepalive_interval_ms": 10000})));
+    t.refire("lcp_echo");
+    assert_eq!(t.lcp_echo_requests().len(), 1, "the first tick has nothing to compare with");
+    // The peer sent inner traffic since that tick: no echo.
+    t.w().o.per_cpu_values = vec![format!("{}{}", u64le(5), "00".repeat(24))];
+    t.refire("lcp_echo");
+    assert_eq!(t.lcp_echo_requests().len(), 1, "an echo went out while the peer was sending");
+    let keepalive = t.data("sessions", "keepalive");
+    assert_eq!(keepalive["phase"], "keepalive_ok");
+    assert_eq!(keepalive["liveness"], "peer_traffic");
+    // A control frame from the peer (the tunnel counts those) also counts.
+    t.set_session_events(1, 0, 0);
+    t.refire("lcp_echo");
+    assert_eq!(t.lcp_echo_requests().len(), 1);
+    // Silence again: echoes again.
+    t.refire("lcp_echo");
+    assert_eq!(t.lcp_echo_requests().len(), 2, "a quiet peer must be probed");
+    // Turned off, every tick sends one.
+    let mut t = T::new(Opts { echo_replies: true, ..auth("none") });
+    t.run("dial", plain_dial(json!({"auth": "none", "keepalive_interval_ms": 10000, "keepalive_adaptive": false})));
+    t.refire("lcp_echo");
+    t.w().o.per_cpu_values = vec![format!("{}{}", u64le(5), "00".repeat(24))];
+    t.refire("lcp_echo");
+    assert_eq!(t.lcp_echo_requests().len(), 2);
+}
+
+#[test]
+fn lcp_echo_requests_carry_the_negotiated_magic_number() {
+    let mut t = T::new(Opts { echo_replies: true, ..auth("none") });
+    t.run("dial", plain_dial(json!({"auth": "none", "keepalive_interval_ms": 10000})));
+    let magic = js::text(&t.data("sessions", "last")["lcp_magic"]);
+    assert_eq!(magic.len(), 8);
+    assert_ne!(magic, "00000000");
+    t.refire("lcp_echo");
+    assert_eq!(t.lcp_echo_requests(), vec![magic], "RFC 1661 5.8: the sender's magic number");
+}
+
+#[test]
+fn a_padt_or_terminate_request_from_the_ac_redials_at_once() {
+    for (events, trigger) in [((0, 0, 1), "ac_padt"), ((1, 1, 0), "ac_terminate")] {
+        let mut t = T::new(Opts { echo_replies: true, ..auth("pap") });
+        t.run("traffic_probe", tunnel_dial(json!({})));
+        assert_eq!(t.session_events(), (0, 0, 0), "a new tunnel starts with no events");
+        t.repair();
+        assert!(!t.has_timer("redial_retry"), "no event, no redial");
+        let padts_before = t.padts_sent();
+        let (control, terminate, padt) = events;
+        t.set_session_events(control, terminate, padt);
+        t.repair();
+        let keepalive = t.data("sessions", "keepalive");
+        assert_eq!(keepalive["phase"], "redial_wait", "{keepalive}");
+        assert_eq!(keepalive["redial_trigger"], trigger);
+        assert!(t.has_timer("redial_retry"));
+        assert_eq!(t.h.fake.timer("redial_retry").unwrap()["delay_ms"], 2000);
+        assert!(!t.has_timer("lcp_echo"), "the ended session needs no keepalive");
+        assert_eq!(t.last_put(), zero(), "the ended session's tunnel must go");
+        assert_eq!(t.padts_sent(), padts_before, "the AC ended the session; no PADT of ours");
+        assert_eq!(t.session_events(), (0, 0, 0), "an event is handled once");
+        assert_eq!(t.data("sessions", "peer_termination")["trigger"], trigger);
+        t.refire("redial_retry");
+        assert_eq!(t.data("sessions", "keepalive")["phase"], "redial_ok");
+        assert_eq!(t.data("sessions", "redial_last")["trigger"], trigger);
+    }
+
+    // Without auto redial the session is down and stays down.
+    let mut t = T::new(Opts { echo_replies: true, ..auth("pap") });
+    t.run("traffic_probe", tunnel_dial(json!({"auto_redial": false})));
+    t.set_session_events(0, 0, 1);
+    t.repair();
+    assert!(!t.has_timer("redial_retry"));
+    let last = t.data("sessions", "last");
+    assert_eq!(last["phase"], "peer_terminated");
+    assert_eq!(last["lcp_ready"], false);
+    assert_eq!(t.last_put(), zero());
+    assert_eq!(t.data("wan_links", "default")["usable"], false);
+}
+
+#[test]
+fn session_events_of_another_session_are_ignored() {
+    let mut t = T::new(Opts { echo_replies: true, ..auth("pap") });
+    t.run("traffic_probe", tunnel_dial(json!({})));
+    // The record moved on to another session than the installed tunnel's.
+    let mut last = t.data("sessions", "last");
+    last["session_id"] = json!(0x0099);
+    t.set("sessions", "last", last);
+    t.set_session_events(0, 0, 1);
+    t.repair();
+    assert!(!t.has_timer("redial_retry"), "events of the tunnel's session must not end another one");
+}
+
+#[test]
+fn an_ac_that_keeps_ending_the_session_is_redialed_with_backoff() {
+    let mut t = T::new(Opts { echo_replies: true, ..auth("pap") });
+    t.run("traffic_probe", tunnel_dial(json!({})));
+    let mut delays = Vec::new();
+    for _ in 0..4 {
+        t.set_session_events(0, 0, 1);
+        t.repair();
+        delays.push(t.h.fake.timer("redial_retry").unwrap()["delay_ms"].clone());
+        t.refire("redial_retry");
+        assert_eq!(t.data("sessions", "keepalive")["phase"], "redial_ok");
+    }
+    assert_eq!(delays, vec![json!(2000), json!(4000), json!(8000), json!(16000)], "kicks in a row back off");
+    assert_eq!(t.data("sessions", "redial_last")["count"], 4, "each kick starts a redial sequence");
+    // A session that held for a while starts over.
+    crate::CLOCK_SHIFT.with(|shift| shift.set(shift.get() + 300_000.0));
+    t.set_session_events(0, 0, 1);
+    t.repair();
+    assert_eq!(t.h.fake.timer("redial_retry").unwrap()["delay_ms"], 2000);
 }
 
 #[test]

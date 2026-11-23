@@ -62,6 +62,8 @@
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86dd
 #define ETH_P_PPP_SES 0x8864
+#define ETH_P_PPP_DISC 0x8863
+#define PPPOE_CODE_PADT 0xa7
 #define PPP_IP 0x0021
 #define PPP_IPV6 0x0057
 #define PPP_LCP 0xc021
@@ -69,6 +71,8 @@
 #define IPPROTO_UDP 17
 #define PPPOE_TUNNEL_FLAG_MANUAL_DECAP 0x2
 #define PPPOE_ACT_CONTINUE (-2)
+#define LCP_TERMINATE_REQUEST 5
+#define LCP_TERMINATE_ACK 6
 #define LCP_ECHO_REQUEST 9
 #define LCP_ECHO_REPLY 10
 #define TCP_FLAG_SYN 0x02
@@ -89,6 +93,13 @@ struct pppoe_ppp_hdr {
 	__u16 session_id;
 	__u16 length;
 	__u16 protocol;
+} __attribute__((packed));
+
+struct pppoe_disc_hdr {
+	__u8 ver_type;
+	__u8 code;
+	__u16 session_id;
+	__u16 length;
 } __attribute__((packed));
 
 struct ppp_lcp_echo_hdr {
@@ -155,6 +166,15 @@ struct pppoe_tunnel_config {
 	__u8 lcp_magic[4];
 };
 
+/* What the AC of the installed session sent, for the control plane to
+ * poll: it cannot keep a socket open between its timers. Zeroed with each
+ * tunnel install. */
+struct pppoe_session_events {
+	__u64 control_rx;
+	__u64 terminate;
+	__u64 padt;
+};
+
 struct pppoe_traffic_stats {
 	__u64 rx_packets;
 	__u64 rx_bytes;
@@ -201,6 +221,13 @@ struct bpf_map_def SEC("maps") pppoe_traffic_stats = {
 	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(struct pppoe_traffic_stats),
+	.max_entries = 1,
+};
+
+struct bpf_map_def SEC("maps") pppoe_session_events = {
+	.type = BPF_MAP_TYPE_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(struct pppoe_session_events),
 	.max_entries = 1,
 };
 
@@ -828,6 +855,61 @@ static __always_inline int reply_lcp_echo_request(struct __sk_buff *skb, struct 
 	return act == TC_ACT_REDIRECT ? act : TC_ACT_SHOT;
 }
 
+static __always_inline struct pppoe_session_events *session_events(void)
+{
+	__u32 key = 0;
+
+	return bpf_map_lookup_elem(&pppoe_session_events, &key);
+}
+
+/* Counts a PADT that ends this session and comes from its AC; the frame
+ * goes on to the stack. A PADT for another session or from another sender
+ * is not counted. */
+static __always_inline void note_pppoe_padt(struct __sk_buff *skb, struct pppoe_tunnel_config *cfg, const struct ethhdr *eth)
+{
+	struct pppoe_disc_hdr hdr = {};
+	struct pppoe_session_events *events;
+
+	if (!mac_addr_eq(eth->h_dest, cfg->wan_src_mac) || !mac_addr_eq(eth->h_source, cfg->wan_dst_mac))
+		return;
+	if (bpf_skb_load_bytes(skb, 14, &hdr, sizeof(hdr)) < 0)
+		return;
+	if (hdr.ver_type != 0x11 || hdr.code != PPPOE_CODE_PADT || ntohs16(hdr.session_id) != cfg->session_id)
+		return;
+	events = session_events();
+	if (events)
+		__sync_fetch_and_add(&events->padt, 1);
+}
+
+/* LCP of this session from its AC. Echo-Requests are answered here, as is
+ * a Terminate-Request (RFC 1661: with a Terminate-Ack, the request turned
+ * around), which the control plane picks up from the count to redial. */
+static __always_inline int handle_lcp_from_ac(struct __sk_buff *skb, struct pppoe_tunnel_config *cfg,
+	const struct pppoe_ppp_hdr *hdr)
+{
+	struct pppoe_session_events *events = session_events();
+	__u8 code = 0;
+	__u8 ack = LCP_TERMINATE_ACK;
+	int act;
+
+	if (events)
+		__sync_fetch_and_add(&events->control_rx, 1);
+	if (bpf_skb_load_bytes(skb, 14 + sizeof(*hdr), &code, sizeof(code)) < 0)
+		return TC_ACT_UNSPEC;
+	if (code == LCP_ECHO_REQUEST)
+		return reply_lcp_echo_request(skb, cfg, hdr);
+	if (code != LCP_TERMINATE_REQUEST)
+		return TC_ACT_UNSPEC;
+	if (events)
+		__sync_fetch_and_add(&events->terminate, 1);
+	if (bpf_skb_store_bytes(skb, 14 + sizeof(*hdr), &ack, sizeof(ack), 0) < 0)
+		return TC_ACT_SHOT;
+	if (store_eth(skb, cfg->wan_dst_mac, cfg->wan_src_mac, ETH_P_PPP_SES) < 0)
+		return TC_ACT_SHOT;
+	act = bpf_redirect(cfg->wan_ifindex, 0);
+	return act == TC_ACT_REDIRECT ? act : TC_ACT_SHOT;
+}
+
 static __always_inline int pppoe_dhcpv6_to_client(struct __sk_buff *skb, __u16 l3_len)
 {
 	struct {
@@ -867,7 +949,13 @@ static __always_inline int decap_pppoe_to_l3(struct __sk_buff *skb, struct pppoe
 	int act;
 	int ret;
 
-	if ((void *)(eth + 1) > data_end || eth->h_proto != htons16(ETH_P_PPP_SES))
+	if ((void *)(eth + 1) > data_end)
+		return TC_ACT_UNSPEC;
+	if (eth->h_proto == htons16(ETH_P_PPP_DISC)) {
+		note_pppoe_padt(skb, cfg, eth);
+		return TC_ACT_UNSPEC;
+	}
+	if (eth->h_proto != htons16(ETH_P_PPP_SES))
 		return TC_ACT_UNSPEC;
 	if (!mac_addr_eq(eth->h_dest, cfg->wan_src_mac) ||
 		!mac_addr_eq(eth->h_source, cfg->wan_dst_mac))
@@ -885,7 +973,7 @@ static __always_inline int decap_pppoe_to_l3(struct __sk_buff *skb, struct pppoe
 		return TC_ACT_UNSPEC;
 	bump_tunnel_stat(4);
 	if (hdr.protocol == htons16(PPP_LCP))
-		return reply_lcp_echo_request(skb, cfg, &hdr);
+		return handle_lcp_from_ac(skb, cfg, &hdr);
 	if (hdr.protocol == htons16(PPP_IP)) {
 		eth_proto = ETH_P_IP;
 #if PPPOE_DECAP_ADJ_L3_FLAGS
@@ -897,6 +985,11 @@ static __always_inline int decap_pppoe_to_l3(struct __sk_buff *skb, struct pppoe
 		adjust_flags |= BPF_F_ADJ_ROOM_DECAP_L3_IPV6;
 #endif
 	} else {
+		/* IPCP, IPv6CP and other control from the AC: the link is alive. */
+		struct pppoe_session_events *events = session_events();
+
+		if (events)
+			__sync_fetch_and_add(&events->control_rx, 1);
 		return TC_ACT_UNSPEC;
 	}
 	ppp_len = ntohs16(hdr.length);
