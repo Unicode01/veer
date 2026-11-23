@@ -266,6 +266,10 @@
     if (typeof app.stopPolling === 'function') app.stopPolling();
     if (typeof app.closeDropdowns === 'function') app.closeDropdowns();
     app.el.appRoot.style.display = 'none';
+    // Signed out there is no page to name; the host stays, so a tab whose
+    // session ended still says which Veer it belongs to.
+    app.documentTitlePage = '';
+    if (typeof app.updateDocumentTitle === 'function') app.updateDocumentTitle();
     el.modal.classList.add('active');
     el.modal.setAttribute('aria-hidden', 'false');
     let status = sessionEndedMessage(opts.reason);

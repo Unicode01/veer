@@ -126,7 +126,7 @@ pub fn keepalive_timer_payload(profile: &Value, session: &Value, failures: f64, 
         "profile_key", "interface", "mac_mode", "mac_address", "username", "service", "ac_name", "auth", "timeout_ms", "control_ack_timeout_ms",
         "control_idle_timeout_ms", "max_frames", "mru", "negotiate_ipv4", "negotiate_ipv6", "request_ipv6_address", "request_ipv6_router", "request_pd",
         "dhcpv6_request", "dhcpv6_timeout_ms", "ipv6_ra_timeout_ms", "ipv6_iid", "dhcpv6_iaid", "keepalive_interval_ms", "keepalive_failure_threshold",
-        "keepalive_failure_grace_ms", "keepalive_confirm_timeout_ms",
+        "keepalive_failure_grace_ms", "keepalive_confirm_timeout_ms", "keepalive_adaptive",
     ] {
         if let Some(value) = profile.get(key) {
             out.insert(key.into(), value.clone());
@@ -135,7 +135,7 @@ pub fn keepalive_timer_payload(profile: &Value, session: &Value, failures: f64, 
     out.insert("keepalive_failures".into(), js::num(clamp_int(&js::num(failures), 0.0, 1000000.0, 0.0)));
     out.insert("keepalive_failure_started_ms".into(), js::num(normalize_timestamp_ms(&js::num(failure_started_ms), 0.0)));
     for key in [
-        "auto_redial", "redial_clear_tunnel", "redial_send_padt", "redial_retry_initial_ms", "redial_retry_max_ms", "install_tunnel", "prepare_interfaces",
+        "auto_redial", "redial_clear_tunnel", "redial_send_padt", "redial_retry_initial_ms", "redial_retry_max_ms", "install_tunnel", "tunnel_mtu", "local_mtu", "prepare_interfaces",
         "prepare_local_mtu", "prepare_wan_mtu", "mss_clamp_v4", "mss_clamp_v6", "prepare_offloads", "prepare_gso", "prepare_wan_offloads",
         "allow_unsafe_offloads", "sync_hook_bindings", "apply_hook_bindings", "post_session_control_ms", "decap_mode",
     ] {
@@ -146,7 +146,7 @@ pub fn keepalive_timer_payload(profile: &Value, session: &Value, failures: f64, 
     out.insert("send_padt".into(), json!(false));
     for key in [
         "local_interface", "pipeline_interface", "wan_interface", "local_ifindex", "pipeline_ifindex", "wan_ifindex", "local_src_mac", "local_dst_mac",
-        "wan_src_mac", "wan_dst_mac", "wan_core_sync", "wan_core_required", "wan_core_apply", "wan_core_plugin",
+        "wan_src_mac", "wan_core_sync", "wan_core_required", "wan_core_apply", "wan_core_plugin",
     ] {
         if let Some(value) = profile.get(key) {
             out.insert(key.into(), value.clone());
@@ -158,8 +158,20 @@ pub fn keepalive_timer_payload(profile: &Value, session: &Value, failures: f64, 
     if let Some(value) = session.get("ac_mac") {
         out.insert("ac_mac".into(), value.clone());
     }
+    // Our echo requests carry the magic number this session negotiated.
+    if let Some(value) = session.get("lcp_magic") {
+        out.insert("lcp_magic".into(), value.clone());
+    }
     out.insert("session_generation".into(), json!(timer_generation(g(session, "session_generation"))));
     Value::Object(out)
+}
+
+/// A session that lasted less than this before the AC ended it again
+/// counts as a kick in a row: each one doubles the wait before the redial.
+const PEER_KICK_WINDOW_MS: f64 = 120000.0;
+
+fn u64le_at(hex: &str, index: usize) -> f64 {
+    hex.get(index * 16..index * 16 + 16).map(u64le_number).unwrap_or(0.0)
 }
 
 fn session_control_timer_payload(profile: &Value, session: &Value, remaining_ms: f64) -> Value {
@@ -294,11 +306,109 @@ impl<'a> Ctx<'a> {
     }
 
     pub fn arm_keepalive(&self, profile: &Value, session: &Value, failures: f64, failure_started_ms: f64) -> Result<()> {
+        self.arm_keepalive_marked(profile, session, failures, failure_started_ms, "")
+    }
+
+    /// `mark` is what the peer had sent when this tick ended; the next tick
+    /// skips its echo if that changed (keepalive_adaptive).
+    fn arm_keepalive_marked(&self, profile: &Value, session: &Value, failures: f64, failure_started_ms: f64, mark: &str) -> Result<()> {
         if num(profile, "keepalive_interval_ms") <= 0.0 || !truthy(session) || !truthy(g(session, "session_id")) || !truthy(g(session, "ac_mac")) {
             return self.timer_clear("lcp_echo");
         }
         self.timer_clear(REDIAL_RETRY_TIMER)?;
-        self.timer_interval("lcp_echo", num(profile, "keepalive_interval_ms"), &keepalive_timer_payload(profile, session, failures, failure_started_ms))
+        let mut payload = keepalive_timer_payload(profile, session, failures, failure_started_ms);
+        if !mark.is_empty() {
+            payload["keepalive_rx_mark"] = json!(mark);
+        }
+        self.timer_interval("lcp_echo", num(profile, "keepalive_interval_ms"), &payload)
+    }
+
+    /// The tunnel's session event counters: (control frames, Terminate-Requests, PADTs).
+    pub fn read_session_events(&self) -> Result<(f64, f64, f64)> {
+        let value = self.map_get(crate::SESSION_EVENTS_MAP, &u32lehex(0))?;
+        let hex: String = lower(js::or(&value, &json!(""))).chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        Ok((u64le_at(&hex, 0), u64le_at(&hex, 1), u64le_at(&hex, 2)))
+    }
+
+    /// What the peer has sent through the tunnel so far: inner packets and
+    /// control frames. None when the tunnel maps cannot be read.
+    fn peer_activity_mark(&self) -> Option<String> {
+        let values = self.host.call("ebpf.mapGetPerCPU", json!(["pppoe_tunnel", "pppoe_traffic_stats", u32lehex(0)])).ok()?;
+        let mut rx_packets = 0.0;
+        for value in js::array(&values) {
+            let hex: String = lower(js::or(&value, &json!(""))).chars().filter(|c| c.is_ascii_hexdigit()).collect();
+            rx_packets += u64le_at(&hex, 0);
+        }
+        let (control_rx, _, _) = self.read_session_events().ok()?;
+        Some(format!("{rx_packets}:{control_rx}"))
+    }
+
+    /// The tunnel counted a PADT or an LCP Terminate-Request from the AC of
+    /// the installed session (it answered the latter with a Terminate-Ack):
+    /// the session is over, so redial now rather than wait for keepalive.
+    pub fn check_peer_termination(&self) -> Result<()> {
+        let Some(session) = self.stored_last_session()? else {
+            return Ok(());
+        };
+        if s(&session, "desired_state") == "down"
+            || !flag(&session, "lcp_ready")
+            || flag(&session, "padt_sent")
+            || !flag(&session, "tunnel_installed")
+            || !truthy(g(&session, "session_id"))
+        {
+            return Ok(());
+        }
+        let (_, terminate, padt) = self.read_session_events()?;
+        if terminate == 0.0 && padt == 0.0 {
+            return Ok(());
+        }
+        // The tunnel only counts frames of its own session from its own AC;
+        // make sure that is still the session on record.
+        let config = self.res_data(crate::TUNNEL_CONFIG_RESOURCE, crate::TUNNEL_CONFIG_KEY)?.unwrap_or(json!({}));
+        if clamp_int(g(&config, "session_id"), 0.0, 65535.0, 0.0) != clamp_int(g(&session, "session_id"), 0.0, 65535.0, 0.0)
+            || mac_text(g(&config, "wan_dst_mac")).unwrap_or_default() != mac_text(g(&session, "ac_mac")).unwrap_or_default()
+        {
+            return Ok(());
+        }
+        self.map_put(crate::SESSION_EVENTS_MAP, &u32lehex(0), &"00".repeat(24))?;
+        let trigger = if padt > 0.0 { "ac_padt" } else { "ac_terminate" };
+        self.redial_after_peer_termination(&session, trigger, terminate, padt)
+    }
+
+    fn redial_after_peer_termination(&self, session: &Value, trigger: &str, terminate: f64, padt: f64) -> Result<()> {
+        let key = token(js::first(&[g(session, "profile_key"), g(session, "wan_id"), &json!("default")]));
+        let profile = self.load_profile(&json!({"profile_key": key}))?;
+        for name in ["lcp_echo", "session_control", REDIAL_RETRY_TIMER, DHCPV6_LEASE_TIMER] {
+            self.timer_clear(name)?;
+        }
+        let now_ms = now();
+        let established = normalize_timestamp_ms(g(session, "established_at_ms"), 0.0);
+        let uptime = if established > 0.0 && established <= now_ms { now_ms - established } else { f64::INFINITY };
+        let previous = self.res_data("sessions", "peer_termination")?.unwrap_or(json!({}));
+        let recent = now_ms - normalize_timestamp_ms(g(&previous, "at_ms"), 0.0) < 3600000.0;
+        let kicks = if uptime < PEER_KICK_WINDOW_MS && recent { clamp_int(g(&previous, "kicks"), 0.0, 1000.0, 0.0) + 1.0 } else { 1.0 };
+        let termination = json!({"trigger": trigger, "session_id": session.get("session_id"), "ac_mac": session.get("ac_mac"),
+            "uptime_ms": if uptime.is_finite() { js::num(uptime) } else { Value::Null }, "kicks": js::num(kicks),
+            "terminate_requests": js::num(terminate), "padts": js::num(padt), "at_ms": js::num(now_ms), "at": iso_at(now_ms)});
+        self.res_set("sessions", "peer_termination", &termination)?;
+        // The AC ended the session: no PADT of ours, and its tunnel goes.
+        self.clear_tunnel_config()?;
+        if !flag(&profile, "auto_redial") {
+            let down = merge(session, &json!({"phase": "peer_terminated", "lcp_ready": false, "tunnel_installed": false,
+                "peer_termination": termination, "updated_at": iso_now()}));
+            self.res_set("sessions", "last", &down)?;
+            return self.mark_wan_link_down(&profile, session, "peer_terminated");
+        }
+        self.mark_wan_link_down(&profile, session, "redial_wait")?;
+        let base = json!({"phase": "peer_terminated", "profile_key": key, "interface": profile["interface"], "session_id": session.get("session_id"),
+            "ac_mac": session.get("ac_mac"), "redial_attempted": true, "redial_trigger": trigger, "redial_started_at": iso_now(),
+            "peer_termination": termination, "updated_at": iso_now()});
+        // A first kick redials after redial_retry_initial_ms; each further
+        // kick in a row doubles that, up to redial_retry_max_ms.
+        let waiting = self.schedule_redial_retry(&profile, &base, kicks)?;
+        self.record_redial_status(&waiting, &Value::Null)?;
+        self.record_redial_diagnostic(&waiting)?;
+        self.res_set("sessions", "keepalive", &waiting)
     }
 
     pub fn arm_session_control(&self, profile: &Value, session: &Value) -> Result<()> {
@@ -541,6 +651,21 @@ impl<'a> Ctx<'a> {
         if session_id == 0 || peer.is_empty() {
             bail!("lcp_echo timer requires session_id and ac_mac");
         }
+        let adaptive = flag(&profile, "keepalive_adaptive");
+        if adaptive {
+            // Anything the peer sent since the last tick shows the link is up:
+            // no echo, which a full uplink would delay into a false failure.
+            let previous = s(payload, "keepalive_rx_mark");
+            if let Some(mark) = self.peer_activity_mark() {
+                if !previous.is_empty() && previous != mark {
+                    let result = crate::base_result(&profile, "keepalive_ok", json!({"session_id": session_id, "ac_mac": peer,
+                        "liveness": "peer_traffic", "keepalive_failures": 0, "keepalive_failure_threshold": profile["keepalive_failure_threshold"],
+                        "keepalive_failure_grace_ms": profile["keepalive_failure_grace_ms"]}));
+                    self.arm_keepalive_marked(&profile, payload, 0.0, 0.0, &mark)?;
+                    return self.res_set("sessions", "keepalive", &result);
+                }
+            }
+        }
         let mut result = match self.prepare_l2_identity(&mut profile).and_then(|_| self.send_lcp_echo(&profile, &peer, session_id)) {
             Ok(result) => result,
             Err(err) => crate::base_result(&profile, "keepalive_error", json!({"session_id": session_id, "ac_mac": peer, "message": error_message(&err)})),
@@ -548,6 +673,9 @@ impl<'a> Ctx<'a> {
         if !self.session_timer_is_current(payload)? {
             return Ok(());
         }
+        // Taken after the exchange, so our own echo's reply does not count
+        // as traffic at the next tick.
+        let mark = if adaptive { self.peer_activity_mark().unwrap_or_default() } else { String::new() };
         let mut failures = clamp_int(g(payload, "keepalive_failures"), 0.0, 1000000.0, 0.0);
         let threshold = num(&profile, "keepalive_failure_threshold");
         let grace = num(&profile, "keepalive_failure_grace_ms");
@@ -555,7 +683,7 @@ impl<'a> Ctx<'a> {
             result["keepalive_failures"] = json!(0);
             result["keepalive_failure_threshold"] = profile["keepalive_failure_threshold"].clone();
             result["keepalive_failure_grace_ms"] = profile["keepalive_failure_grace_ms"].clone();
-            self.arm_keepalive(&profile, payload, 0.0, 0.0)?;
+            self.arm_keepalive_marked(&profile, payload, 0.0, 0.0, &mark)?;
         } else {
             let now_ms = now();
             let started = keepalive_failure_started_ms(payload, now_ms);
@@ -573,7 +701,7 @@ impl<'a> Ctx<'a> {
                     result = merge(&confirmation, &json!({"keepalive_failures": 0, "keepalive_failure_threshold": profile["keepalive_failure_threshold"],
                         "keepalive_failure_grace_ms": profile["keepalive_failure_grace_ms"], "keepalive_confirmation": "recovered",
                         "keepalive_recovered_after_failures": js::num(failures)}));
-                    self.arm_keepalive(&profile, payload, 0.0, 0.0)?;
+                    self.arm_keepalive_marked(&profile, payload, 0.0, 0.0, &mark)?;
                 } else {
                     result = merge(&result, &json!({"phase": confirmation["phase"], "keepalive_confirmation": confirmation,
                         "keepalive_confirm_timeout_ms": profile["keepalive_confirm_timeout_ms"]}));
@@ -585,11 +713,11 @@ impl<'a> Ctx<'a> {
                         self.clear_tunnel_config()?;
                         self.mark_wan_link_down(&profile, payload, &s(&result, "phase"))?;
                     } else {
-                        self.arm_keepalive(&profile, payload, failures, started)?;
+                        self.arm_keepalive_marked(&profile, payload, failures, started, &mark)?;
                     }
                 }
             } else {
-                self.arm_keepalive(&profile, payload, failures, started)?;
+                self.arm_keepalive_marked(&profile, payload, failures, started, &mark)?;
             }
         }
         self.res_set("sessions", "keepalive", &result)
@@ -725,7 +853,10 @@ impl<'a> Ctx<'a> {
     fn record_redial_diagnostic(&self, result: &Value) -> Result<()> {
         let previous = self.res_data("sessions", "redial_last")?.unwrap_or(json!({}));
         let c = |v: &Value, key: &str, max: f64| clamp_int(g(v, key), 0.0, max, 0.0);
-        let starting = c(result, "redial_attempt", 1000000.0) == 0.0 && c(result, "redial_next_attempt", 1000000.0) == 1.0;
+        // A peer termination starts a sequence even when kicks in a row
+        // start it at a later attempt.
+        let starting = (c(result, "redial_attempt", 1000000.0) == 0.0 && c(result, "redial_next_attempt", 1000000.0) == 1.0)
+            || truthy(g(result, "peer_termination"));
         let pick = |values: &[&Value]| text(js::first(values));
         self.res_set("sessions", "redial_last", &json!({
             "count": js::num(c(&previous, "count", 1000000.0) + if starting { 1.0 } else { 0.0 }),

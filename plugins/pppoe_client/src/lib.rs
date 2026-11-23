@@ -27,9 +27,18 @@ pub(crate) const MAX_TIMER_DELAY_MS: f64 = 86399999.0;
 pub(crate) const DHCPV6_RETRY_MIN_MS: f64 = 1000.0;
 pub(crate) const DHCPV6_RETRY_MAX_MS: f64 = 300000.0;
 pub(crate) const L2_IDENTITY_RESOURCE: &str = "l2_identities";
-const DEFAULT_KEEPALIVE_FAILURE_THRESHOLD: f64 = 5.0;
-const DEFAULT_KEEPALIVE_FAILURE_GRACE_MS: f64 = 60000.0;
+// LCP Echo every 10 s, a peer that misses 3 in a row (with no other frame
+// from it meanwhile) gets one last 5 s echo before the redial: a silent
+// loss is found in about 25-40 s. Echoes go out only while nothing else
+// comes from the peer (keepalive_adaptive), so a busy link cannot lose
+// them in its own queue, and the AC's PADT or Terminate-Request ends a
+// session at once, so no grace period is needed.
+const DEFAULT_KEEPALIVE_INTERVAL_MS: f64 = 10000.0;
+const DEFAULT_KEEPALIVE_FAILURE_THRESHOLD: f64 = 3.0;
+const DEFAULT_KEEPALIVE_FAILURE_GRACE_MS: f64 = 0.0;
 const DEFAULT_KEEPALIVE_CONFIRM_TIMEOUT_MS: f64 = 5000.0;
+pub(crate) const SESSION_EVENTS_MAP: &str = "pppoe_session_events";
+const SESSION_EVENTS_HEX_BYTES: usize = 24;
 const TUNNEL_STATS_BUILD_NOTE: &str =
     "Per-packet tunnel counters are compiled out in the default object. Rebuild with PPPOE_TUNNEL_DIAG=1 to enable non-zero diagnostic counters.";
 const KFUNCS_FEATURE: &str = "dataplane.kfuncs.handoff.v1";
@@ -316,6 +325,11 @@ impl<'a> Ctx<'a> {
         match s(timer, "name").as_str() {
             TUNNEL_REPAIR_TIMER => {
                 self.apply_stored_tunnel_config(false)?;
+                // The tunnel counts the AC's PADT and Terminate-Request;
+                // this 2 s timer is where the control plane sees them.
+                if let Err(err) = self.check_peer_termination() {
+                    self.info(&format!("pppoe peer termination check deferred: {}", error_message(&err)));
+                }
                 self.arm_tunnel_repair()
             }
             "session_control" => self.service_session_control_timer(&payload),
@@ -464,12 +478,14 @@ impl<'a> Ctx<'a> {
         p["dhcpv6_timeout_ms"] = c(&p, &["dhcpv6_timeout_ms", "dhcpv6_exchange_timeout_ms"], 500.0, 30000.0, timeout.max(5000.0));
         p["dhcpv6_settle_ms"] = c(&p, &["dhcpv6_settle_ms", "dhcpv6_delay_ms"], 0.0, 10000.0, 2000.0);
         p["ipv6_ra_timeout_ms"] = c(&p, &["ipv6_ra_timeout_ms", "router_solicitation_timeout_ms"], 500.0, 30000.0, 5000.0);
-        p["keepalive_interval_ms"] = js::num(clamp_int(g(&p, "keepalive_interval_ms"), 0.0, 86400000.0, 0.0));
+        p["keepalive_interval_ms"] = js::num(clamp_int(g(&p, "keepalive_interval_ms"), 0.0, 86400000.0, DEFAULT_KEEPALIVE_INTERVAL_MS));
         p["keepalive_failure_threshold"] =
             c(&p, &["keepalive_failure_threshold", "keepalive_failures_before_redial"], 1.0, 10.0, DEFAULT_KEEPALIVE_FAILURE_THRESHOLD);
         p["keepalive_failure_grace_ms"] = c(&p, &["keepalive_failure_grace_ms", "keepalive_grace_ms"], 0.0, 3600000.0, DEFAULT_KEEPALIVE_FAILURE_GRACE_MS);
         p["keepalive_confirm_timeout_ms"] =
             c(&p, &["keepalive_confirm_timeout_ms", "keepalive_final_timeout_ms"], 100.0, 30000.0, timeout.max(DEFAULT_KEEPALIVE_CONFIRM_TIMEOUT_MS));
+        // Like pppd's lcp-echo-adaptive: no echo while the peer is heard.
+        p["keepalive_adaptive"] = b(&p, &["keepalive_adaptive", "lcp_echo_adaptive"], true);
         p["auto_redial"] = b(&p, &["auto_redial", "redial", "reconnect", "reconnect_on_timeout"], false);
         p["redial_clear_tunnel"] = b(&p, &["redial_clear_tunnel", "clear_tunnel_on_redial"], true);
         p["redial_send_padt"] = b(&p, &["redial_send_padt", "close_session_before_redial"], true);
@@ -508,7 +524,12 @@ impl<'a> Ctx<'a> {
         p["local_src_mac"] = json!(mac_text(js::or(g(&p, "local_src_mac"), &json!("")))?);
         p["local_dst_mac"] = json!(mac_text(js::or(g(&p, "local_dst_mac"), &json!("")))?);
         p["wan_src_mac"] = json!(mac_text(js::or(g(&p, "wan_src_mac"), &json!("")))?);
-        p["wan_dst_mac"] = json!(mac_text(js::first(&[g(&p, "wan_dst_mac"), g(&p, "ac_mac"), &json!("")]))?);
+        // The tunnel peer is the AC of each session (its PADS source). Timer
+        // payloads used to carry it as wan_dst_mac (from ac_mac), which pinned
+        // redials to the AC of the lost session.
+        if let Some(map) = p.as_object_mut() {
+            map.remove("wan_dst_mac");
+        }
         let local = !s(&p, "local_interface").is_empty();
         p["wan_core_sync"] = b(&p, &["wan_core_sync", "sync_wan_core"], local);
         let sync = flag(&p, "wan_core_sync");
@@ -837,7 +858,9 @@ impl<'a> Ctx<'a> {
         let local_src_mac = pick_text(&[g(profile, "local_src_mac"), g(pads_frame, "src_mac"), &json!("")]);
         let local_dst_mac = pick_text(&[g(profile, "local_dst_mac"), g(&boundary.local, "mac"), &json!("")]);
         let wan_src_mac = pick_text(&[g(profile, "wan_src_mac"), g(&wan_link, "mac"), g(pads_frame, "dst_mac"), &json!("")]);
-        let wan_dst_mac = pick_text(&[g(profile, "wan_dst_mac"), g(pads_frame, "src_mac"), &json!("")]);
+        // The session belongs to the AC that sent PADS. A redial can reach a
+        // different AC, so never reuse the previous session's peer here.
+        let wan_dst_mac = pick_text(&[g(pads_frame, "src_mac"), &json!("")]);
         if !(local_ifindex > 0.0) {
             bail!("local_ifindex or local_interface is required to install the TC tunnel");
         }
@@ -857,7 +880,7 @@ impl<'a> Ctx<'a> {
             bail!("wan_src_mac is required to install the TC tunnel");
         }
         if wan_dst_mac.is_empty() {
-            bail!("wan_dst_mac/ac_mac is required to install the TC tunnel");
+            bail!("the PADS source MAC is required to install the TC tunnel");
         }
         let preparation = self.prepare_tunnel_interfaces(profile, Some(&boundary))?;
         let hook_bindings = self.sync_tunnel_hook_bindings(profile, Some(&boundary))?;
@@ -1220,6 +1243,10 @@ impl<'a> Ctx<'a> {
         if let Err(err) = self.host.call("ebpf.mapClear", json!(["pppoe_tunnel", "pppoe_traffic_stats"])) {
             self.info(&format!("pppoe traffic stats clear skipped: {}", error_message(&err)));
         }
+        // Events count for the session the tunnel is installed for.
+        if let Err(err) = self.map_put(SESSION_EVENTS_MAP, &u32lehex(0), &"00".repeat(SESSION_EVENTS_HEX_BYTES)) {
+            self.info(&format!("pppoe session events clear skipped: {}", error_message(&err)));
+        }
         for i in 0..24 {
             if let Err(err) = self.map_put("pppoe_tunnel_stats", &u32lehex(i), &"00".repeat(8)) {
                 self.info(&format!("pppoe tunnel stats clear skipped: {}", error_message(&err)));
@@ -1304,6 +1331,9 @@ impl<'a> Ctx<'a> {
             let generation = lease::timer_generation(g(&session, "session_generation"));
             session["session_generation"] = json!(if generation.is_empty() { self.new_timer_generation()? } else { generation });
             session["desired_state"] = json!("up");
+            if !(num(&session, "established_at_ms") > 0.0) {
+                session["established_at_ms"] = js::num(now());
+            }
         }
         self.res_set("sessions", "last", &session)?;
         if !truthy(g(&session, "session_id")) {

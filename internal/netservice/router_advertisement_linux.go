@@ -30,6 +30,15 @@ const (
 	ipv6RAMinSolicitedInterval = 3 * time.Second
 	ipv6RATroubleLogEvery      = 5 * time.Minute
 	ipv6RAMaxRDNSSServers      = 8
+	// A host keeps an address whose prefix merely drops out of the RAs
+	// preferred for the rest of its preferred lifetime, so after the WAN
+	// delegates a new prefix it can go on using the old one, which no
+	// longer routes. A prefix the interface stops advertising is therefore
+	// advertised with zero lifetimes (RFC 9096) for one preferred lifetime:
+	// any host that hears an RA in that time deprecates its address, and
+	// one that hears none has seen it deprecate on its own.
+	ipv6RAStalePrefixRetention = ipv6RAPreferredLifetime
+	ipv6RAMaxStalePrefixes     = 16
 	ipv6NextHeaderICMPv6       = 58
 	icmpv6TypeRouterSolicit    = 133
 )
@@ -37,8 +46,11 @@ const (
 var ipv6AllNodesLinkLocal = net.ParseIP("ff02::1")
 
 type ipv6RouterAdvertiser struct {
-	mu               sync.Mutex
-	config           ipv6AssignmentRAConfig
+	mu     sync.Mutex
+	config ipv6AssignmentRAConfig
+	// stale holds prefixes this interface no longer has, each with the
+	// time until which RAs still deprecate it.
+	stale            map[string]time.Time
 	stopCh           chan struct{}
 	wakeCh           chan struct{}
 	rsWakeCh         chan struct{}
@@ -103,10 +115,89 @@ func (adv *ipv6RouterAdvertiser) update(config ipv6AssignmentRAConfig) bool {
 		adv.mu.Unlock()
 		return false
 	}
+	adv.stale = retireIPv6RAPrefixes(adv.stale, adv.config.Prefixes, config.Prefixes, time.Now())
 	adv.config = cloneIPv6AssignmentRAConfig(config)
 	adv.mu.Unlock()
 	adv.trigger()
 	return true
+}
+
+// adoptStalePrefixes takes over the prefixes an earlier advertiser on the
+// same interface stopped with.
+func (adv *ipv6RouterAdvertiser) adoptStalePrefixes(stale map[string]time.Time, now time.Time) {
+	adv.mu.Lock()
+	adv.stale = retireIPv6RAPrefixes(stale, nil, adv.config.Prefixes, now)
+	adv.mu.Unlock()
+}
+
+// stalePrefixesOnStop returns what the next advertiser on this interface
+// must deprecate: everything this one advertised or still deprecates.
+func (adv *ipv6RouterAdvertiser) stalePrefixesOnStop(now time.Time) map[string]time.Time {
+	adv.mu.Lock()
+	defer adv.mu.Unlock()
+	return retireIPv6RAPrefixes(adv.stale, adv.config.Prefixes, nil, now)
+}
+
+// deprecatedPrefixes lists, in order, the stale prefixes still to deprecate.
+func (adv *ipv6RouterAdvertiser) deprecatedPrefixes(now time.Time) []string {
+	adv.mu.Lock()
+	defer adv.mu.Unlock()
+	out := make([]string, 0, len(adv.stale))
+	for prefix, until := range adv.stale {
+		if now.Before(until) {
+			out = append(out, prefix)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// retireIPv6RAPrefixes returns the stale set after an interface went from
+// advertising previous to advertising current: expired and re-advertised
+// prefixes leave it, prefixes no longer advertised join it.
+func retireIPv6RAPrefixes(stale map[string]time.Time, previous, current []string, now time.Time) map[string]time.Time {
+	advertised := make(map[string]struct{}, len(current))
+	for _, prefix := range current {
+		if key, ok := canonicalIPv6RAPrefix(prefix); ok {
+			advertised[key] = struct{}{}
+		}
+	}
+	out := make(map[string]time.Time, len(stale)+len(previous))
+	for prefix, until := range stale {
+		if _, ok := advertised[prefix]; !ok && now.Before(until) {
+			out[prefix] = until
+		}
+	}
+	for _, prefix := range previous {
+		key, ok := canonicalIPv6RAPrefix(prefix)
+		if !ok {
+			continue
+		}
+		if _, ok := advertised[key]; !ok {
+			out[key] = now.Add(ipv6RAStalePrefixRetention)
+		}
+	}
+	for len(out) > ipv6RAMaxStalePrefixes {
+		oldest := ""
+		for prefix, until := range out {
+			if oldest == "" || until.Before(out[oldest]) || (until.Equal(out[oldest]) && prefix < oldest) {
+				oldest = prefix
+			}
+		}
+		delete(out, oldest)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func canonicalIPv6RAPrefix(text string) (string, bool) {
+	_, prefix, err := net.ParseCIDR(strings.TrimSpace(text))
+	if err != nil || prefix == nil || prefix.IP.To4() != nil {
+		return "", false
+	}
+	return prefix.String(), true
 }
 
 func (adv *ipv6RouterAdvertiser) trigger() {
@@ -393,10 +484,11 @@ func (adv *ipv6RouterAdvertiser) logRouterSolicitationIssue(text string) {
 
 func (adv *ipv6RouterAdvertiser) send() {
 	config := adv.snapshot()
+	deprecated := adv.deprecatedPrefixes(time.Now())
 	adv.mu.Lock()
 	adv.lastSendAttempt = time.Now()
 	adv.mu.Unlock()
-	if err := sendIPv6RouterAdvertisement(config); err != nil {
+	if err := sendIPv6RouterAdvertisement(config, deprecated); err != nil {
 		now := time.Now()
 		text := err.Error()
 		adv.mu.Lock()
@@ -480,6 +572,8 @@ type ipv6RouterAdvertisementState struct {
 	SrcIP   net.IP
 	DstIP   net.IP
 	Config  ipv6AssignmentRAConfig
+	// Deprecated prefixes go out with zero lifetimes.
+	Deprecated []string
 }
 
 func resolveIPv6RouterAdvertisementState(config ipv6AssignmentRAConfig) (ipv6RouterAdvertisementState, error) {
@@ -585,11 +679,12 @@ func isIPv6RouterSolicitationFrame(frame []byte) bool {
 	return len(icmp) >= 8 && icmp[0] == icmpv6TypeRouterSolicit && icmp[1] == 0
 }
 
-func sendIPv6RouterAdvertisement(config ipv6AssignmentRAConfig) error {
+func sendIPv6RouterAdvertisement(config ipv6AssignmentRAConfig, deprecated []string) error {
 	state, err := resolveIPv6RouterAdvertisementState(config)
 	if err != nil {
 		return err
 	}
+	state.Deprecated = deprecated
 	payload, err := buildIPv6RouterAdvertisementPayload(state)
 	if err != nil {
 		return err
@@ -618,6 +713,19 @@ func buildIPv6RouterAdvertisementPayload(state ipv6RouterAdvertisementState) ([]
 			return nil, fmt.Errorf("router advertisements require /64 prefixes, got %q", prefixText)
 		}
 		body = append(body, buildIPv6PrefixInfoOption(prefix, ipv6RAValidLifetime, ipv6RAPreferredLifetime)...)
+	}
+	for _, prefixText := range state.Deprecated {
+		// A valid lifetime of 0 only shortens a host's longer remaining
+		// one to two hours (RFC 4862 5.5.3); the preferred lifetime of 0
+		// takes effect at once.
+		_, prefix, err := net.ParseCIDR(prefixText)
+		if err != nil || prefix == nil {
+			continue
+		}
+		if ones, bits := prefix.Mask.Size(); ones != 64 || bits != 128 {
+			continue
+		}
+		body = append(body, buildIPv6PrefixInfoOption(prefix, 0, 0)...)
 	}
 	for _, routeText := range state.Config.Routes {
 		_, route, err := net.ParseCIDR(routeText)

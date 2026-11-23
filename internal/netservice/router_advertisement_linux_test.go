@@ -388,3 +388,90 @@ func TestIsLinkGoneOrDownError(t *testing.T) {
 		}
 	}
 }
+
+func TestRetireIPv6RAPrefixes(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_700_000_000, 0)
+	stale := retireIPv6RAPrefixes(nil, []string{"2001:db8:1::/64"}, []string{"2001:db8:2::/64"}, now)
+	if until, ok := stale["2001:db8:1::/64"]; len(stale) != 1 || !ok || !until.Equal(now.Add(ipv6RAStalePrefixRetention)) {
+		t.Fatalf("stale after renumbering = %v, want the old prefix until %v", stale, now.Add(ipv6RAStalePrefixRetention))
+	}
+	if got := retireIPv6RAPrefixes(stale, nil, []string{"2001:db8:1:0::/64"}, now); got != nil {
+		t.Fatalf("stale after the prefix came back = %v, want none", got)
+	}
+	if got := retireIPv6RAPrefixes(stale, nil, nil, now.Add(ipv6RAStalePrefixRetention)); got != nil {
+		t.Fatalf("stale after retention = %v, want none", got)
+	}
+	if got := retireIPv6RAPrefixes(nil, []string{"2001:db8:1:0::/64"}, []string{"2001:db8:1::/64"}, now); got != nil {
+		t.Fatalf("stale for one prefix written two ways = %v, want none", got)
+	}
+	var many []string
+	for i := 0; i < ipv6RAMaxStalePrefixes+4; i++ {
+		many = append(many, fmt.Sprintf("2001:db8:%x::/64", i+1))
+	}
+	if got := retireIPv6RAPrefixes(nil, many, nil, now); len(got) != ipv6RAMaxStalePrefixes {
+		t.Fatalf("stale prefixes = %d, want at most %d", len(got), ipv6RAMaxStalePrefixes)
+	}
+}
+
+func TestIPv6RouterAdvertiserDeprecatesPrefixesItStopsAdvertising(t *testing.T) {
+	t.Parallel()
+
+	advertiser := newIPv6RouterAdvertiser(ipv6AssignmentRAConfig{TargetInterface: "br-lan", Prefixes: []string{"2001:db8:1::/64"}})
+	if got := advertiser.deprecatedPrefixes(time.Now()); len(got) != 0 {
+		t.Fatalf("deprecated prefixes of a new advertiser = %v, want none", got)
+	}
+	advertiser.update(ipv6AssignmentRAConfig{TargetInterface: "br-lan", Prefixes: []string{"2001:db8:2::/64"}})
+	if got := advertiser.deprecatedPrefixes(time.Now()); len(got) != 1 || got[0] != "2001:db8:1::/64" {
+		t.Fatalf("deprecated prefixes after renumbering = %v, want the old prefix", got)
+	}
+	advertiser.update(ipv6AssignmentRAConfig{TargetInterface: "br-lan", Prefixes: []string{"2001:db8:1::/64"}})
+	if got := advertiser.deprecatedPrefixes(time.Now()); len(got) != 1 || got[0] != "2001:db8:2::/64" {
+		t.Fatalf("deprecated prefixes after the old prefix came back = %v, want only the replaced one", got)
+	}
+	if got := advertiser.deprecatedPrefixes(time.Now().Add(ipv6RAStalePrefixRetention + time.Second)); len(got) != 0 {
+		t.Fatalf("deprecated prefixes after retention = %v, want none", got)
+	}
+}
+
+func TestBuildIPv6RouterAdvertisementPayloadDeprecatesStalePrefixes(t *testing.T) {
+	t.Parallel()
+
+	payload, err := buildIPv6RouterAdvertisementPayload(ipv6RouterAdvertisementState{
+		MTU:   1500,
+		MAC:   net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01},
+		SrcIP: net.ParseIP("fe80::1"),
+		DstIP: net.ParseIP("ff02::1"),
+		Config: ipv6AssignmentRAConfig{
+			TargetInterface: "br-lan",
+			Prefixes:        []string{"2001:db8:2::/64"},
+		},
+		Deprecated: []string{"2001:db8:1::/64"},
+	})
+	if err != nil {
+		t.Fatalf("buildIPv6RouterAdvertisementPayload() error = %v", err)
+	}
+	body := parseIPv6RouterAdvertisementBody(t, payload)
+	if got := binary.BigEndian.Uint16(body[2:4]); got != uint16(ipv6RARouterLifetime/time.Second) {
+		t.Fatalf("router lifetime = %d, want it unchanged by deprecated prefixes", got)
+	}
+	prefixInfo := findIPv6RouterAdvertisementOption(parseIPv6RouterAdvertisementOptions(t, body[12:]), 3)
+	if len(prefixInfo) != 2 {
+		t.Fatalf("prefix info option count = %d, want the current and the deprecated prefix", len(prefixInfo))
+	}
+	lifetimes := map[string][2]uint32{}
+	for _, option := range prefixInfo {
+		if option[3]&0xc0 != 0xc0 {
+			t.Fatalf("prefix flags = %#x, want on-link and autonomous bits", option[3])
+		}
+		prefix := net.IPNet{IP: net.IP(option[16:32]), Mask: net.CIDRMask(int(option[2]), 128)}
+		lifetimes[prefix.String()] = [2]uint32{binary.BigEndian.Uint32(option[4:8]), binary.BigEndian.Uint32(option[8:12])}
+	}
+	if got := lifetimes["2001:db8:2::/64"]; got != [2]uint32{uint32(ipv6RAValidLifetime / time.Second), uint32(ipv6RAPreferredLifetime / time.Second)} {
+		t.Fatalf("current prefix lifetimes = %v", got)
+	}
+	if got, ok := lifetimes["2001:db8:1::/64"]; !ok || got != [2]uint32{0, 0} {
+		t.Fatalf("deprecated prefix lifetimes = %v (present %t), want zero", got, ok)
+	}
+}

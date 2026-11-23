@@ -347,21 +347,14 @@ pub fn ipv6_bytes_to_text(bytes: &[u8]) -> String {
 }
 
 pub fn ipv6_text_to_hex(value: &str) -> Result<String> {
-    let value = value.trim().to_lowercase();
-    if value == "ff02::1:2" {
-        return Ok("ff020000000000000000000000010002".to_string());
+    // Groups lose their leading zeros in text: joining "fe80::5cd:b06:..."
+    // without padding each group gave another link-local address, so the
+    // RS and DHCPv6 of about one IID in four left from an address the AC
+    // never negotiated.
+    match value.trim().parse::<std::net::Ipv6Addr>() {
+        Ok(address) => Ok(bytes_to_hex(&address.octets())),
+        Err(_) => bail!("unsupported IPv6 literal in PPPoE helper: {}", value.trim()),
     }
-    if value == "ff02::2" {
-        return Ok("ff020000000000000000000000000002".to_string());
-    }
-    if let Some(suffix) = value.strip_prefix("fe80::") {
-        let mut suffix: String = suffix.replace(':', "");
-        while suffix.len() < 16 {
-            suffix.insert(0, '0');
-        }
-        return Ok(format!("fe80000000000000{}", &suffix[suffix.len() - 16..]));
-    }
-    bail!("unsupported IPv6 literal in PPPoE helper: {value}")
 }
 
 pub fn link_local_from_iid(iid: &str) -> Result<String> {

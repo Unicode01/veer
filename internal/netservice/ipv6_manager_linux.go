@@ -5,18 +5,25 @@ package netservice
 import (
 	"log"
 	"sync"
+	"time"
 )
 
 type IPv6Manager struct {
 	mu          sync.Mutex
 	advertisers map[string]*ipv6RouterAdvertiser
-	dhcpv6      map[string]*ipv6DHCPv6Server
+	// stalePrefixes keeps, per interface, the prefixes a stopped advertiser
+	// must still deprecate. While a PPPoE WAN redials, the LAN assignment
+	// and its advertiser go away; the new delegated prefix comes back as a
+	// new advertiser, which must deprecate the old one.
+	stalePrefixes map[string]map[string]time.Time
+	dhcpv6        map[string]*ipv6DHCPv6Server
 }
 
 func NewIPv6Manager() *IPv6Manager {
 	return &IPv6Manager{
-		advertisers: make(map[string]*ipv6RouterAdvertiser),
-		dhcpv6:      make(map[string]*ipv6DHCPv6Server),
+		advertisers:   make(map[string]*ipv6RouterAdvertiser),
+		stalePrefixes: make(map[string]map[string]time.Time),
+		dhcpv6:        make(map[string]*ipv6DHCPv6Server),
 	}
 }
 
@@ -28,6 +35,8 @@ func (manager *IPv6Manager) EnsureRA(config RAConfig) error {
 	advertiser := manager.advertisers[config.TargetInterface]
 	if advertiser == nil {
 		advertiser = newIPv6RouterAdvertiser(config)
+		advertiser.adoptStalePrefixes(manager.stalePrefixes[config.TargetInterface], time.Now())
+		delete(manager.stalePrefixes, config.TargetInterface)
 		manager.advertisers[config.TargetInterface] = advertiser
 		advertiser.start()
 		manager.mu.Unlock()
@@ -49,6 +58,19 @@ func (manager *IPv6Manager) DeleteRA(targetInterface string) error {
 	manager.mu.Lock()
 	advertiser := manager.advertisers[targetInterface]
 	delete(manager.advertisers, targetInterface)
+	now := time.Now()
+	for name, stale := range manager.stalePrefixes {
+		if stale = retireIPv6RAPrefixes(stale, nil, nil, now); len(stale) > 0 {
+			manager.stalePrefixes[name] = stale
+		} else {
+			delete(manager.stalePrefixes, name)
+		}
+	}
+	if advertiser != nil {
+		if stale := advertiser.stalePrefixesOnStop(now); len(stale) > 0 {
+			manager.stalePrefixes[targetInterface] = stale
+		}
+	}
 	manager.mu.Unlock()
 	if advertiser != nil {
 		advertiser.stop()
@@ -138,6 +160,7 @@ func (manager *IPv6Manager) Close() error {
 	advertisers := manager.advertisers
 	servers := manager.dhcpv6
 	manager.advertisers = make(map[string]*ipv6RouterAdvertiser)
+	manager.stalePrefixes = make(map[string]map[string]time.Time)
 	manager.dhcpv6 = make(map[string]*ipv6DHCPv6Server)
 	manager.mu.Unlock()
 	for _, advertiser := range advertisers {

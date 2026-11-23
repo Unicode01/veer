@@ -160,6 +160,86 @@ fn a_wan_status_change_arms_one_repair_and_own_records_do_not() {
     assert!(h.fake.timer(EVENT_TIMER).is_none());
 }
 
+/// Makes the host refuse an enabled DHCPv4 plan while `fail` is set, as it
+/// does when the plan cannot be served (port 67 taken, a bad pool).
+fn fail_dhcpv4_plans(h: &Harness<LanCore>) -> Arc<Mutex<bool>> {
+    let fail = Arc::new(Mutex::new(true));
+    let flag = fail.clone();
+    let fake = h.fake.clone();
+    h.fake.adapter("resources.set", move |args| {
+        if *flag.lock().unwrap() && args[0] == "dhcpv4_plans" && args[2]["enabled"] == true {
+            return Err("resources.set: apply dhcpv4_plans: port 67 is in use".to_string());
+        }
+        fake.call_builtin("resources.set", args)
+    });
+    fail
+}
+
+#[test]
+fn a_failed_first_apply_still_owns_the_bridge_ports_and_gro_it_changed() {
+    let wan = json!({"enabled": true, "data": {"phase": "applied", "egress_nat_parent_interface": "veerlocal0", "mtu": 1400}});
+    let (net, mut h) = fixture(Some(wan));
+    let fail = fail_dhcpv4_plans(&h);
+    h.fake.put_record("profiles", "default", json!({"lan_id": "default", "bridge": "brlan0", "ports": ["lanp0"], "dhcpv4_enabled": true}), true);
+    h.reconcile().unwrap();
+    let status = h.fake.data("status", "default");
+    assert_eq!(status["phase"], "error", "{status}");
+    assert_eq!(status["bridge_created"], true, "{status}");
+    assert_eq!(status["managed_ports"], json!(["lanp0"]), "{status}");
+    assert_eq!(net.lock().unwrap().gro["lanp0"], true, "GRO this attempt turned off is restored");
+
+    *fail.lock().unwrap() = false;
+    h.action("teardown", json!({"lan_id": "default"})).unwrap();
+    let n = net.lock().unwrap();
+    assert!(!n.links.contains_key("brlan0"), "the bridge the failed apply created is deleted");
+    assert!(n.links["lanp0"].get("master_name").is_none(), "the port it attached is detached");
+}
+
+#[test]
+fn an_error_after_a_good_apply_keeps_ownership_for_the_next_apply_and_teardown() {
+    let (net, mut h) = fixture(None);
+    h.action("apply_network", json!({"lan_id": "default", "bridge": "brlan0", "ports": ["lanp0", "lanp1"], "dhcpv4_enabled": true})).unwrap();
+    assert_eq!(h.fake.data("status", "default")["bridge_created"], true);
+    let fail = Arc::new(Mutex::new(true));
+    let flag = fail.clone();
+    h.fake.adapter("net.addr.replace", move |_| if *flag.lock().unwrap() { Err("net.addr.replace: file exists".to_string()) } else { Ok(Value::Null) });
+    h.fire_timer(REPAIR_TIMER).unwrap();
+    let status = h.fake.data("status", "default");
+    assert_eq!(status["phase"], "error", "{status}");
+    assert_eq!(status["bridge_created"], true, "{status}");
+    assert_eq!(status["managed_ports"], json!(["lanp0", "lanp1"]), "{status}");
+
+    // The next good apply still knows the bridge and ports are its own.
+    *fail.lock().unwrap() = false;
+    h.fire_timer(REPAIR_TIMER).unwrap();
+    let status = h.fake.data("status", "default");
+    assert_eq!(status["phase"], "applied", "{status}");
+    assert_eq!(status["bridge_created"], true, "{status}");
+    assert_eq!(status["managed_ports"], json!(["lanp0", "lanp1"]), "{status}");
+
+    h.action("teardown", json!({"lan_id": "default"})).unwrap();
+    let n = net.lock().unwrap();
+    assert!(!n.links.contains_key("brlan0"));
+    assert!(n.links["lanp0"].get("master_name").is_none());
+    assert!(n.links["lanp1"].get("master_name").is_none());
+}
+
+#[test]
+fn disabling_a_profile_keeps_ownership_for_a_later_teardown() {
+    let (net, mut h) = fixture(None);
+    h.action("apply_network", json!({"lan_id": "default", "bridge": "brlan0", "ports": ["lanp0"]})).unwrap();
+    let profile = h.fake.data("profiles", "default");
+    h.fake.put_record("profiles", "default", profile, false);
+    h.fire_timer(REPAIR_TIMER).unwrap();
+    let status = h.fake.data("status", "default");
+    assert_eq!(status["phase"], "disabled", "{status}");
+    assert_eq!(status["bridge_created"], true, "{status}");
+    h.action("teardown", json!({"lan_id": "default"})).unwrap();
+    let n = net.lock().unwrap();
+    assert!(!n.links.contains_key("brlan0"));
+    assert!(n.links["lanp0"].get("master_name").is_none());
+}
+
 #[test]
 fn traffic_stats_reads_bridge_and_member_counters() {
     let (net, mut h) = fixture(None);

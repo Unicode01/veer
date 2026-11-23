@@ -399,13 +399,14 @@
       const negotiateIPv4 = checkbox(true);
       const negotiateIPv6 = checkbox(false);
       const requestPD = checkbox(false);
-      const keepalive = input('15000', '0 disables keepalive', 'number');
-      const keepaliveFailures = input('5', '1-10', 'number');
+      const keepalive = input('10000', '0 disables keepalive', 'number');
+      const keepaliveFailures = input('3', '1-10', 'number');
       let dhcpv6TimeoutMs = 5000;
       let dhcpv6SettleMs = 2000;
       let ipv6RATimeoutMs = 5000;
-      let keepaliveFailureGraceMs = 60000;
+      let keepaliveFailureGraceMs = 0;
       let keepaliveConfirmTimeoutMs = 5000;
+      let keepaliveAdaptive = true;
       let initialProfileResolved = false;
       let profileKeyEdited = false;
       let knownProfileKeys = [];
@@ -543,9 +544,10 @@
           dhcpv6_settle_ms: dhcpv6SettleMs,
           ipv6_ra_timeout_ms: ipv6RATimeoutMs,
           keepalive_interval_ms: Number(keepalive.value || 0),
-          keepalive_failure_threshold: Number(keepaliveFailures.value || 5),
+          keepalive_failure_threshold: Number(keepaliveFailures.value || 3),
           keepalive_failure_grace_ms: keepaliveFailureGraceMs,
           keepalive_confirm_timeout_ms: keepaliveConfirmTimeoutMs,
+          keepalive_adaptive: keepaliveAdaptive,
           auto_redial: autoRedial.checked,
           install_tunnel: installTunnel.checked,
           local_interface: localInterface.value.trim(),
@@ -790,7 +792,7 @@
         const hasDHCPv6Binding = !!(dhcpv6 && (dhcpv6.address || dhcpv6.prefix ||
           Array.isArray(dhcpv6.addresses) && dhcpv6.addresses.length ||
           Array.isArray(dhcpv6.prefixes) && dhcpv6.prefixes.length));
-        if (!session || session.padt_sent === true || sessionPhase === 'disconnected' || sessionPhase === 'deactivated') return 'offline';
+        if (!session || session.padt_sent === true || ['disconnected', 'deactivated', 'peer_terminated'].includes(sessionPhase)) return 'offline';
         if (['redial_wait', 'redialing', 'redial_retry'].includes(keepalivePhase)) return 'redialing';
         if (sessionPhase === 'handoff_error' || keepalivePhase === 'handoff_error') return 'error';
         if (dhcpv6 && !hasDHCPv6Binding &&
@@ -910,10 +912,13 @@
           dhcpv6TimeoutMs = data.dhcpv6_timeout_ms == null ? 5000 : data.dhcpv6_timeout_ms;
           dhcpv6SettleMs = data.dhcpv6_settle_ms == null ? 2000 : data.dhcpv6_settle_ms;
           ipv6RATimeoutMs = data.ipv6_ra_timeout_ms == null ? 5000 : data.ipv6_ra_timeout_ms;
-          keepalive.value = data.keepalive_interval_ms == null ? 15000 : data.keepalive_interval_ms;
-          keepaliveFailures.value = data.keepalive_failure_threshold || 5;
-          keepaliveFailureGraceMs = data.keepalive_failure_grace_ms == null ? 60000 : data.keepalive_failure_grace_ms;
+          keepalive.value = data.keepalive_interval_ms == null ? 10000 : data.keepalive_interval_ms;
+          keepaliveFailures.value = data.keepalive_failure_threshold || 3;
+          // The page has no grace field: 60000 is what earlier versions
+          // stored for every profile, not a value anyone chose.
+          keepaliveFailureGraceMs = data.keepalive_failure_grace_ms == null || data.keepalive_failure_grace_ms === 60000 ? 0 : data.keepalive_failure_grace_ms;
           keepaliveConfirmTimeoutMs = data.keepalive_confirm_timeout_ms == null ? 5000 : data.keepalive_confirm_timeout_ms;
+          keepaliveAdaptive = data.keepalive_adaptive !== false;
           autoRedial.checked = data.auto_redial !== false;
           installTunnel.checked = data.install_tunnel !== false;
           localInterface.value = data.local_interface || 'veerlocal0';

@@ -2719,7 +2719,17 @@
       node.setAttribute('aria-label', app.t(node.dataset.i18nAriaLabel));
     });
 
-    document.title = app.t('app.title');
+    app.updateDocumentTitle();
+  };
+
+  // The tab title starts with this host, as PVE and LuCI do, so several Veer
+  // tabs stay apart even when the browser cuts titles short:
+  // "<host> - <page> - Veer". The host name comes from an authenticated API;
+  // until it has loaded, the address the browser used stands in.
+  app.documentTitlePage = '';
+  app.updateDocumentTitle = function updateDocumentTitle() {
+    const host = (app.hostSummary && app.hostSummary.name) || (window.location && window.location.hostname) || '';
+    document.title = [host, app.documentTitlePage, app.t('app.title')].filter(Boolean).join(' - ');
   };
 
   app.clearNode = function clearNode(node) {

@@ -1035,7 +1035,9 @@ impl<'a> Ctx<'a> {
         let expected = json!({"lcp_echo_identifier": identifier});
         let started = crate::now();
         let timeout = num(profile, "timeout_ms");
-        let frames = self.exchange_ppp_control_frames(profile, peer, session_id, PPP_LCP, &cp_packet(9, identifier, "00000000"), timeout, num(profile, "max_frames"))?;
+        // RFC 1661 5.8: the sender's negotiated magic number (zero without one).
+        let magic = crate::normalize_lcp_magic_hex(g(profile, "lcp_magic")).unwrap_or_else(|_| "00000000".to_string());
+        let frames = self.exchange_ppp_control_frames(profile, peer, session_id, PPP_LCP, &cp_packet(9, identifier, &magic), timeout, num(profile, "max_frames"))?;
         let mut serviced = new_control_window_result(timeout);
         self.consume_ppp_control_frames(profile, peer, session_id, frames, &expected, &mut serviced)?;
         if !flag(&serviced, "lcp_echo_reply") {

@@ -82,8 +82,24 @@ def proc(a, label):
     f = open(BASE / (label + ".log"), "w")
     logs.append(f)
     p = subprocess.Popen(a, stdout=f, stderr=f, cwd=BASE)
+    p.log_path = BASE / (label + ".log")
     procs.append(p)
     return p
+
+
+def wait_ready(loaders, what, timeout=60):
+    # A loader prints READY once the kernel verified its programs and they
+    # are attached. Frames sent before that miss the filter and die as an
+    # unknown protocol, so a fixed sleep fails whenever verification takes
+    # longer (a bigger program, a slower runner).
+    deadline = time.monotonic() + timeout
+    for loader in loaders:
+        while "READY" not in loader.log_path.read_text(errors="replace"):
+            if loader.poll() is not None:
+                raise RuntimeError(what + " exited: " + loader.log_path.read_text(errors="replace")[-1500:])
+            if time.monotonic() > deadline:
+                raise RuntimeError(what + " not ready after " + str(timeout) + "s")
+            time.sleep(0.02)
 
 
 def idx(name, ns=None):
@@ -286,9 +302,7 @@ def nonlinear_frames(mode, clamp=True, linear=False, entry="wrapped"):
                 "TCX": args.tcx,
             }))
             loaders.append(proc([str(LOADER), str(config)], label + "-" + program))
-        time.sleep(0.3)
-        if any(loader.poll() is not None for loader in loaders):
-            raise RuntimeError("fragment test loader exited")
+        wait_ready(loaders, "fragment test loader")
         client = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
         client.bind(("fragcap1", 0))
 
@@ -694,10 +708,7 @@ try:
             file.write_text(json.dumps(config))
             p = proc(pre + [str(LOADER), str(file)], mode + side)
             loaders.append(p)
-        time.sleep(0.7)
-        for p in loaders:
-            if p.poll() is not None:
-                raise RuntimeError("loader exited")
+        wait_ready(loaders, "loader")
         print(mode, "plugin loaders attached; checks:", ",".join(c for c in CHECKS if c in checks), flush=True)
         if "ping" in checks:
             print(mode, run(["ping", "-n", "-c", "3", "-W", "2", "10.90.0.2"]), flush=True)

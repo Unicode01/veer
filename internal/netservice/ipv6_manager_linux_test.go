@@ -2,7 +2,11 @@
 
 package netservice
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestIPv6ManagerIgnoresEquivalentRuntimeUpdates(t *testing.T) {
 	t.Parallel()
@@ -50,5 +54,57 @@ func TestIPv6ManagerIgnoresEquivalentRuntimeUpdates(t *testing.T) {
 	}
 	if got := server.snapshot().DNSServers; len(got) != 1 || got[0] != "2001:4860:4860::8888" {
 		t.Fatalf("DHCPv6 runtime config DNS = %v", got)
+	}
+}
+
+// A PPPoE redial disables the LAN assignment while the WAN is down and
+// brings the new delegated prefix back as a new advertiser.
+func TestIPv6ManagerDeprecatesThePrefixOfAStoppedAdvertiser(t *testing.T) {
+	t.Parallel()
+
+	manager := NewIPv6Manager()
+	const iface = "veerra-nonexist"
+	ensure := func(prefix string) *ipv6RouterAdvertiser {
+		t.Helper()
+		if err := manager.EnsureRA(RAConfig{TargetInterface: iface, Prefixes: []string{prefix}}); err != nil {
+			t.Fatalf("EnsureRA(%s) error = %v", prefix, err)
+		}
+		manager.mu.Lock()
+		defer manager.mu.Unlock()
+		return manager.advertisers[iface]
+	}
+	deprecated := func(advertiser *ipv6RouterAdvertiser) string {
+		return strings.Join(advertiser.deprecatedPrefixes(time.Now()), ",")
+	}
+
+	ensure("2001:db8:1::/64")
+	if err := manager.DeleteRA(iface); err != nil {
+		t.Fatalf("DeleteRA() error = %v", err)
+	}
+	renumbered := ensure("2001:db8:2::/64")
+	if got := deprecated(renumbered); got != "2001:db8:1::/64" {
+		t.Fatalf("new advertiser deprecates %q, want the prefix of the stopped one", got)
+	}
+	if err := manager.DeleteRA(iface); err != nil {
+		t.Fatalf("DeleteRA() error = %v", err)
+	}
+	back := ensure("2001:db8:1::/64")
+	if got := deprecated(back); got != "2001:db8:2::/64" {
+		t.Fatalf("advertiser for the returning prefix deprecates %q, want only the replaced prefix", got)
+	}
+	if err := manager.DeleteRA(iface); err != nil {
+		t.Fatalf("DeleteRA() error = %v", err)
+	}
+	if err := manager.EnsureRA(RAConfig{TargetInterface: "veerra-other", Prefixes: []string{"2001:db8:9::/64"}}); err != nil {
+		t.Fatalf("EnsureRA(other) error = %v", err)
+	}
+	manager.mu.Lock()
+	other := manager.advertisers["veerra-other"]
+	manager.mu.Unlock()
+	if got := deprecated(other); got != "" {
+		t.Fatalf("advertiser on another interface deprecates %q, want nothing", got)
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
 	}
 }

@@ -270,7 +270,7 @@ fn disable_profile_runtime(host: &Host, record: &Value) -> Result<()> {
         previous["cleanup_errors"] = Value::Array(cleanup_errors);
         return set_record_if_changed_apply(host, "status", &key, &previous, false, false);
     }
-    let status = json!({
+    let mut status = json!({
         "phase": "disabled",
         "lan_id": key,
         "bridge": parent,
@@ -279,6 +279,11 @@ fn disable_profile_runtime(host: &Host, record: &Value) -> Result<()> {
         "member_gro": disabled_member_gro_state(g(&raw, "mtu"), &gro_restore),
         "egress_nat_plan": plan,
     });
+    // Disabling leaves the bridge in place; what the plugin owns of it stays
+    // on record for a later teardown.
+    if parent.is_empty() || safe_iface_name(g(&previous, "bridge")) == parent {
+        keep_ownership(&mut status, &previous);
+    }
     set_record_if_changed_apply(host, "status", &key, &status, false, false)
 }
 
@@ -301,14 +306,35 @@ fn mark_apply_error(host: &Host, key: &Value, error: &Error) -> Result<()> {
     )?;
     set_record_if_changed_apply(host, "dhcpv4_plans", &key, &disabled_dhcpv4_plan(&key, "", failed), false, true)?;
     set_record_if_changed_apply(host, "ipv6_assignment_plans", &key, &disabled_ipv6_assignment_plan(&key, "", failed), false, true)?;
-    let status = json!({
+    let mut status = json!({
         "phase": "error",
         "lan_id": key,
         "cleanup_errors": gro_restore.errors,
         "member_gro": disabled_member_gro_state(g(&previous, "bridge_mtu"), &gro_restore),
         "last_error": message,
     });
+    keep_ownership(&mut status, &previous);
     set_record_if_changed_apply(host, "status", &key, &status, false, false)
+}
+
+/// The status fields a teardown reads to tell what this plugin owns: the
+/// bridge it created, the ports it attached and the addresses it added.
+const OWNERSHIP_FIELDS: [&str; 8] =
+    ["bridge", "bridge_ifindex", "bridge_created", "bridge_existing", "bridge_addresses", "preserve_bridge", "configured_ports", "managed_ports"];
+
+/// Carries the ownership of a status that is being replaced (an error, a
+/// disabled profile) into the new one. Without it a later teardown found no
+/// proof of ownership and left the bridge, its ports and its addresses
+/// behind, and the next apply took the bridge for one it had not created.
+fn keep_ownership(status: &mut Value, previous: &Value) {
+    if js::text(g(previous, "phase")) == "deleted" {
+        return;
+    }
+    for field in OWNERSHIP_FIELDS {
+        if let Some(value) = previous.get(field) {
+            status[field] = value.clone();
+        }
+    }
 }
 
 struct Plan {
@@ -343,7 +369,44 @@ fn apply_network(host: &Host, plan: &Plan) -> Result<()> {
     let previous = previous_status(host, &plan.key)?;
     let bridge_existed = link_exists(host, &bridge_name);
     let bridge = host.call("net.link.ensureBridge", json!([{"name": bridge_name, "mtu": profile["mtu"], "up": true}]))?;
-    if js::is_true(&profile["preserve_bridge"]) && js::is_true(g(&bridge, "created")) {
+    // From here on this attempt may own the bridge, ports it attaches,
+    // addresses it adds and member GRO it turns off. A failure records that,
+    // so the next apply or a teardown can undo it.
+    let mut addresses = cidr_list(&profile["addresses"]);
+    if js::text(g(&previous, "phase")) != "deleted" && safe_iface_name(g(&previous, "bridge")) == bridge_name {
+        for cidr in cidr_list(g(&previous, "bridge_addresses")) {
+            if !addresses.contains(&cidr) {
+                addresses.push(cidr);
+            }
+        }
+    }
+    let mut owned = json!({
+        "phase": "error",
+        "lan_id": plan.key,
+        "bridge": js::or(g(&bridge, "name"), &profile["bridge"]),
+        "bridge_ifindex": js::or(g(&bridge, "ifindex"), &json!(0)),
+        "bridge_created": bridge_created_by_plugin(&previous, profile, bridge_existed),
+        "bridge_existing": bridge_existed,
+        "bridge_addresses": addresses,
+        "preserve_bridge": profile["preserve_bridge"],
+        "configured_ports": profile["ports"],
+        "managed_ports": retained_managed_port_set(&previous, profile).into_iter().collect::<Vec<_>>(),
+        "member_gro": g(&previous, "member_gro"),
+    });
+    let result = apply_bridge_network(host, plan, &previous, &bridge, bridge_existed, &mut owned);
+    if let Err(err) = &result {
+        owned["last_error"] = json!(err.to_string());
+        if let Err(record) = set_record_if_changed_apply(host, "status", &plan.key, &owned, false, false) {
+            bail!("{err}; record what the failed apply owns: {record}");
+        }
+    }
+    result
+}
+
+fn apply_bridge_network(host: &Host, plan: &Plan, previous: &Value, bridge: &Value, bridge_existed: bool, owned: &mut Value) -> Result<()> {
+    let profile = &plan.profile;
+    let bridge_name = js::text(&profile["bridge"]);
+    if js::is_true(&profile["preserve_bridge"]) && js::is_true(g(bridge, "created")) {
         host.call("net.link.release", json!([bridge_name]))?;
     }
     let mut cleanup_errors = cleanup_managed_bridge_state(host, &previous, profile);
@@ -378,6 +441,7 @@ fn apply_network(host: &Host, plan: &Plan) -> Result<()> {
         };
         if !was_member {
             managed_port_set.insert(port.clone());
+            owned["managed_ports"] = json!(managed_port_set.iter().cloned().collect::<Vec<_>>());
         }
         members.push(json!({
             "name": js::or(g(&info, "name"), &json!(port)),
@@ -393,6 +457,7 @@ fn apply_network(host: &Host, plan: &Plan) -> Result<()> {
     let mut bridge_state = read_bridge_members(host, &bridge_name, &bridge_ifindex, &iface_set(&profile["ports"]), &managed_port_set, &members);
     let wan_egress = resolve_wan_egress(host, profile);
     let member_gro = reconcile_member_gro(host, &previous, profile, &mut bridge_state.members, &wan_egress);
+    owned["member_gro"] = member_gro.clone();
     let dns_state = resolve_dns_state(profile, &wan_egress);
     let egress_plan = build_egress_nat_plan(&plan.key, profile, &wan_egress);
     let dhcpv4_plan = build_dhcpv4_plan(&plan.key, profile, &dns_state);
