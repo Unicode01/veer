@@ -231,6 +231,19 @@ struct bpf_map_def SEC("maps") pppoe_session_events = {
 	.max_entries = 1,
 };
 
+/* Scratch for clamp_tcp_mss_options, per CPU. */
+struct pppoe_mss_scan {
+	__u32 l4_off;
+	__u32 tcp_hdr_len;
+};
+
+struct bpf_map_def SEC("maps") pppoe_mss_scratch = {
+	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(struct pppoe_mss_scan),
+	.max_entries = 1,
+};
+
 struct bpf_map_def SEC("maps") pppoe_tunnel_stats = {
 	.type = BPF_MAP_TYPE_ARRAY,
 	.key_size = sizeof(__u32),
@@ -477,13 +490,31 @@ static __always_inline int rewrite_ipv4_dst(struct __sk_buff *skb, const struct 
 	return 0;
 }
 
-// Global BTF functions are verified independently of their callers. Keep this
-// SYN-only loop separate so state cannot multiply across tunnel branches.
-__attribute__((noinline)) int clamp_tcp_mss_options(struct __sk_buff *skb, __u16 clamp, int l4_off, int tcp_hdr_len)
+// Inlined: tc_tunnel continues the hook chain with a tail call, and a program
+// that tail-calls may not make BPF-to-BPF calls on kernels whose JIT cannot
+// mix the two (arm64 before 6.0): the verifier would refuse the whole object.
+//
+// It used to be a global function because the verifier checks one of those
+// once, with arguments it knows nothing about. Inlined, it would see the
+// option offsets as the constants of each caller, follow every NOP/option
+// sequence separately and run past a million instructions. The offsets go
+// through pppoe_mss_scratch first, which hides their values the same way; only
+// SYN segments with options get here.
+static __always_inline int clamp_tcp_mss_options(struct __sk_buff *skb, __u16 clamp, int l4_off, int tcp_hdr_len)
 {
-	int opt_off = l4_off + (int)sizeof(struct tcp_min_hdr);
+	__u32 key = 0;
+	struct pppoe_mss_scan *scan = bpf_map_lookup_elem(&pppoe_mss_scratch, &key);
+	int opt_off;
+
+	if (!scan)
+		return 0;
+	scan->l4_off = (__u32)l4_off;
+	scan->tcp_hdr_len = (__u32)tcp_hdr_len;
+	l4_off = (int)*(volatile __u32 *)&scan->l4_off;
+	tcp_hdr_len = (int)*(volatile __u32 *)&scan->tcp_hdr_len;
 	if (l4_off < 14 || l4_off > 65535 || tcp_hdr_len <= (int)sizeof(struct tcp_min_hdr) || tcp_hdr_len > 60)
 		return 0;
+	opt_off = l4_off + (int)sizeof(struct tcp_min_hdr);
 #pragma clang loop unroll(disable)
 	for (int i = 0; i < 40; i++) {
 		__u8 kind = 0, len = 0;
@@ -662,8 +693,8 @@ static __always_inline void copy_pppoe_payload_8(void *dst, const void *src)
 	*(__u32 *)(dst + 4) = *(const __u32 *)(src + 4);
 }
 
-// Global linkage and BTF keep these loops independent of the MSS branches.
-__attribute__((noinline)) int compact_pppoe_payload_to_l3(struct __sk_buff *skb, __u16 l3_len)
+// Inlined for the same reason as clamp_tcp_mss_options.
+static __always_inline int compact_pppoe_payload_to_l3(struct __sk_buff *skb, __u16 l3_len)
 {
 	void *data = (void *)(long)skb->data;
 	void *data_end = (void *)(long)skb->data_end;
