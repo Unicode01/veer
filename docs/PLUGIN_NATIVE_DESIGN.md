@@ -52,7 +52,7 @@ veer 宿主 ──┬── unix socket ── veer-plugin-worker "shared"   wan
 |---|---|
 | veer 宿主 | 配置、数据库（资源、KV、密钥、blob、网络租约和事务日志）、eBPF 对象的加载与挂载、hook 和 pipeline、事件源（netlink、进程、资源、数据面）、WebUI 和 API、权限检查、worker 监管 |
 | 插件 worker | 一个小的原生运行时（建议 Rust 实现）：`dlopen` 插件、为每个插件实例提供宿主函数表、按实例串行投递消息、把宿主调用转发给 veer 宿主 |
-| keeper | 不变：托管进程在宿主热重启、worker 重启时都不断开 |
+| keeper | 托管进程在宿主热重启、worker 重启时都不断开。已实现为 worker 程序的另一种运行方式（argv[0] 为 `veer-process-keeper`，`sdk/native/worker/src/keeper.rs`），协议与原来的 Go keeper 相同 |
 
 ### 3.1 worker 分组
 

@@ -72,7 +72,7 @@ func Main(buildNonce string) {
 	workerMode := flag.Bool("worker", false, "run in worker mode")
 	rangeWorkerMode := flag.Bool("range-worker", false, "run in range worker mode")
 	sharedProxyMode := flag.Bool("shared-proxy", false, "run as shared proxy")
-	pluginProcessKeeperMode := flag.Bool("plugin-process-keeper", false, "keep one managed plugin process")
+	pluginProcessKeeperMode := flag.Bool("plugin-process-keeper", false, "become the plugin worker's process keeper (started by earlier daemons)")
 	workerIndex := flag.Int("id", 0, "worker slot index")
 	sockPath := flag.String("sock", "", "unix socket path")
 	configPath := flag.String("config", "config.json", "config file path")

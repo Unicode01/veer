@@ -9,6 +9,8 @@ description = "Loads Veer native plugins and connects them to the Veer host"
 [dependencies]
 veer-plugin = { path = "../rust/veer-plugin" }
 md-5 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

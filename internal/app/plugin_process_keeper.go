@@ -9,10 +9,12 @@ import (
 	"time"
 )
 
-// A keeper is a small veer process that owns one execution of a managed
-// process. When the daemon hands it off during a hot restart it keeps the
-// process running for the successor; when the daemon disappears without a
-// handoff it kills the process, as the parent-death signal used to.
+// A keeper is a small process that owns one execution of a managed process:
+// the plugin worker binary run as veer-process-keeper
+// (sdk/native/worker/src/keeper.rs). When the daemon hands it off during a
+// hot restart it keeps the process running for the successor; when the
+// daemon disappears without a handoff it kills the process, as the
+// parent-death signal used to. The messages below are its protocol.
 const (
 	pluginKeeperProtocolVersion = 1
 	pluginKeeperMessageLimit    = 4 << 20

@@ -61,6 +61,7 @@ func TestPluginManagedProcessHelper(t *testing.T) {
 
 func managedTestRequest(t *testing.T, mode string) pluginProcessRequest {
 	t.Helper()
+	requirePluginProcessKeeper(t)
 	binary, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
