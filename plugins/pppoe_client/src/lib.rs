@@ -508,7 +508,12 @@ impl<'a> Ctx<'a> {
         p["local_src_mac"] = json!(mac_text(js::or(g(&p, "local_src_mac"), &json!("")))?);
         p["local_dst_mac"] = json!(mac_text(js::or(g(&p, "local_dst_mac"), &json!("")))?);
         p["wan_src_mac"] = json!(mac_text(js::or(g(&p, "wan_src_mac"), &json!("")))?);
-        p["wan_dst_mac"] = json!(mac_text(js::first(&[g(&p, "wan_dst_mac"), g(&p, "ac_mac"), &json!("")]))?);
+        // The tunnel peer is the AC of each session (its PADS source). Timer
+        // payloads used to carry it as wan_dst_mac (from ac_mac), which pinned
+        // redials to the AC of the lost session.
+        if let Some(map) = p.as_object_mut() {
+            map.remove("wan_dst_mac");
+        }
         let local = !s(&p, "local_interface").is_empty();
         p["wan_core_sync"] = b(&p, &["wan_core_sync", "sync_wan_core"], local);
         let sync = flag(&p, "wan_core_sync");
@@ -837,7 +842,9 @@ impl<'a> Ctx<'a> {
         let local_src_mac = pick_text(&[g(profile, "local_src_mac"), g(pads_frame, "src_mac"), &json!("")]);
         let local_dst_mac = pick_text(&[g(profile, "local_dst_mac"), g(&boundary.local, "mac"), &json!("")]);
         let wan_src_mac = pick_text(&[g(profile, "wan_src_mac"), g(&wan_link, "mac"), g(pads_frame, "dst_mac"), &json!("")]);
-        let wan_dst_mac = pick_text(&[g(profile, "wan_dst_mac"), g(pads_frame, "src_mac"), &json!("")]);
+        // The session belongs to the AC that sent PADS. A redial can reach a
+        // different AC, so never reuse the previous session's peer here.
+        let wan_dst_mac = pick_text(&[g(pads_frame, "src_mac"), &json!("")]);
         if !(local_ifindex > 0.0) {
             bail!("local_ifindex or local_interface is required to install the TC tunnel");
         }
@@ -857,7 +864,7 @@ impl<'a> Ctx<'a> {
             bail!("wan_src_mac is required to install the TC tunnel");
         }
         if wan_dst_mac.is_empty() {
-            bail!("wan_dst_mac/ac_mac is required to install the TC tunnel");
+            bail!("the PADS source MAC is required to install the TC tunnel");
         }
         let preparation = self.prepare_tunnel_interfaces(profile, Some(&boundary))?;
         let hook_bindings = self.sync_tunnel_hook_bindings(profile, Some(&boundary))?;

@@ -135,7 +135,7 @@ pub fn keepalive_timer_payload(profile: &Value, session: &Value, failures: f64, 
     out.insert("keepalive_failures".into(), js::num(clamp_int(&js::num(failures), 0.0, 1000000.0, 0.0)));
     out.insert("keepalive_failure_started_ms".into(), js::num(normalize_timestamp_ms(&js::num(failure_started_ms), 0.0)));
     for key in [
-        "auto_redial", "redial_clear_tunnel", "redial_send_padt", "redial_retry_initial_ms", "redial_retry_max_ms", "install_tunnel", "prepare_interfaces",
+        "auto_redial", "redial_clear_tunnel", "redial_send_padt", "redial_retry_initial_ms", "redial_retry_max_ms", "install_tunnel", "tunnel_mtu", "local_mtu", "prepare_interfaces",
         "prepare_local_mtu", "prepare_wan_mtu", "mss_clamp_v4", "mss_clamp_v6", "prepare_offloads", "prepare_gso", "prepare_wan_offloads",
         "allow_unsafe_offloads", "sync_hook_bindings", "apply_hook_bindings", "post_session_control_ms", "decap_mode",
     ] {
@@ -146,7 +146,7 @@ pub fn keepalive_timer_payload(profile: &Value, session: &Value, failures: f64, 
     out.insert("send_padt".into(), json!(false));
     for key in [
         "local_interface", "pipeline_interface", "wan_interface", "local_ifindex", "pipeline_ifindex", "wan_ifindex", "local_src_mac", "local_dst_mac",
-        "wan_src_mac", "wan_dst_mac", "wan_core_sync", "wan_core_required", "wan_core_apply", "wan_core_plugin",
+        "wan_src_mac", "wan_core_sync", "wan_core_required", "wan_core_apply", "wan_core_plugin",
     ] {
         if let Some(value) = profile.get(key) {
             out.insert(key.into(), value.clone());

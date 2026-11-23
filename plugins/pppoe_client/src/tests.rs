@@ -173,9 +173,28 @@ struct World {
     recv_error: String,
     missing_link: String,
     set_gso_error: String,
+    // Another access concentrator (MAC, session id) answers from now on, as
+    // when a redial reaches a different BRAS.
+    peer: Option<(&'static str, u64)>,
 }
 
 impl World {
+    /// Frames as the current access concentrator sends them.
+    fn from_peer(&self, mut frames: Vec<Value>) -> Vec<Value> {
+        let Some((mac, session_id)) = self.peer else {
+            return frames;
+        };
+        for frame in &mut frames {
+            frame["src_mac"] = json!(mac);
+            let payload = js::text(&frame["payload_hex"]);
+            let pads = js::text(&frame["ethertype"]) == DISC && discovery_code(&payload) == CODE_PADS;
+            if (js::text(&frame["ethertype"]) == SESS || pads) && payload.len() >= 8 {
+                frame["payload_hex"] = json!(format!("{}{}{}", &payload[..4], u16hex(session_id), &payload[8..]));
+            }
+        }
+        frames
+    }
+
     fn link(&self, name: &str) -> Value {
         self.links.get(name).cloned().unwrap_or_else(|| link_info(name))
     }
@@ -610,26 +629,30 @@ const HOST: &[(&str, HostFn)] = &[
     ("net.l2.exchange", |w, a| {
         w.l2_exchanges.push(arg(a, 0));
         w.session_exchange_error(&arg(a, 0))?;
-        Ok(first_or_null(w.exchange(&arg(a, 0))))
+        let frames = w.exchange(&arg(a, 0));
+        Ok(first_or_null(w.from_peer(frames)))
     }),
     ("net.l2.exchangeMany", |w, a| {
         w.l2_exchanges.push(arg(a, 0));
         w.session_exchange_error(&arg(a, 0))?;
-        Ok(Value::Array(w.exchange(&arg(a, 0))))
+        let frames = w.exchange(&arg(a, 0));
+        Ok(Value::Array(w.from_peer(frames)))
     }),
     ("net.l2.recv", |w, a| {
         if !w.recv_error.is_empty() {
             return Err(w.recv_error.clone());
         }
         w.l2_recvs.push(arg(a, 0));
-        Ok(first_or_null(w.recv(&arg(a, 0))))
+        let frames = w.recv(&arg(a, 0));
+        Ok(first_or_null(w.from_peer(frames)))
     }),
     ("net.l2.recvMany", |w, a| {
         if !w.recv_error.is_empty() {
             return Err(w.recv_error.clone());
         }
         w.l2_recvs.push(arg(a, 0));
-        Ok(Value::Array(w.recv(&arg(a, 0))))
+        let frames = w.recv(&arg(a, 0));
+        Ok(Value::Array(w.from_peer(frames)))
     }),
 ];
 
@@ -1557,6 +1580,115 @@ fn auto_redial_after_a_keepalive_timeout() {
     let last = t.data("sessions", "last");
     assert_eq!(last["phase"], "session_probe");
     assert_eq!(last["padt_sent"], false);
+}
+
+#[test]
+fn keepalive_redial_tunnels_to_the_new_access_concentrator() {
+    // After the session is lost, the redial may be answered by another BRAS.
+    // The new tunnel must send to the AC that sent PADS: frames addressed to
+    // the old AC leave the WAN but nothing answers them.
+    const NEW_AC_MAC: &str = "02:00:00:00:00:a2";
+    const NEW_SESSION_ID: u64 = 0x0021;
+    let lose_session = |t: &mut T, mut echo: Value| {
+        t.w().o.echo_replies = false;
+        for (key, value) in [("keepalive_failure_threshold", json!(1)), ("keepalive_failure_grace_ms", json!(0)), ("keepalive_confirm_timeout_ms", json!(100))] {
+            echo[key] = value;
+        }
+        t.timer("lcp_echo", echo);
+        assert_eq!(t.data("sessions", "keepalive")["phase"], "redial_wait");
+        assert_eq!(t.last_put(), zero(), "redial should clear the lost session's tunnel");
+    };
+    let tunnel = |t: &T| decode_tunnel_config_hex(&t.tunnel_puts().last().cloned().unwrap()).unwrap();
+    let mut t = T::new(Opts { echo_replies: true, ..auth("pap") });
+    t.run("traffic_probe", json!({
+        "interface": "eth0", "username": "user", "password": "pass", "auth": "pap", "timeout_ms": 50, "control_ack_timeout_ms": 10,
+        "control_idle_timeout_ms": 1, "max_frames": 4, "negotiate_ipv4": true, "negotiate_ipv6": false, "send_padt": false,
+        "post_session_control_ms": 0, "keepalive_interval_ms": 1000, "auto_redial": true, "redial_retry_initial_ms": 250,
+        "local_interface": "veerlocal0", "pipeline_interface": PIPELINE, "wan_core_sync": false,
+    }));
+    assert_eq!(tunnel(&t)["wan_dst_mac"], AC_MAC);
+    assert_eq!(tunnel(&t)["session_id"], SESSION_ID);
+
+    let echo = t.timer_payload("lcp_echo");
+    lose_session(&mut t, echo);
+    {
+        let mut w = t.w();
+        w.o.echo_replies = true;
+        w.peer = Some((NEW_AC_MAC, NEW_SESSION_ID));
+    }
+    t.refire("redial_retry");
+    let keepalive = t.data("sessions", "keepalive");
+    assert_eq!(keepalive["phase"], "redial_ok", "{keepalive}");
+    assert_eq!(keepalive["redial_session_id"], NEW_SESSION_ID);
+    let config = tunnel(&t);
+    assert_eq!(config["session_id"], NEW_SESSION_ID);
+    assert_eq!(config["wan_dst_mac"], NEW_AC_MAC, "encapsulated traffic must go to the AC of the new session");
+    assert_eq!(config["local_src_mac"], NEW_AC_MAC);
+    assert_eq!(t.data("wan_links", "default")["ac_mac"], NEW_AC_MAC);
+    let echo = t.timer_payload("lcp_echo");
+    assert_eq!(echo["ac_mac"], NEW_AC_MAC);
+
+    // A second loss must not bring back the first AC's address either.
+    lose_session(&mut t, echo);
+    {
+        let mut w = t.w();
+        w.o.echo_replies = true;
+        w.peer = None;
+    }
+    t.refire("redial_retry");
+    assert_eq!(t.data("sessions", "keepalive")["phase"], "redial_ok");
+    let config = tunnel(&t);
+    assert_eq!(config["session_id"], SESSION_ID);
+    assert_eq!(config["wan_dst_mac"], AC_MAC);
+    assert_eq!(config["local_src_mac"], AC_MAC);
+}
+
+#[test]
+fn keepalive_redial_keeps_the_tunnel_mtu() {
+    // A manual dial sends the profile's tunnel MTU from the page; a redial
+    // only has what the dial stored and the timer payloads carry.
+    let mut t = T::new(Opts { echo_replies: true, ..auth("none") });
+    t.run("traffic_probe", json!({
+        "interface": "eth0", "auth": "none", "timeout_ms": 50, "control_ack_timeout_ms": 10, "control_idle_timeout_ms": 1, "max_frames": 4,
+        "negotiate_ipv4": false, "negotiate_ipv6": false, "send_padt": false, "post_session_control_ms": 0, "tunnel_mtu": 1400,
+        "keepalive_interval_ms": 1000, "auto_redial": true, "redial_retry_initial_ms": 250,
+        "local_interface": "veerlocal0", "pipeline_interface": PIPELINE, "wan_core_sync": false,
+    }));
+    assert!(t.net_call("setMTU:veerlocal0:1400"), "{:?}", t.w().net_calls);
+    assert_eq!(t.data("profiles", "default")["tunnel_mtu"], 1400, "the stored profile must keep the tunnel MTU");
+
+    t.w().net_calls.clear();
+    t.w().o.echo_replies = false;
+    let mut echo = t.timer_payload("lcp_echo");
+    for (key, value) in [("keepalive_failure_threshold", json!(1)), ("keepalive_failure_grace_ms", json!(0)), ("keepalive_confirm_timeout_ms", json!(100))] {
+        echo[key] = value;
+    }
+    t.timer("lcp_echo", echo);
+    t.w().o.echo_replies = true;
+    t.refire("redial_retry");
+    assert_eq!(t.data("sessions", "keepalive")["phase"], "redial_ok");
+    let calls = t.w().net_calls.clone();
+    assert!(calls.iter().any(|call| call == "setMTU:veerlocal0:1400"), "redial must prepare the tunnel MTU: {calls:?}");
+    assert!(!calls.iter().any(|call| call.starts_with("setMTU:veerlocal0:1492")), "redial fell back to the MRU: {calls:?}");
+    assert_eq!(t.data("tunnel_configs", "active")["repair_preparation"]["tunnel_mtu"], 1400);
+}
+
+#[test]
+fn link_local_sources_keep_leading_zero_groups() {
+    // The IPV6CP interface id becomes the source of RS and DHCPv6; text
+    // drops leading zeros of each group, the bytes must not.
+    let iid = "05cd0b063e6dcb78";
+    let text = link_local_from_iid(iid).unwrap();
+    assert_eq!(text, "fe80::5cd:b06:3e6d:cb78");
+    assert_eq!(ipv6_text_to_hex(&text).unwrap(), format!("fe80000000000000{iid}"));
+    let packet = ipv6_udp(&text, "ff02::1:2", 546, 547, "01000000").unwrap();
+    assert_eq!(&packet[16..48], format!("fe80000000000000{iid}"), "DHCPv6 source address");
+    let solicit = ipv6_icmp(&text, "ff02::2", 133, 0, "00000000", 255).unwrap();
+    assert_eq!(&solicit[16..48], format!("fe80000000000000{iid}"), "router solicitation source address");
+    assert_eq!(ipv6_text_to_hex("ff02::1:2").unwrap(), "ff020000000000000000000000010002");
+    assert_eq!(ipv6_text_to_hex("ff02::2").unwrap(), "ff020000000000000000000000000002");
+    assert_eq!(ipv6_text_to_hex("fe80::1").unwrap(), "fe800000000000000000000000000001");
+    assert!(ipv6_text_to_hex("fe80::1::2").is_err());
 }
 
 #[test]

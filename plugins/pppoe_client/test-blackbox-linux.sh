@@ -238,7 +238,13 @@ disable_offloads() {
 	ethtool -K "$iface" rx off tx off sg off tso off gso off gro off lro off >/dev/null 2>&1 || true
 }
 
+# Starts the access concentrator. A second one (test_automatic_redial) gets
+# its own name and numbers its sessions from $1 + 1.
 start_pppoe_server() {
+	session_offset=${1:-0}
+	ac_name=veer-test-ac
+	if [ "$session_offset" != "0" ]; then ac_name="veer-test-ac-$session_offset"; fi
+	rm -f "$work_dir/pppoe-server.pid"
 	# A probe that fails after PADS without PADT (it missed PADS on a slow
 	# runner) leaves the single session open until the server's LCP gives up:
 	# about 30 s with pppd's default timers, about 6 s with these.
@@ -259,11 +265,12 @@ EOF
 		-L 8.8.8.8 \
 		-R 198.18.0.2 \
 		-N 1 \
-		-C veer-test-ac \
+		-o "$session_offset" \
+		-C "$ac_name" \
 		-O "$work_dir/pppoe-server-options" \
 		-T 0 \
 		-X "$work_dir/pppoe-server.pid" \
-		>"$work_dir/pppoe-server.log" 2>&1
+		>>"$work_dir/pppoe-server.log" 2>&1
 	for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
 		if [ -s "$work_dir/pppoe-server.pid" ] && kill -0 "$(cat "$work_dir/pppoe-server.pid")" 2>/dev/null; then
 			pppoe_pid=$(cat "$work_dir/pppoe-server.pid")
@@ -518,40 +525,84 @@ post_traffic_probe() {
 	exit 1
 }
 
-test_automatic_redial() {
-	api_get_resource sessions last >"$work_dir/session-before-auto-redial.json"
-	previous_generation=$(sed -n 's/.*"session_generation":"\([^"]*\)".*/\1/p' "$work_dir/session-before-auto-redial.json" | head -n 1)
+session_generation() {
+	sed -n 's/.*"session_generation":"\([^"]*\)".*/\1/p' "$1" | head -n 1
+}
+
+# The server's pppd dies: the same AC answers the redial.
+end_server_session() {
+	ip netns exec "$server_ns" pkill -TERM -x pppd
+}
+
+# The AC goes away without a word and another one, with its own MAC and
+# session numbers, answers the redial, as when PADI reaches another BRAS.
+replace_access_concentrator() {
+	ip netns pids "$server_ns" | xargs -r kill -KILL 2>/dev/null || true
+	pppoe_pid=
+	wait_for_server_session_release
+	new_ac_mac=02:00:00:ac:00:02
+	if ! ip netns exec "$server_ns" ip link set dev "$wan_peer" address "$new_ac_mac" 2>/dev/null; then
+		ip netns exec "$server_ns" ip link set dev "$wan_peer" down &&
+			ip netns exec "$server_ns" ip link set dev "$wan_peer" address "$new_ac_mac" &&
+			ip netns exec "$server_ns" ip link set dev "$wan_peer" up || return 1
+	fi
+	start_pppoe_server 32
+}
+
+# Ends the session with $1 and waits until keepalive failure has redialed a
+# new session that carries traffic both ways through the AC that answered.
+test_automatic_redial_after() {
+	redial_case=$1
+	api_get_resource sessions last >"$work_dir/session-before-$redial_case.json"
+	previous_generation=$(session_generation "$work_dir/session-before-$redial_case.json")
 	if [ -z "$previous_generation" ]; then
-		echo "PPPoE session has no generation before automatic redial test" >&2
+		echo "PPPoE session has no generation before automatic redial ($redial_case)" >&2
 		dump_dataplane_state
 		exit 1
 	fi
-	if ! ip netns exec "$server_ns" pkill -TERM -x pppd; then
-		echo "failed to terminate the PPPoE server session for automatic redial" >&2
+	if ! "$redial_case"; then
+		echo "failed to end the PPPoE session for automatic redial ($redial_case)" >&2
 		dump_dataplane_state
 		exit 1
 	fi
+	ac_mac=$(ip netns exec "$server_ns" cat "/sys/class/net/$wan_peer/address")
 
 	attempt=0
-	while [ "$attempt" -lt 80 ]; do
+	while [ "$attempt" -lt 120 ]; do
 		attempt=$((attempt + 1))
 		if api_get_resource sessions last >"$work_dir/session-auto-redial.json" 2>/dev/null; then
-			generation=$(sed -n 's/.*"session_generation":"\([^"]*\)".*/\1/p' "$work_dir/session-auto-redial.json" | head -n 1)
-			if [ -n "$generation" ] && [ "$generation" != "$previous_generation" ] && session_is_up "$work_dir/session-auto-redial.json"; then
-				if api_get_resource sessions redial_last >"$work_dir/auto-redial-status.json" 2>/dev/null && grep -q '"phase":"redial_ok"' "$work_dir/auto-redial-status.json"; then
-					cp "$work_dir/session-auto-redial.json" "$work_dir/session.json"
-					if ping -I "$local_if" -c 3 -W 2 8.8.8.8; then
-						return
-					fi
-					break
+			generation=$(session_generation "$work_dir/session-auto-redial.json")
+			if [ -n "$generation" ] && [ "$generation" != "$previous_generation" ] && session_is_up "$work_dir/session-auto-redial.json" &&
+				api_get_resource sessions redial_last >"$work_dir/auto-redial-status.json" 2>/dev/null &&
+				grep -q '"phase":"redial_ok"' "$work_dir/auto-redial-status.json"; then
+				cp "$work_dir/session-auto-redial.json" "$work_dir/session.json"
+				api_get_resource tunnel_configs active >"$work_dir/tunnel-config-$redial_case.json" || true
+				if ! grep -q "\"ac_mac\":\"$ac_mac\"" "$work_dir/session.json" ||
+					! grep -q "\"wan_dst_mac\":\"$ac_mac\"" "$work_dir/tunnel-config-$redial_case.json"; then
+					echo "PPPoE automatic redial ($redial_case) did not tunnel to the AC that answered ($ac_mac)" >&2
+					cat "$work_dir/tunnel-config-$redial_case.json" >&2 || true
 				fi
+				start_capture "$work_dir/wan-redial-$redial_case.pcap"
+				if ping -I "$local_if" -c 3 -W 2 8.8.8.8 && ping -I "$local_if" -c 2 -W 2 -s 1400 8.8.8.8; then
+					stop_capture
+					return
+				fi
+				stop_capture
+				echo "PPPoE automatic redial ($redial_case) established a session that does not carry traffic" >&2
+				dump_dataplane_state
+				exit 1
 			fi
 		fi
 		sleep 0.25
 	done
-	echo "PPPoE automatic redial did not establish a new usable session" >&2
+	echo "PPPoE automatic redial ($redial_case) did not establish a new usable session" >&2
 	dump_dataplane_state
 	exit 1
+}
+
+test_automatic_redial() {
+	test_automatic_redial_after end_server_session
+	test_automatic_redial_after replace_access_concentrator
 }
 
 dump_dataplane_state() {
