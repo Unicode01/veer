@@ -280,6 +280,7 @@ type ProcessManager struct {
 	pluginPackageMu                                sync.Mutex
 	dataplaneReconcileMu                           sync.Mutex
 	pluginReconcileMu                              sync.Mutex
+	pluginMutationGate                             pluginMutationGate
 	pluginProbationCheckAt                         time.Time
 	pluginReconcileLastError                       string
 	pluginReconcileRetryCount                      int
@@ -5411,18 +5412,25 @@ func (pm *ProcessManager) monitorLoop() {
 			log.Printf("kernel dataplane self-heal: %s; rebuilding kernel dataplane now", kernelDegradedIdleRebuildReason)
 			pm.requestRedistributeWorkers(0)
 		}
+		// Both passes yield to a plugin action or resource write made through
+		// the API (pluginMutationGate); the next attachment check repeats a
+		// deferred self-heal, a deferred retry comes back shortly.
 		if repairPluginDataplane {
-			if _, err := pm.reconcilePluginsForRuntimeWithError(); err != nil {
+			if ran, err := pm.reconcilePluginsInBackground(); err != nil {
 				log.Printf("plugin dataplane self-heal failed: %v", err)
-			} else {
+			} else if ran {
 				log.Printf("plugin dataplane self-heal: reconciled unhealthy attachments")
 			}
 		}
 		if retryPluginReconcile && !repairPluginDataplane {
-			if _, err := pm.reconcilePluginsForRuntimeWithError(); err != nil {
+			if ran, err := pm.reconcilePluginsInBackground(); err != nil {
 				log.Printf("plugin runtime retry failed: %v", err)
-			} else {
+			} else if ran {
 				log.Printf("plugin runtime retry: desired state applied")
+			} else {
+				pm.mu.Lock()
+				pm.pluginReconcileNextRetryAt = time.Now().Add(redistributeRetryDelay)
+				pm.mu.Unlock()
 			}
 		}
 		if checkManagedRuntimeDrift {

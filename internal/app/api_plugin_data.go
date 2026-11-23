@@ -149,6 +149,7 @@ func handlePluginStateAPI(w http.ResponseWriter, r *http.Request, cfg *Config, d
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "enabled is required"})
 			return
 		}
+		defer pm.enterPluginAPIMutation()()
 		if err := store.SetPluginEnabled(db, pluginID, *req.Enabled); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -235,6 +236,9 @@ func handlePluginResourceAPI(w http.ResponseWriter, r *http.Request, cfg *Config
 		}
 	}
 
+	if r.Method != http.MethodGet {
+		defer pm.enterPluginAPIMutation()()
+	}
 	switch r.Method {
 	case http.MethodGet:
 		if recordKey == "" {
@@ -339,6 +343,7 @@ func handlePluginActionAPI(w http.ResponseWriter, r *http.Request, cfg *Config, 
 		return
 	}
 
+	defer pm.enterPluginAPIMutation()()
 	actionStatus := "pending"
 	if action.RuntimeUpdate == "none" || action.RuntimeUpdate == "" {
 		actionStatus = "completed"

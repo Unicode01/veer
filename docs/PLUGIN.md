@@ -162,7 +162,7 @@ worker 与主进程之间是有界的长度前缀帧：限制单帧大小、64 �
 
 systemd 部署保留文件系统只读保护和私有临时目录。命名 network namespace 的创建和删除由主进程在一次性锁定线程中进入宿主挂载空间执行，避免 namespace 只挂载在服务私有空间、随服务退出消失。部署通过 `VEER_HOST_MOUNT_NAMESPACE=/proc/1/ns/mnt` 指定宿主挂载空间，并为主进程增加打开该句柄所需的 `CAP_SYS_PTRACE`。直接从宿主 shell 运行时不需要设置该变量。关闭整个插件系统时不会启动 worker，也不会给 TC/XDP 每包路径增加分支或 IPC。
 
-资源事务、插件包安装和实例热升级提供宿主可控制范围内的原子提交与失败回滚。普通 handler 内的 netlink 修改、eBPF map 写入、socket 写入、L2/UDP 发送和跨插件动作不能形成跨内核与外部对端的全局事务；插件必须使用幂等 reconcile、明确的 ownership 和补偿清理。handler 返回错误时仍会提交它已登记的 timer 变更；超时或实例退出则丢弃该未完成事件的 timer journal。插件在 handler 中写入自己 `runtime_apply` 资源并要求立即应用时，对应的 `onResourceApply` 在当前 handler 返回后执行。
+资源事务、插件包安装和实例热升级提供宿主可控制范围内的原子提交与失败回滚。普通 handler 内的 netlink 修改、eBPF map 写入、socket 写入、L2/UDP 发送和跨插件动作不能形成跨内核与外部对端的全局事务；插件必须使用幂等 reconcile、明确的 ownership 和补偿清理。handler 返回错误时仍会提交它已登记的 timer 变更；超时或实例退出则丢弃该未完成事件的 timer journal。插件在 handler 中写入自己 `runtime_apply` 资源并要求立即应用时，对应的 `onResourceApply` 在当前 handler 返回后执行。一轮 reconcile 中插件写过的资源会记入可回滚日志，这一轮提交或回滚之前，其他写入方写这些资源会得到 `plugin resource migration is pending`。宿主自己发起的 reconcile（失败后的重试、数据面自愈）与经 API 执行的动作、资源写入和启停互斥：后者等这一轮结束再执行，执行期间宿主推迟自己的 reconcile。插件包安装、批量安装和观察期回滚也先等正在进行的 reconcile 结束，再开启自己的资源迁移事务。
 
 Veer 每 2 秒在独立后台任务中检查插件源目录，重叠扫描会合并。文件身份、大小、mtime 和权限未变时复用内容 hash，每 30 秒重新计算完整内容指纹，因此保留大小和 mtime 的内容修改也会被发现。插件增删或 `plugin.json`、插件库、UI、eBPF object 变化只会设置 `update_available`，不会自动加载候选代码或重建数据面；显式开启 `plugins_remote_install_enabled` 后，WebUI 的“应用更新”或 `POST /api/plugins/reload` 会复制一份稳定候选快照，不使用扫描缓存，完成 manifest、库、UI 和 object 校验后再 reconcile。默认关闭远程安装时，请在本机更新文件并重启服务。校验或运行时切换失败会保留上一份已应用快照。
 

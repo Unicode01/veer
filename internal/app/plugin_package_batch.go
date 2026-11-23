@@ -375,7 +375,7 @@ func (m *pluginPackageManager) beginPluginPackageBatchResourceMigration(tx plugi
 	if !ok {
 		return nil
 	}
-	return runtime.BeginPluginResourceMigrationTransactionWithID(tx.ResourceMigrationID)
+	return m.pm.beginPluginResourceMigrationAfterPass(runtime, tx.ResourceMigrationID)
 }
 
 func (m *pluginPackageManager) commitPluginPackageBatchResourceMigration(tx pluginPackageBatchTransaction) error {
