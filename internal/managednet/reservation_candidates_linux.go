@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -44,7 +45,7 @@ func DiscoverReservationFDBMACs(networks []ManagedNetwork, infos []InterfaceInfo
 		return []DiscoveredMAC{}, nil
 	}
 
-	links, err := netlink.LinkList()
+	links, err := nlretry.LinkList()
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +178,7 @@ func DiscoverReservationObservedIPv4s(discovered []DiscoveredMAC, networks []Man
 		return nil, nil
 	}
 
-	links, err := netlink.LinkList()
+	links, err := nlretry.LinkList()
 	if err != nil {
 		return nil, err
 	}
@@ -314,13 +315,13 @@ func CollectObservedIPv4sForNetwork(network ManagedNetwork, bridgeIndex int, mem
 }
 
 func listBridgeIPv4Neighbors(bridgeIndex int) ([]netlink.Neigh, error) {
-	neighbors, err := netlink.NeighList(bridgeIndex, unix.AF_INET)
+	neighbors, err := nlretry.NeighList(bridgeIndex, unix.AF_INET)
 	if err != nil {
 		return nil, err
 	}
 	out := append([]netlink.Neigh(nil), neighbors...)
 	if bridgeIndex > 0 {
-		if extra, err := netlink.NeighList(0, unix.AF_INET); err == nil {
+		if extra, err := nlretry.NeighList(0, unix.AF_INET); err == nil {
 			out = append(out, extra...)
 		}
 	}
@@ -374,7 +375,7 @@ func reservationNeighborStateQuality(state int) int {
 }
 
 func listBridgeMemberIndexes(bridgeIndex int) (map[int]struct{}, error) {
-	links, err := netlink.LinkList()
+	links, err := nlretry.LinkList()
 	if err != nil {
 		return nil, err
 	}

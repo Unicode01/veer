@@ -94,6 +94,11 @@ const (
 	kernelUserspaceWarmupPoll             = 100 * time.Millisecond
 	managedNetworkReloadDebounce          = 1 * time.Second
 	managedNetworkDriftCheckEvery         = 10 * time.Second
+	// While the netlink monitor follows links and addresses, the drift check
+	// runs after a change it saw and otherwise only as a safety net at this
+	// interval. The attachment check keeps kernelAttachmentCheckEvery: a tcx
+	// link or clsact qdisc removed by hand sends no link event.
+	managedNetworkDriftSafetyEvery        = 5 * time.Minute
 	managedNetworkSelfEventSuppressFor    = 2 * time.Second
 	managedNetworkLinkChangeSuppressFor   = 10 * time.Second
 	managedNetworkReloadRetryMin          = 5 * time.Second
@@ -259,13 +264,23 @@ type ProcessManager struct {
 	dynamicEgressNATParents                        map[string]struct{}
 	managedRuntimeReloadAppliedFingerprint         string
 	managedRuntimeDriftCheckAt                     time.Time
+	// managedRuntimeDriftDirty is set by changes that can move the managed
+	// network fingerprint; netlinkInventoryWatched while the netlink monitor
+	// holds both its link and address subscriptions.
+	managedRuntimeDriftDirty atomic.Bool
+	netlinkInventoryWatched  atomic.Bool
 	pluginCatalogUpdateMu                          sync.Mutex
 	pluginCatalogScanCache                         pluginCatalogFingerprintCache // pluginCatalogUpdateMu
 	pluginCatalogComparedApplied                   string                        // pluginCatalogUpdateMu
 	pluginCatalogScanRunning                       bool                          // mu
+	pluginCatalogWatch                             *pluginCatalogWatcher         // mu
+	pluginCatalogWatchOpenAt                       time.Time                     // mu
+	pluginCatalogScanMode                          pluginCatalogScanMode         // mu
+	pluginCatalogCache                             pluginCatalogCache
 	pluginPackageMu                                sync.Mutex
 	dataplaneReconcileMu                           sync.Mutex
 	pluginReconcileMu                              sync.Mutex
+	pluginMutationGate                             pluginMutationGate
 	pluginProbationCheckAt                         time.Time
 	pluginReconcileLastError                       string
 	pluginReconcileRetryCount                      int
@@ -616,7 +631,7 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 	}
 	pm.initializePluginCatalogSnapshot()
 	pm.pluginControlRuntime = newPluginControlRuntime(db, cfg, pm)
-	if control, ok := pm.pluginControlRuntime.(*gojaPluginControlRuntime); ok {
+	if control, ok := pm.pluginControlRuntime.(*pluginControlManager); ok {
 		secrets, err := control.requirePluginSecretStore()
 		if err != nil {
 			_ = pm.pluginControlRuntime.Close()
@@ -624,7 +639,10 @@ func newProcessManager(db *sql.DB, cfg *Config, binaryHash string) (*ProcessMana
 			_ = os.Remove(sockPath)
 			return nil, fmt.Errorf("initialize plugin secret store: %w", err)
 		}
-		catalog := loadPluginCatalogWithControlRegistrationAndState(pluginCatalogConfigForProcess(pm, cfg), db)
+		// Read through the cache, so the first reconcile does not scan again.
+		catalog, catalogCfg, _ := pm.pluginCatalogWithState(cfg)
+		applyPluginControlRegistrationSurfaces(&catalog, catalogCfg)
+		catalog = resolvePluginCatalogAfterRuntimeSurfaces(catalog)
 		if err := secrets.migratePluginSecrets(catalog); err != nil {
 			_ = pm.pluginControlRuntime.Close()
 			_ = ln.Close()
@@ -5019,6 +5037,7 @@ func scheduleKernelDegradedIdleRebuildCheck(lastCheckedAt, now time.Time, runtim
 
 func (pm *ProcessManager) monitorLoop() {
 	defer close(pm.monitorDone)
+	defer pm.closePluginCatalogWatch()
 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -5091,13 +5110,15 @@ func (pm *ProcessManager) monitorLoop() {
 			runKernelMaintenance = true
 			pm.kernelMaintenanceAt = now
 		}
+		netlinkWatched := pm.netlinkInventoryWatched.Load()
 		if pm.kernelRuntime != nil && (pm.kernelAttachmentCheckAt.IsZero() || now.Sub(pm.kernelAttachmentCheckAt) >= kernelAttachmentCheckEvery) {
 			checkKernelAttachments = true
 			pm.kernelAttachmentCheckAt = now
 		}
-		if pm.managedRuntimeDriftCheckAt.IsZero() || now.Sub(pm.managedRuntimeDriftCheckAt) >= managedNetworkDriftCheckEvery {
+		if managedRuntimeDriftCheckDue(pm.managedRuntimeDriftCheckAt, now, netlinkWatched, pm.managedRuntimeDriftDirty.Load()) {
 			checkManagedRuntimeDrift = true
 			pm.managedRuntimeDriftCheckAt = now
+			pm.managedRuntimeDriftDirty.Store(false)
 		}
 		if pm.shouldCheckPluginCatalogDriftLocked(now) {
 			checkPluginCatalogDrift = true
@@ -5391,18 +5412,25 @@ func (pm *ProcessManager) monitorLoop() {
 			log.Printf("kernel dataplane self-heal: %s; rebuilding kernel dataplane now", kernelDegradedIdleRebuildReason)
 			pm.requestRedistributeWorkers(0)
 		}
+		// Both passes yield to a plugin action or resource write made through
+		// the API (pluginMutationGate); the next attachment check repeats a
+		// deferred self-heal, a deferred retry comes back shortly.
 		if repairPluginDataplane {
-			if _, err := pm.reconcilePluginsForRuntimeWithError(); err != nil {
+			if ran, err := pm.reconcilePluginsInBackground(); err != nil {
 				log.Printf("plugin dataplane self-heal failed: %v", err)
-			} else {
+			} else if ran {
 				log.Printf("plugin dataplane self-heal: reconciled unhealthy attachments")
 			}
 		}
 		if retryPluginReconcile && !repairPluginDataplane {
-			if _, err := pm.reconcilePluginsForRuntimeWithError(); err != nil {
+			if ran, err := pm.reconcilePluginsInBackground(); err != nil {
 				log.Printf("plugin runtime retry failed: %v", err)
-			} else {
+			} else if ran {
 				log.Printf("plugin runtime retry: desired state applied")
+			} else {
+				pm.mu.Lock()
+				pm.pluginReconcileNextRetryAt = time.Now().Add(redistributeRetryDelay)
+				pm.mu.Unlock()
 			}
 		}
 		if checkManagedRuntimeDrift {

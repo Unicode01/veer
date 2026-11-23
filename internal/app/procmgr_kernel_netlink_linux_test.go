@@ -98,11 +98,12 @@ func TestPluginNetlinkMonitorDeliversAuthorizedRouteEvent(t *testing.T) {
 }`, name))
 	writePluginControlScript(t, dir, "route_events", `
 events.subscribe({id:'routes',topic:'net.route',worker:'routes'});
-exports.onEvent = function (ctx) { kv.set('last_route', ctx.event.payload); };
+// The monitor's resync on (re)subscribing is not the route under test.
+exports.onEvent = function (ctx) { if (ctx.event.payload.operation !== 'resync') kv.set('last_route', ctx.event.payload); };
 `)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	snapshot := rt.Reconcile(loadPluginCatalogWithControlRegistrationAndState(cfg, db))
 	if state, ok := snapshot.Plugins["route_events"]; !ok || state.Error != "" {

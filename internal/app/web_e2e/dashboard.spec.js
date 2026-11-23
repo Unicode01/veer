@@ -160,7 +160,35 @@ const pluginCatalog = {
   ]
 };
 
+function signedInView(name, realm) {
+  return {
+    authenticated: true,
+    identity: { realm, user: realm === 'system' ? name.split('@')[0] : '', name, via: 'session' },
+    csrf_token: 'e2e-csrf',
+    session: { issued_at: '2026-11-20T08:00:00Z', expires_at: '2026-11-20T20:00:00Z', idle_timeout_seconds: 1800 },
+    methods: {
+      realms: ['system', 'token'],
+      system: { enabled: true, available: true, default_user: 'root' },
+      token: { enabled: true, available: true }
+    },
+    transport: { secure: true, loopback: false }
+  };
+}
+
+function signedOutView(overrides) {
+  return Object.assign({
+    authenticated: false,
+    methods: {
+      realms: ['system', 'token'],
+      system: { enabled: true, available: true, default_user: 'root' },
+      token: { enabled: true, available: true }
+    },
+    transport: { secure: true, loopback: false }
+  }, overrides || {});
+}
+
 const apiFixtures = new Map([
+  ['/api/auth/session', signedInView('root@system', 'system')],
   ['/api/tags', []],
   ['/api/interfaces', []],
   ['/api/host-network', { interfaces: [], host: { name: 'pve-node-03', os: 'linux', arch: 'amd64', kernel_release: '6.8.12-pve', uptime_seconds: 3564000 } }],
@@ -191,20 +219,22 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   const profile = {slot:2, addresses:['10.77.0.1/32'], peers:[{public_key:Buffer.alloc(32,2).toString('base64'), allowed_ips:['0.0.0.0/0']}],
     remote_routes:[]};
   const records = {saved:{key:'saved', data:profile, enabled:true}};
+  let savedApplied=true;
   const actions = [];
   const coreConfigs = {};
   const methods = ['list','get','create','update'];
   const coreActions = ['core_status','core_install','core_select','core_rollback','core_remove'];
   const healthActions=['health_status','health_settings','health_check'], healthRequests=[], healthValues={};
-  const healthDefaults=require('../../../plugins/vpn_core/health-check').settings();
+  // What settings() in plugins/vpn_core/src/health.rs returns for a WAN with none.
+  const healthDefaults={enabled:false,url:'https://www.gstatic.com/generate_204',resolver_ip:'1.1.1.1',interval_seconds:60,timeout_ms:5000,expected_status:204};
   let healthFailure=false, healthPolls=0;
   const cores = {id:'mihomo', directory:'/opt/veer/plugins.veer-state/cores/vpn_core/mihomo/linux-amd64', versions:[]};
   let installationPolls=0;
   const plugin = {id:'vpn_core', name:'VPN WAN', kind:'pipeline', stability:'lab', version:'0.6.1', status:'active', enabled:true,
     resources:[{id:'profiles', methods}, {id:'status', methods:['list','get']}],
-    actions:['set_key','set_core_config','core_form','apply','teardown','delete_profile','inspect','core_logs',...coreActions,...healthActions].map(id => ({id})),
+    actions:['set_key','set_core_config','core_form','apply','teardown','delete_profile','inspect','upstream_interfaces','core_logs',...coreActions,...healthActions].map(id => ({id})),
     ui:{entry:'index.html', page:'vpn', page_title:'VPN', resources:[{resource:'profiles', methods}, {resource:'status', methods:['list']}],
-      actions:['set_key','set_core_config','core_form','apply','teardown','delete_profile','inspect','core_logs',...coreActions,...healthActions]}, asset_base_path:'/api/plugins/vpn_core/assets/', runtime:{mode:'control'}};
+      actions:['set_key','set_core_config','core_form','apply','teardown','delete_profile','inspect','upstream_interfaces','core_logs',...coreActions,...healthActions]}, asset_base_path:'/api/plugins/vpn_core/assets/', runtime:{mode:'control'}};
   await page.route('**/api/plugins', route => route.fulfill({json:{...pluginCatalog, plugins:[...pluginCatalog.plugins, plugin]}}));
   await page.route('**/api/plugins/vpn_core/**', async route => {
     const url = new URL(route.request().url());
@@ -214,7 +244,9 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
       if (!['index.html','app.js','i18n.js','model.js','share.js','style.css'].includes(asset)) return route.fulfill({status:404});
       return route.fulfill({contentType:asset.endsWith('.css')?'text/css':asset.endsWith('.js')?'application/javascript':'text/html; charset=utf-8', body:fs.readFileSync(path.resolve(__dirname, '../../../plugins/vpn_core/ui',asset), 'utf8')});
     }
-    if (endpoint === 'resources/status') return route.fulfill({json:{records:[]}});
+    // The saved outlet is applied: its card shows runtime facts and offers a health check.
+    if (endpoint === 'resources/status') return route.fulfill({json:{records:records.saved && savedApplied?[{key:'saved', data:{phase:'applied', interface:'vwgsaved',
+      local_interface:'veerwg2', wan_id:'wg_saved', handoff_mode:'segmented_veth', dataplane:'bpf', boundary_gso:true, profile_revision:1}}]:[]}});
     if (endpoint === 'resources/profiles' && route.request().method() === 'GET') return route.fulfill({json:{records:Object.values(records)}});
     if (endpoint.startsWith('resources/profiles/')) {
       const key = endpoint.split('/').pop();
@@ -225,6 +257,13 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
       const id=endpoint.split('/').pop();
       const payload=route.request().postDataJSON().payload;
       if(id==='delete_profile') {actions.push({id,payload});delete records[payload.key];delete healthValues[payload.key];return route.fulfill({json:{result:{phase:'deleted'}}});}
+      // Uplink suggestions and runtime facts are read-only: they do not count as page actions.
+      if(id==='upstream_interfaces') return route.fulfill({json:{result:{items:[{name:'vmbr0',kind:'bridge',up:true,addresses:['192.168.10.1/24']},
+        {name:'ppp0',kind:'ppp',up:true,addresses:['192.0.2.9/32','2001:db8::9/128']},
+        {name:'veerwg2',kind:'vpn',up:true,addresses:['10.77.0.1/32'],exit:'saved',driver:'wireguard'}]}}});
+      if(id==='inspect') return route.fulfill({json:{result:payload.key==='saved'?{phase:'configured', driver:'wireguard', interface:'vwgsaved', local_interface:'veerwg2',
+        wan_id:'wg_saved', handoff_mode:'segmented_veth', dataplane:'bpf', boundary_gso:true, traffic:{rx_bytes:3221225472, tx_bytes:1048576, rx_packets:1, tx_packets:1},
+        public_key:profile.peers[0].public_key, peers:[{public_key:profile.peers[0].public_key, endpoint:'192.0.2.7:51820', latest_handshake:Math.floor(Date.now()/1000)-30, rx_bytes:3221225472, tx_bytes:1048576}]}:{phase:'down'}}});
       if(healthActions.includes(id)) {
         Object.keys(records).forEach(key=>{healthValues[key] ||= {key,settings:{...healthDefaults},state:'unknown',result:null};});
         if(id==='health_status') {
@@ -244,7 +283,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
         actions.push({id,...route.request().postDataJSON()});
         const name=payload.name || 'core_'+payload.key;
         if(payload.format==='links') {
-          coreConfigs[name]=vpnShares.create(payload.driver,payload.value||coreConfigs[name]?.links,payload.selected,payload.options);
+          coreConfigs[name]=vpnShares.create(payload.driver,payload.value||coreConfigs[name]?.links,payload.selected,payload.options,payload.via);
           return route.fulfill({json:{result:{stored:true,form:vpnShares.metadata(coreConfigs[name])}}});
         }
         coreConfigs[name]=JSON.parse(payload.value);
@@ -277,6 +316,20 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expect(page.locator('#tab-plugin-vpn h1')).toHaveText('VPN');
   await expect(frame.locator('h1')).toHaveCount(0);
   await expect(frame.locator('.vpn-outlet')).toHaveCount(1);
+  // One applied outlet: the KPI strip counts it ready.
+  await expect(frame.locator('.vpn-kpis')).toContainText('1 / 1');
+  // The card reads runtime facts, not just the saved draft.
+  await expect(frame.locator('.vpn-outlet')).toContainText('发送 1.0 MiB · 接收 3.0 GiB');
+  await expect(frame.locator('.vpn-outlet')).toContainText(/\d+秒钟前/);
+  await frame.getByRole('button',{name:'详情',exact:true}).click();
+  await expect(frame.locator('.vpn-details')).toContainText('192.0.2.7:51820');
+  await expect(frame.locator('.vpn-details pre')).toBeHidden();
+  await frame.getByRole('button',{name:'收起详情',exact:true}).click();
+  // Teardown and delete wait behind More.
+  await expect(frame.getByRole('button',{name:'拆除',exact:true})).toBeHidden();
+  await frame.getByRole('button',{name:'更多',exact:true}).click();
+  await expect(frame.getByRole('button',{name:'拆除',exact:true})).toBeVisible();
+  await frame.getByRole('button',{name:'更多',exact:true}).click();
   await page.evaluate(() => window.VeerApp.setTheme('dark'));
   await expect(frame.locator('html')).toHaveAttribute('data-theme', 'dark');
   await expect(frame.locator('.vpn-health')).toHaveCount(0);
@@ -296,6 +349,8 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expectReadableThemes(page, frame.locator('body'));
   await page.screenshot({path:testInfo.outputPath('vpn-health.png'),fullPage:true});
   await expect(frame.getByLabel('代理核心 JSON 配置')).toHaveCount(0);
+  // From here on the outlet is torn down, so the editor may switch its type.
+  savedApplied=false;
   await frame.getByRole('button', {name:'编辑', exact:true}).click();
   await expect(frame.getByLabel('本机 WireGuard 地址', {exact:true})).toHaveValue('10.77.0.1/32');
   await expect(frame.getByLabel('实际出站接口', {exact:true})).toHaveCount(0);
@@ -314,6 +369,11 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expect(frame.getByLabel('内部 WAN 地址', {exact:true})).toBeHidden();
   await expect(frame.getByLabel('节点分享链接或 Base64')).toBeVisible();
   await expect(frame.getByLabel('Mihomo 配置（JSON）', {exact:true})).toBeHidden();
+  // The uplink field suggests the host's interfaces but still accepts any name.
+  // The applied exits are offered too, but never the exit being edited.
+  await expect(frame.getByLabel('实际出站接口', {exact:true})).toHaveAttribute('list','vpn-upstreams');
+  await expect(frame.locator('#vpn-upstreams option')).toHaveCount(2);
+  await expect(frame.locator('#vpn-upstreams option').first()).toHaveAttribute('label','vmbr0 · 192.168.10.1/24 · 已启用');
   await frame.getByLabel('实际出站接口', {exact:true}).fill('vmbr0');
   await frame.getByText('分流与高级配置',{exact:true}).click();
   await frame.getByLabel('核心配置方式').selectOption('native');
@@ -377,7 +437,13 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expect(frame.getByLabel('本机 WireGuard 地址',{exact:true})).toHaveCount(0);
   await expect(frame.getByLabel('内部 WAN 地址',{exact:true})).toBeHidden();
   await expect(frame.getByLabel('Mihomo 配置（JSON）',{exact:true})).toHaveCount(0);
+  // Another applied exit is offered last: picking it chains this exit behind it.
+  await expect(frame.locator('#vpn-upstreams option')).toHaveCount(3);
+  await expect(frame.locator('#vpn-upstreams option').last()).toHaveAttribute('label','veerwg2 · VPN 出口 saved · 10.77.0.1/32 · 已启用');
   await frame.getByLabel('实际出站接口',{exact:true}).fill('ppp0');
+  // The outbound IP suggestions follow the chosen uplink, without prefixes.
+  await expect(frame.locator('#vpn-upstream-ips option')).toHaveCount(2);
+  await expect(frame.locator('#vpn-upstream-ips option').first()).toHaveAttribute('value','192.0.2.9');
   await expect(frame.getByLabel('出站 IP',{exact:true})).toHaveValue('');
   const interfaceBox=await frame.getByLabel('实际出站接口',{exact:true}).boundingBox(), ipBox=await frame.getByLabel('出站 IP',{exact:true}).boundingBox();
   if(testInfo.project.name.startsWith('desktop')) expect(Math.abs(interfaceBox.y-ipBox.y)).toBeLessThan(2);
@@ -397,6 +463,14 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await frame.getByRole('button',{name:'识别节点',exact:true}).click();
   await expect(frame.getByLabel('使用节点').locator('option')).toHaveCount(2);
   await frame.getByLabel('使用节点').selectOption('1');
+  // A proxy chain: the selected node is reached through a front node dialed from the uplink.
+  const firstHop=frame.getByLabel('链式代理：第一跳',{exact:true}), secondHop=frame.getByLabel('链式代理：第二跳',{exact:true});
+  await expect(firstHop).toHaveValue('');
+  await expect(firstHop.locator('option[value="1"]')).toHaveJSProperty('disabled',true);
+  await firstHop.selectOption('0');
+  await expect(frame.locator('.vpn-via-path')).toHaveText('连接顺序：ppp0 → first → second → 目标');
+  // Two nodes leave no candidate for a second hop.
+  await expect(secondHop).toBeHidden();
   await frame.getByText('分流与高级配置',{exact:true}).click();
   await frame.getByLabel('直连网段').fill('10.0.0.0/8');
   await frame.getByLabel('直连域名').fill('example.com');
@@ -407,6 +481,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   expect(records.vpn1.data.upstream_ip).toBe('192.0.2.9');
   expect(records.vpn1.data.config_secret).toBe('core_sing_box_vpn1');
   expect(actions.at(-1).payload.format).toBe('links');expect(actions.at(-1).payload.selected).toBe(1);
+  expect(actions.at(-1).payload.via).toEqual([0]);expect(coreConfigs.core_sing_box_vpn1.via).toEqual([0]);
   expect(actions.at(-1).payload.options.direct_cidrs).toEqual(['10.0.0.0/8']);
   expect(actions.at(-1).payload.options.dns_hijack).toBe(true);
   await expect(frame.getByLabel('节点分享链接或 Base64')).toHaveValue('');
@@ -419,14 +494,18 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await frame.getByRole('button',{name:'收起编辑',exact:true}).click();
   await frame.locator('.vpn-outlet').filter({has:frame.getByRole('heading',{name:'vpn1',exact:true})}).getByRole('button',{name:'编辑',exact:true}).click();
   await expect(frame.getByLabel('使用节点')).toHaveValue('1');
+  await expect(frame.getByLabel('链式代理：第一跳',{exact:true})).toHaveValue('0');
   await expect(frame.getByLabel('出站 IP',{exact:true})).toHaveValue('192.0.2.9');
   await expect(frame.getByLabel('直连网段')).toBeHidden();
   await frame.getByText('分流与高级配置',{exact:true}).click();
   await expect(frame.getByLabel('直连网段')).toHaveValue('10.0.0.0/8');
+  // Selecting the front node itself drops it from the chain.
   await frame.getByLabel('使用节点').selectOption('0');
+  await expect(frame.getByLabel('链式代理：第一跳',{exact:true})).toHaveValue('');
+  await expect(frame.locator('.vpn-via-path')).toContainText('第一跳直接从实际出站接口连接');
   await frame.getByRole('button',{name:'保存草稿',exact:true}).click();
   await expect.poll(()=>coreConfigs.core_sing_box_vpn1.selected).toBe(0);
-  expect(actions.at(-1).payload.value).toBe('');
+  expect(actions.at(-1).payload.value).toBe('');expect(actions.at(-1).payload.via).toEqual([]);
   await frame.getByText('高级设置与 JSON',{exact:true}).click();
   await frame.getByRole('button',{name:'读取当前表单 JSON',exact:true}).click();
   const rawProfile=JSON.parse(await frame.getByLabel('VPN 出口 JSON').inputValue());rawProfile.mtu=1400;
@@ -456,6 +535,7 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expectReadableThemes(page, frame.locator('body'));
   await page.screenshot({path:testInfo.outputPath('vpn-external-tun-form.png'),fullPage:true});
   const card=frame.locator('.vpn-outlet').filter({has:frame.getByRole('heading',{name:'vpn1',exact:true})});
+  await card.getByRole('button',{name:'更多',exact:true}).click();
   await card.getByRole('button',{name:'删除',exact:true}).click();
   await expect(page.locator('#confirmMessage')).toContainText('共用的核心程序会保留');
   await page.locator('#confirmCancelBtn').click();
@@ -465,6 +545,14 @@ test('VPN WAN saves drafts and encrypted core configurations through the real UI
   await expect.poll(()=>records.vpn1).toBeUndefined();
   await expect(card).toHaveCount(0);await expect(frame.locator('.vpn-editor')).toBeHidden();
   expect(actions.at(-1)).toEqual({id:'delete_profile',payload:{key:'vpn1'}});
+  // A proxy exit chained behind another applied exit names that exit on its card.
+  savedApplied=true;
+  records.chain={key:'chain',revision:1,data:{driver:'sing_box',slot:3,mtu:1420,upstream_interface:'veerwg2',config_secret:'core_sing_box_chain'},enabled:true};
+  await page.locator('#tab-plugin-vpn .plugin-header-actions').getByRole('button',{name:'刷新出口',exact:true}).click();
+  const chained=frame.locator('.vpn-outlet').filter({has:frame.getByRole('heading',{name:'chain',exact:true})});
+  await expect(chained).toContainText('veerwg2 · 经出口 saved');
+  await expectReadableThemes(page, frame.locator('body'));
+  await page.screenshot({path:testInfo.outputPath('vpn-chained-card.png'),fullPage:true});
 });
 
 
@@ -585,7 +673,6 @@ async function installDashboardFixtures(page, locale) {
 
   await page.addInitScript((selectedLocale) => {
     if (window !== window.top) return;
-    localStorage.setItem('veer_token', 'e2e-token');
     localStorage.setItem('veer_locale', selectedLocale);
     localStorage.setItem('veer_theme', 'light');
   }, locale);
@@ -797,12 +884,10 @@ test('Patchbay preserves every resource editor and isolates network leases and d
 });
 
 test('bundled plugin pages share host actions and themes at desktop and 375px', async ({ page }, testInfo) => {
-  const vm = require('node:vm');
   const plugins = ['router_wizard', 'wan_core', 'lan_core', 'pppoe_client', 'vtolocal', 'packet_observer'].map((id) => {
     const root = path.resolve(__dirname, '../../../plugins', id);
     const manifest = JSON.parse(fs.readFileSync(path.join(root, 'plugin.json'), 'utf8'));
-    const source = fs.readFileSync(path.join(root, 'control.js'), 'utf8');
-    const ui = vm.runInNewContext('(' + source.match(/ui\.register\((\{[\s\S]*?\})\);/)[1] + ')', { crypto: { sha256File: () => '' } });
+    const ui = manifest.control.register.ui;
     return { ...manifest, status: 'active', enabled: true, ui, resources: ui.resources.map((entry) => ({ id: entry.resource, methods: entry.methods })), actions: ui.actions.map((id) => ({ id })), control: { ...manifest.control, resource_access: ui.resource_access }, asset_base_path: '/api/plugins/' + id + '/assets/', runtime: { mode: 'control' } };
   });
   await openDashboard(page, testInfo);
@@ -1249,4 +1334,338 @@ test('confirmation dialog stays above plugin management', async ({ page }, testI
   expect(layers.confirm).toBeGreaterThan(layers.manager);
   await page.locator('#confirmCancelBtn').click();
   await expect(confirm).toBeHidden();
+});
+
+// A rejected sign-in or an ended session is a 401 the browser logs by itself.
+function allowUnauthorizedResponses(page) {
+  browserErrors.set(page, (browserErrors.get(page) || []).filter((entry) => !/Failed to load resource: the server responded with a status of 401/.test(entry)));
+}
+
+async function openSignIn(page, testInfo, options) {
+  const opts = options || {};
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const locale = testInfo.project.name.startsWith('mobile') ? 'en-US' : 'zh-CN';
+  await installDashboardFixtures(page, locale);
+  if (opts.storage) {
+    await page.addInitScript((entries) => {
+      if (window !== window.top) return;
+      Object.entries(entries).forEach(([key, value]) => localStorage.setItem(key, value));
+    }, opts.storage);
+  }
+  const state = { signedIn: null, logins: [], logouts: [] };
+  await page.route('**/api/auth/session', (route) => route.fulfill({ json: state.signedIn || opts.signedOut || signedOutView() }));
+  await page.route('**/api/auth/login', async (route) => {
+    const body = route.request().postDataJSON();
+    state.logins.push(body);
+    const accepted = body.realm === 'system'
+      ? body.username === 'root' && body.password === 'correct horse'
+      : body.token === 'e2e-web-token' || body.token === 'legacy-e2e-token';
+    if (!accepted) {
+      await route.fulfill({ status: 401, json: { code: 'invalid_credentials', error: 'invalid credentials' } });
+      return;
+    }
+    state.signedIn = body.realm === 'system' ? signedInView('root@system', 'system') : signedInView('token', 'token');
+    await route.fulfill({ json: state.signedIn });
+  });
+  await page.route('**/api/auth/logout', async (route) => {
+    state.logouts.push(route.request().headers());
+    state.signedIn = null;
+    await route.fulfill({ json: { ok: true } });
+  });
+  await page.goto('/');
+  return state;
+}
+
+async function signInScreenshots(page, testInfo, name) {
+  const widths = testInfo.project.name.startsWith('mobile') ? [390] : [1440, 390];
+  const original = page.viewportSize();
+  for (const width of widths) {
+    await page.setViewportSize({ width, height: width < 600 ? 844 : 1000 });
+    for (const theme of ['light', 'dark']) {
+      await page.evaluate((value) => window.VeerApp.setTheme(value), theme);
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      expect(await contrastIssues(page.locator('#tokenModal')), name + ' ' + width + ' ' + theme).toEqual([]);
+      if (theme === 'dark') expect(await brightDarkSurfaces(page.locator('#tokenModal'))).toEqual([]);
+      await expectNoPageOverflow(page);
+      await page.screenshot({ path: testInfo.outputPath(name + '-' + width + '-' + theme + '.png') });
+    }
+  }
+  await page.setViewportSize(original);
+  await page.evaluate(() => window.VeerApp.setTheme('light'));
+}
+
+test('sign-in form switches methods and signs in with a system account', async ({ page }, testInfo) => {
+  const state = await openSignIn(page, testInfo);
+  const modal = page.locator('#tokenModal');
+  await expect(modal).toBeVisible();
+  await expect(page.locator('#app')).toBeHidden();
+  await expect(page.locator('#loginRealmSystem')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#loginUsername')).toHaveValue('root');
+  await expect(page.locator('#loginPassword')).toBeFocused();
+  await expect(page.locator('#loginRealmNote')).toBeHidden();
+  await signInScreenshots(page, testInfo, 'signin-system');
+
+  await page.locator('#loginRealmToken').click();
+  await expect(page.locator('#tokenInput')).toBeFocused();
+  await expect(page.locator('#loginPassword')).toBeHidden();
+  await expect(page.locator('#loginNotice')).toBeHidden();
+  await page.locator('#loginRealmToken').focus();
+  await page.keyboard.press('ArrowLeft');
+  await expect(page.locator('#loginRealmSystem')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#loginRealmSystem')).toBeFocused();
+  await expect(page.locator('#loginPassword')).toBeVisible();
+
+  await page.locator('#loginPassword').fill('wrong');
+  await page.locator('#loginPassword').press('Enter');
+  const invalid = await page.evaluate(() => window.VeerApp.t('auth.error.invalid'));
+  await expect(page.locator('#loginError')).toHaveText(invalid);
+  await expect(page.locator('#loginPassword')).toHaveValue('');
+  expect(await contrastIssues(modal)).toEqual([]);
+
+  await page.locator('#loginPassword').fill('correct horse');
+  await page.locator('#tokenSubmit').click();
+  await expect(page.locator('#app')).toBeVisible();
+  await expect(modal).toBeHidden();
+  await expect(page.locator('#masterVersion')).toHaveText('01234567');
+  expect(state.logins.at(-1)).toEqual({ realm: 'system', username: 'root', password: 'correct horse' });
+  if (page.viewportSize().width < 860) await page.locator('#sidebarToggle').click();
+  await expect(page.locator('#sessionIdentityName')).toHaveText('root');
+  await expect(page.locator('#sessionAvatar')).toHaveAttribute('data-initial', 'R');
+  await expect(page.locator('#sessionIdentity')).toHaveAttribute('title', /root@system/);
+  await page.screenshot({ path: testInfo.outputPath('signed-in-sidebar.png') });
+  expect(await page.evaluate(() => Object.keys(localStorage).filter((key) => /token/i.test(key)))).toEqual([]);
+  allowUnauthorizedResponses(page);
+});
+
+test('token sign-in warns about plain HTTP and says why system accounts are unavailable', async ({ page }, testInfo) => {
+  const state = await openSignIn(page, testInfo, {
+    signedOut: signedOutView({
+      methods: {
+        realms: ['system', 'token'],
+        system: { enabled: true, available: false, reason: 'insecure_channel', default_user: 'root' },
+        token: { enabled: true, available: true }
+      },
+      transport: { secure: false, loopback: false }
+    })
+  });
+  await expect(page.locator('#tokenModal')).toBeVisible();
+  await expect(page.locator('#loginRealmSystem')).toBeDisabled();
+  await expect(page.locator('#loginRealmToken')).toHaveAttribute('aria-pressed', 'true');
+  const reason = await page.evaluate(() => window.VeerApp.t('auth.systemUnavailable.insecure_channel'));
+  await expect(page.locator('#loginRealmNote')).toHaveText(reason);
+  const plaintext = await page.evaluate(() => window.VeerApp.t('auth.plaintextWarning'));
+  await expect(page.locator('#loginNotice')).toHaveText(plaintext);
+  await expect(page.locator('#tokenInput')).toBeFocused();
+  await signInScreenshots(page, testInfo, 'signin-token-plain-http');
+
+  await page.locator('#tokenInput').fill('e2e-web-token');
+  await page.locator('#tokenInput').press('Enter');
+  await expect(page.locator('#app')).toBeVisible();
+  expect(state.logins).toEqual([{ realm: 'token', token: 'e2e-web-token' }]);
+  if (page.viewportSize().width < 860) await page.locator('#sidebarToggle').click();
+  const tokenName = await page.evaluate(() => window.VeerApp.t('auth.realm.token'));
+  await expect(page.locator('#sessionIdentityName')).toHaveText(tokenName);
+  await expect(page.locator('#sessionIdentityRealm')).toHaveText('web_token');
+});
+
+test('with only token sign-in turned on the form shows no method switch', async ({ page }, testInfo) => {
+  await openSignIn(page, testInfo, {
+    signedOut: signedOutView({
+      methods: {
+        realms: ['token'],
+        system: { enabled: false, available: false, reason: 'disabled', default_user: 'root' },
+        token: { enabled: true, available: true }
+      },
+      transport: { secure: false, loopback: false }
+    })
+  });
+  await expect(page.locator('#tokenModal')).toBeVisible();
+  await expect(page.locator('#loginRealmSwitch')).toBeHidden();
+  await expect(page.locator('#loginRealmNote')).toBeHidden();
+  await expect(page.locator('#loginTokenFields')).toBeVisible();
+  await expect(page.locator('#loginNotice')).toBeVisible();
+  await expect(page.locator('#tokenInput')).toBeFocused();
+  await signInScreenshots(page, testInfo, 'signin-token-only');
+
+  await page.locator('#tokenInput').fill('e2e-web-token');
+  await page.locator('#tokenInput').press('Enter');
+  await expect(page.locator('#app')).toBeVisible();
+  if (page.viewportSize().width < 860) await page.locator('#sidebarToggle').click();
+  await expect(page.locator('.sidebar-account')).toBeInViewport();
+  await expect(page.locator('#logoutBtn')).toBeInViewport();
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate((value) => window.VeerApp.setTheme(value), theme);
+    await page.locator('.sidebar-settings').screenshot({ path: testInfo.outputPath('sidebar-account-token-' + theme + '.png') });
+  }
+  await page.evaluate(() => window.VeerApp.setTheme('light'));
+});
+
+test('a token saved by the previous panel becomes a session and leaves the browser', async ({ page }, testInfo) => {
+  const state = await openSignIn(page, testInfo, { storage: { veer_token: 'legacy-e2e-token', forward_token: 'legacy-e2e-token' } });
+  await expect(page.locator('#app')).toBeVisible();
+  await expect(page.locator('#tokenModal')).toBeHidden();
+  expect(state.logins).toEqual([{ realm: 'token', token: 'legacy-e2e-token' }]);
+  expect(await page.evaluate(() => [localStorage.getItem('veer_token'), localStorage.getItem('forward_token')])).toEqual([null, null]);
+});
+
+test('signing out and an expired session return to the sign-in form', async ({ page }, testInfo) => {
+  const state = await openSignIn(page, testInfo);
+  await page.locator('#loginPassword').fill('correct horse');
+  await page.locator('#loginPassword').press('Enter');
+  await expect(page.locator('#app')).toBeVisible();
+
+  if (page.viewportSize().width < 860) await page.locator('#sidebarToggle').click();
+  await page.locator('#logoutBtn').click();
+  await expect(page.locator('#confirmModal')).toBeVisible();
+  await page.locator('#confirmSubmitBtn').click();
+  await expect(page.locator('#tokenModal')).toBeVisible();
+  await expect(page.locator('#app')).toBeHidden();
+  expect(state.logouts).toHaveLength(1);
+  expect(state.logouts[0]['x-veer-csrf']).toBe('e2e-csrf');
+  const signedOut = await page.evaluate(() => window.VeerApp.t('toast.loggedOut'));
+  await expect(page.locator('#loginStatus')).toHaveText(signedOut);
+
+  await page.locator('#loginPassword').fill('correct horse');
+  await page.locator('#loginPassword').press('Enter');
+  await expect(page.locator('#app')).toBeVisible();
+  await page.route('**/api/rules', (route) => route.fulfill({ status: 401, headers: { 'X-Veer-Auth-Reason': 'session_idle' }, body: 'unauthorized' }));
+  state.signedIn = null;
+  await page.evaluate(() => window.VeerApp.runAutoRefresh());
+  await expect(page.locator('#tokenModal')).toBeVisible();
+  const idle = await page.evaluate(() => window.VeerApp.t('auth.sessionEnded.session_idle'));
+  await expect(page.locator('#loginStatus')).toHaveText(idle);
+  await expect(page.locator('#loginPassword')).toBeFocused();
+  allowUnauthorizedResponses(page);
+});
+
+test('firewall page edits ICMP and catch-all policies, sets and connection tracking through the real UI', async ({ page }, testInfo) => {
+  test.setTimeout(60000);
+  await openDashboard(page, testInfo);
+  await page.evaluate(() => window.VeerApp.setLocale('zh-CN'));
+  const root = path.resolve(__dirname, '../../../plugins/firewall');
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'plugin.json'), 'utf8'));
+  const ui = manifest.control.register.ui;
+  const plugin = { ...manifest, status: 'active', enabled: true, ui, resources: ui.resources.map((entry) => ({ id: entry.resource, methods: entry.methods })),
+    actions: ui.actions.map((id) => ({ id })), asset_base_path: '/api/plugins/firewall/assets/', runtime: { mode: 'dataplane' } };
+  const resources = {
+    policies: {
+      all: { key: 'all', enabled: true, data: { name: 'inbound', protocol: 'any', default_action: 'drop' } },
+      ping: { key: 'ping', enabled: true, data: { name: 'ping', protocol: 'icmp', icmp_types: ['echo-request'], default_action: 'drop', sources: [{ set: 'office', action: 'allow' }] } },
+      ssh: { key: 'ssh', enabled: true, data: { name: 'SSH', protocol: 'tcp', ports: ['22'], default_action: 'drop', tcp_new_only: true, sources: [{ cidr: '192.0.2.0/24', action: 'allow' }] } },
+    },
+    sets: {
+      deny: { key: 'deny', enabled: true, data: { elements: [] } },
+      office: { key: 'office', enabled: true, data: { elements: ['203.0.113.0/24', '2001:db8::/32'] } },
+    },
+    settings: {
+      default: { key: 'default', enabled: true, data: { interfaces: ['eth0'], connection_tracking: true, blocklists: ['deny'], baseline: { bogon_sources: 'reserved', urpf: 'loose' } } },
+    },
+  };
+  const counters = (pass, drop) => ({ pass, drop, trusted: 0, banned: 0, rate_limited: 0 });
+  const status = {
+    generation: 1, loaded: true, pending: null, draft_changed: false, last_error: '', interfaces: ['eth0'],
+    policies: [{ key: 'all', counters: counters(0, 1200) }, { key: 'ping', counters: counters(3, 9) }, { key: 'ssh', counters: counters(40, 7) }],
+    sets: [{ key: 'deny', id: 2 }, { key: 'office', id: 1 }],
+    global: { established: 98321, related: 4, essential: 17, blocklist: 55, bogon: 3, urpf: 1, tcp_flags: 2, fragment: 0, ct_new: 812, ct_full: 0, ct_short: 0, set_add: 0, set_full: 0 },
+    connection_tracking: { available: true, enabled: true },
+    attachments: { error: '', reason: '', interfaces: [{ interface: 'eth0', attached: true, mode: 'driver', error: '', egress: true }] },
+    drop_log: { logged: 2, lost: 0 },
+  };
+  const events = [
+    { at_ms: Date.now() - 5000, reason: 'blocklist', interface: 'eth0', source: '198.51.100.7', source_port: 0, protocol: 'icmp', icmp_type: 8, icmp_code: 0, destination: '192.0.2.1', port: 0, set: 'deny' },
+    { at_ms: Date.now() - 9000, reason: 'acl', interface: 'eth0', source: '203.0.113.9', source_port: 40000, protocol: 'tcp', destination: '192.0.2.1', port: 22, policy: 'ssh', policy_name: 'SSH' },
+  ];
+  const writes = [];
+  const actions = [];
+  // The catalog fixture's nf_counter page is also called firewall.
+  const others = pluginCatalog.plugins.filter((item) => !(item.ui && item.ui.page === 'firewall'));
+  await page.route('**/api/plugins', (route) => route.fulfill({ json: { ...pluginCatalog, plugins: [...others, plugin] } }));
+  await page.route('**/api/plugins/firewall/**', (route) => {
+    const url = new URL(route.request().url());
+    const endpoint = url.pathname.split('/firewall/')[1];
+    const method = route.request().method();
+    if (endpoint.startsWith('assets/')) {
+      return route.fulfill({ contentType: 'text/html; charset=utf-8', body: fs.readFileSync(path.join(root, 'ui', endpoint.slice('assets/'.length)), 'utf8') });
+    }
+    const resource = /^resources\/([a-z_]+)(?:\/([^/]+))?$/.exec(endpoint);
+    if (resource) {
+      const [, id, key] = resource;
+      if (method === 'GET' && !key) return route.fulfill({ json: { records: Object.values(resources[id] || {}) } });
+      if (method === 'GET') return route.fulfill({ json: resources[id][key] });
+      const body = route.request().postDataJSON();
+      const recordKey = key || body.key || id + '-new';
+      writes.push({ method, resource: id, key: recordKey, data: body.data });
+      resources[id][recordKey] = { key: recordKey, enabled: body.enabled !== false, data: body.data };
+      return route.fulfill({ json: resources[id][recordKey] });
+    }
+    if (endpoint.startsWith('actions/')) {
+      const id = endpoint.split('/').pop();
+      const payload = route.request().postDataJSON().payload;
+      const results = {
+        status, check: { errors: [], warnings: [], token: '' }, interfaces: [{ name: 'eth0', kind: 'device', up: true, master: '', l3: false }],
+        bans: { items: [], cursor: '', done: true, clock: true }, events,
+        set_list: { items: [{ cidr: '203.0.113.0/24', kind: 'static', remaining_seconds: null }, { cidr: '198.51.100.7/32', kind: 'api', remaining_seconds: 60 }], cursor: '', done: true },
+      };
+      if (!(id in results)) actions.push({ id, payload });
+      return route.fulfill({ json: { status: 'completed', result: results[id] || {} } });
+    }
+    return route.fulfill({ status: 404, json: { error: 'unknown fixture' } });
+  });
+  await page.evaluate(async () => { await window.VeerApp.loadPlugins(); window.VeerApp.stopPolling(); });
+  await navigatePage(page, 'plugin-firewall');
+  const frame = page.frameLocator('#tab-plugin-firewall iframe');
+  await expect(frame.getByRole('heading', { name: '防火墙', exact: true })).toBeVisible();
+  // Policies read as what they match; the catch-all and ICMP ones included.
+  await expect(frame.locator('table').first()).toContainText('全部流量');
+  await expect(frame.locator('table').first()).toContainText('icmp echo-request');
+  await expect(frame.locator('table').first()).toContainText('tcp 22 (SYN)');
+  // Status: the egress program and the global counters.
+  await expect(frame.getByText('eth0: 已挂载（驱动模式），出向跟踪已挂载')).toBeVisible();
+  await expect(frame.getByText('回包放行')).toBeVisible();
+  await expect(frame.getByText('98321')).toBeVisible();
+  // The drop log names the blocklist set and the ICMP type.
+  await expect(frame.getByText('@deny')).toBeVisible();
+  await expect(frame.getByText('icmp 8/0 192.0.2.1')).toBeVisible();
+
+  // A new ICMP policy: the port field gives way to ICMP types.
+  await frame.getByRole('button', { name: '新建策略', exact: true }).click();
+  await frame.getByRole('combobox', { name: '协议', exact: true }).selectOption('icmp');
+  await expect(frame.getByLabel(/^端口/)).toBeHidden();
+  await frame.getByLabel(/^ICMP 类型/).fill('8, 3/4');
+  await expect(frame.getByText('TCP 只判新连接')).toBeHidden();
+  await frame.getByLabel('名称', { exact: true }).fill('icmp-in');
+  await frame.getByRole('button', { name: '保存', exact: true }).click();
+  await expect.poll(() => writes.filter((w) => w.resource === 'policies').length).toBe(1);
+  const created = writes.find((w) => w.resource === 'policies').data;
+  expect(created).toMatchObject({ name: 'icmp-in', protocol: 'icmp', icmp_types: ['8', '3/4'], default_action: 'drop' });
+  expect(created.ports).toBeUndefined();
+
+  // An applied set lists its runtime elements and adds more at once.
+  await frame.locator('table').nth(1).getByRole('button', { name: '编辑', exact: true }).last().click();
+  await expect(frame.getByText('198.51.100.7/32')).toBeVisible();
+  await frame.getByLabel(/^加入元素/).fill('198.51.100.8, 2001:db8:9::/48');
+  await frame.getByLabel(/^超时/).fill('600');
+  await frame.getByRole('button', { name: '立即加入', exact: true }).click();
+  await expect.poll(() => actions.filter((a) => a.id === 'set_add').length).toBe(1);
+  expect(actions.find((a) => a.id === 'set_add').payload).toEqual({ set: 'office', elements: ['198.51.100.8', '2001:db8:9::/48'], timeout_seconds: 600 });
+
+  // Settings keep tracking, the blocklist and the baseline.
+  await expect(frame.getByText('连接跟踪', { exact: true })).toBeVisible();
+  await frame.getByRole('combobox', { name: '反向路径检查（Veer 转发绕过了内核 rp_filter）', exact: true }).selectOption('strict');
+  await frame.getByRole('button', { name: '保存设置', exact: true }).click();
+  await expect.poll(() => writes.filter((w) => w.resource === 'settings').length).toBe(1);
+  expect(writes.find((w) => w.resource === 'settings').data).toMatchObject({
+    interfaces: ['eth0'], connection_tracking: true, blocklists: ['deny'],
+    baseline: { bogon_sources: 'reserved', urpf: 'strict', invalid_tcp_flags: false, drop_fragments: false },
+  });
+
+  await expect.poll(() => frame.locator('body').evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+  await expectNoPageOverflow(page);
+  for (const theme of ['dark', 'light']) {
+    await page.evaluate((theme) => window.VeerApp.setTheme(theme), theme);
+    await expect(frame.locator('html')).toHaveAttribute('data-theme', theme);
+    expect(await contrastIssues(frame.locator('body')), 'firewall ' + theme).toEqual([]);
+    if (theme === 'dark') expect(await brightDarkSurfaces(frame.locator('body')), 'firewall').toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath('firewall-' + theme + '.png'), fullPage: true });
+  }
 });

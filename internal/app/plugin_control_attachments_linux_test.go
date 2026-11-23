@@ -182,7 +182,7 @@ exports.onAction = function () {
 
 	pm := &ProcessManager{kernelRuntime: kernel, pluginRuntime: disabledPluginDataplaneRuntime{}}
 	controlPlugin := loadTestPluginByID(t, cfg, pluginID)
-	control := newPluginControlRuntime(openTestDB(t), cfg, pm).(*gojaPluginControlRuntime)
+	control := newPluginControlRuntime(openTestDB(t), cfg, pm).(*pluginControlManager)
 	t.Cleanup(func() { _ = control.Close() })
 	value, err := control.QueryPluginAction(controlPlugin, controlPlugin.Actions[0], json.RawMessage(`{}`))
 	if err != nil {

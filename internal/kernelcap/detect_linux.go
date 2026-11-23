@@ -61,6 +61,7 @@ func detectKernelCapabilities() KernelCapabilities {
 	caps.Netlink = detectNetlinkCapabilities()
 	caps.IPRoute = detectIPRouteCapabilities()
 	caps.TCAttach = detectTCAttachCapability(caps.BPFSchedCLS, caps.Netlink.LinkList)
+	caps.TCXAttach = detectTCXAttachCapability(caps.BPFSchedCLS)
 	caps.XDPGenericAttach = detectXDPGenericAttachCapability(caps.BPFXDP, caps.Netlink.LinkList)
 	caps.NetfilterAttach = detectNetfilterAttachCapability(caps.BPFNetfilter)
 	caps.TC = combineCapability(
@@ -79,17 +80,7 @@ func detectKernelCapabilities() KernelCapabilities {
 	)
 	caps.XDPGeneric = combineCapability(
 		"XDP generic dataplane",
-		caps.BPFMapArray,
-		caps.BPFMapHash,
-		caps.BPFMapPerCPUHash,
-		caps.BPFMapPerCPUArray,
-		caps.BPFMapProgArray,
-		caps.BPFMapDevMapHash,
-		caps.BPFXDP,
-		caps.XDPGenericAttach,
-		caps.Netlink.RouteSocket,
-		caps.Netlink.LinkList,
-		caps.Netlink.RouteList,
+		append(xdpDataplaneChecks(caps), caps.XDPGenericAttach)...,
 	)
 	caps.Netfilter = combineCapability(
 		"Netfilter plugin dataplane",
@@ -194,6 +185,43 @@ func detectXDPGenericAttachCapability(programCheck CapabilityCheck, linkListChec
 		return unavailableCapability("XDP generic detach", err)
 	}
 	return CapabilityCheck{Available: true}
+}
+
+// detectTCXAttachCapability tells whether TC programs can attach through
+// tcx (Linux 6.6 and later) instead of cls_bpf filters under clsact. It
+// attaches to a device index nothing has: a kernel with tcx accepts the
+// attach type and then fails to find the device.
+func detectTCXAttachCapability(programCheck CapabilityCheck) CapabilityCheck {
+	if !programCheck.Available {
+		return combineCapability("TCX attach probe", programCheck)
+	}
+	prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{
+		Name: "forward_tcx_probe",
+		Type: ebpf.SchedCLS,
+		Instructions: asm.Instructions{
+			asm.Mov.Imm(asm.R0, -1), // TCX_NEXT
+			asm.Return(),
+		},
+		License: "GPL",
+	})
+	if err != nil {
+		return unavailableCapability("TCX attach program", err)
+	}
+	defer prog.Close()
+
+	attached, err := link.AttachTCX(link.TCXOptions{
+		Interface: math.MaxInt32,
+		Program:   prog,
+		Attach:    ebpf.AttachTCXIngress,
+	})
+	if err == nil {
+		_ = attached.Close()
+		return CapabilityCheck{Reason: "TCX attach probe attached to a device that does not exist"}
+	}
+	if errors.Is(err, unix.ENODEV) {
+		return CapabilityCheck{Available: true}
+	}
+	return unavailableCapability("TCX attach", err)
 }
 
 func detectTCAttachCapability(programCheck CapabilityCheck, linkListCheck CapabilityCheck) CapabilityCheck {

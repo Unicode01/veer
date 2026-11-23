@@ -122,6 +122,10 @@ const (
 	firewallPerfFloodDstIPEnv   = "VEER_FIREWALL_FLOOD_DST_IP"
 	firewallPerfFloodDstPortEnv = "VEER_FIREWALL_FLOOD_DST_PORT"
 	firewallPerfFloodGenEnv     = "VEER_FIREWALL_FLOOD_GENERATOR"
+	// udp_reply: the packet generator sends one UDP datagram over and over,
+	// from firewallPerfReplySourcePort: the replies of a flow the host opened
+	// (TestFirewallPluginEstablishedFlood).
+	firewallPerfFloodFrameEnv = "VEER_FIREWALL_FLOOD_FRAME"
 
 	// BPF_F_TEST_XDP_LIVE_FRAMES: BPF_PROG_RUN transmits what the program
 	// redirects (Linux 5.18).
@@ -669,7 +673,6 @@ func startFirewallPerfDaemon(t *testing.T, binary, pluginDir string, noTCFallbac
 		cfg.PluginsDir = filepath.Join(dir, "plugins")
 		cfg.PluginsEnabledSetting = &enabled
 		cfg.PluginsDataplaneSetting = &enabled
-		cfg.PluginsIsolationSetting = &disabled
 		cfg.PluginsMinSandboxLevel = pluginSandboxLevelNone
 		cfg.PluginsRequireSigned = &disabled
 	}
@@ -1799,6 +1802,9 @@ func runFirewallPerfFloodHelper() error {
 	switch generator := os.Getenv(firewallPerfFloodGenEnv); generator {
 	case "packet":
 		frames := firewallPerfSYNFrames(srcMAC, dstMAC, src, dst, uint16(port), 1024)
+		if os.Getenv(firewallPerfFloodFrameEnv) == "udp_reply" {
+			frames = [][]byte{firewallPerfUDPFrame(srcMAC, dstMAC, src, dst, firewallPerfReplySourcePort, uint16(port))}
+		}
 		return firewallPerfDrive(senders, seconds, func(int) (func() (uint64, bool, error), func(), error) {
 			return firewallPerfPacketSender(frames, iface.Index, dstMAC)
 		})
@@ -1810,6 +1816,11 @@ func runFirewallPerfFloodHelper() error {
 		// MAC and the host veth drops them before any filter or forwarder sees
 		// them. So every run first writes the template's headers back.
 		frames := firewallPerfSYNFrames(srcMAC, dstMAC, src, dst, uint16(port), 1)
+		// udp_reply keeps one tuple: no random source port.
+		fixed := os.Getenv(firewallPerfFloodFrameEnv) == "udp_reply"
+		if fixed {
+			frames = [][]byte{firewallPerfUDPFrame(srcMAC, dstMAC, src, dst, firewallPerfReplySourcePort, uint16(port))}
+		}
 		template := frames[0]
 		_ = rlimit.RemoveMemlock()
 		// Every frame gets a random source port, its TCP checksum updated to
@@ -1842,7 +1853,7 @@ func runFirewallPerfFloodHelper() error {
 			asm.JGT.Reg(asm.R4, asm.R3, "redirect"),
 		}
 		insns = append(insns, restore...)
-		insns = append(insns, asm.Instructions{
+		random := asm.Instructions{
 			asm.FnGetPrandomU32.Call(),
 			asm.And.Imm(asm.R0, 0xffff),
 			asm.Or.Imm(asm.R0, 0x0400),
@@ -1853,12 +1864,16 @@ func runFirewallPerfFloodHelper() error {
 			asm.Xor.Imm(asm.R8, 0xffff),
 			asm.Add.Reg(asm.R9, asm.R8),
 			asm.Add.Reg(asm.R9, asm.R0),
-		}...)
-		insns = append(insns, fold...)
-		insns = append(insns, fold...)
+		}
+		if !fixed {
+			insns = append(insns, random...)
+			insns = append(insns, fold...)
+			insns = append(insns, fold...)
+			insns = append(insns,
+				asm.Xor.Imm(asm.R9, 0xffff),
+				asm.StoreMem(asm.R7, csumOff, asm.R9, asm.Half))
+		}
 		insns = append(insns,
-			asm.Xor.Imm(asm.R9, 0xffff),
-			asm.StoreMem(asm.R7, csumOff, asm.R9, asm.Half),
 			asm.Mov.Imm(asm.R1, int32(iface.Index)).WithSymbol("redirect"),
 			asm.Mov.Imm(asm.R2, 0),
 			asm.FnRedirect.Call(),

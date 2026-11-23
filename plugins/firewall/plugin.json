@@ -2,17 +2,20 @@
   "api_version": "v1",
   "id": "firewall",
   "name": "Firewall",
-  "version": "1.0.2",
+  "version": "1.2.0",
   "kind": "pipeline",
   "stability": "stable",
-  "description": "Stateless XDP source filter for TCP and UDP ports, ahead of the Veer dataplane. Applied rule sets need confirmation or roll back by themselves.",
+  "description": "XDP source filter for ports, ICMP and IP protocols, with address sets, a security baseline and optional connection tracking, ahead of the Veer dataplane. Applied rule sets need confirmation or roll back by themselves.",
   "compatibility": {
-    "os": ["linux"],
+    "os": [
+      "linux"
+    ],
     "runtime": ">=1.0.0 <2.0.0",
     "control_api_abi": 1,
     "tc_pipeline_abi": 2,
     "kernel": ">=5.10.0",
     "features": [
+      "control.native.v1",
       "dataplane.xdp_pipeline.v1",
       "dataplane.xdp_tc_fallback.v1",
       "dataplane.hook_bindings.v1",
@@ -20,16 +23,27 @@
       "ebpf.map_transactions.v1",
       "ebpf.ring_push.v1",
       "control.net_admin",
-      "control.modules.v1",
       "control.resource_schema.v1",
       "ui.capabilities.v1"
     ]
   },
   "control": {
-    "main": "control.js",
-    "sha256": "8004c738c00e68e54b5b3dbcd9bd5f19526c43bd7cc691c5dbde01d3c3958505",
+    "library": {
+      "x86_64-linux-gnu": {
+        "path": "lib/x86_64-linux-gnu/libfirewall.so"
+      },
+      "x86_64-linux-musl": {
+        "path": "lib/x86_64-linux-musl/libfirewall.so"
+      },
+      "aarch64-linux-gnu": {
+        "path": "lib/aarch64-linux-gnu/libfirewall.so"
+      },
+      "aarch64-linux-musl": {
+        "path": "lib/aarch64-linux-musl/libfirewall.so"
+      }
+    },
+    "worker": "shared",
     "permissions": [
-      "crypto",
       "ebpf.load",
       "ebpf.map_read",
       "ebpf.map_write",
@@ -39,11 +53,682 @@
       "plugin.register",
       "resource",
       "timer",
-      "ui",
-      "worker"
+      "ui"
     ],
     "net_access": [
-      {"interfaces": ["*"], "operations": ["link.read"]}
-    ]
+      {
+        "interfaces": [
+          "*"
+        ],
+        "operations": [
+          "link.read"
+        ]
+      }
+    ],
+    "register": {
+      "capabilities": [
+        "firewall",
+        "xdp"
+      ],
+      "pipeline_nodes": [
+        {
+          "id": "firewall",
+          "description": "Source filter for ports, ICMP and IP protocols with sets and connection tracking, run ahead of the Veer core: by the XDP dispatcher, or at TC ingress on interfaces without native XDP."
+        }
+      ],
+      "ebpf_objects": [
+        {
+          "id": "firewall",
+          "path": "firewall.o",
+          "description": "XDP program, with a TC twin for interfaces without native XDP, that drops packets policies do not allow, and a TC egress program that records the connections this side opens.",
+          "programs": [
+            {
+              "id": "filter",
+              "section": "xdp/veer/firewall",
+              "type": "xdp"
+            },
+            {
+              "id": "filter_tc",
+              "section": "tc/veer/firewall",
+              "type": "tc"
+            },
+            {
+              "id": "track",
+              "section": "tc/veer/firewall_egress",
+              "type": "tc"
+            }
+          ],
+          "state_maps": [
+            {
+              "name": "fw_cfg",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_ifaces",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_port_bits",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_ports",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_class",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_dst4",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_dst6",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_policy",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_src4",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_src6",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_stats",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_limit",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_rate",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_ban",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_lstats",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_log_cfg",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_log_tat",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_gcfg",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_pext",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_sets",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_ct",
+              "policy": "preserve",
+              "schema_version": 1
+            },
+            {
+              "name": "fw_gstats",
+              "policy": "preserve",
+              "schema_version": 1
+            }
+          ]
+        }
+      ],
+      "ring_subscriptions": [
+        {
+          "id": "drop_log",
+          "object": "firewall",
+          "map": "fw_events",
+          "handler": "onDropEvents",
+          "queue_size": 16,
+          "max_records": 128,
+          "max_bytes": 16384,
+          "poll_timeout_ms": 500
+        }
+      ],
+      "hooks": [
+        {
+          "id": "wan-filter",
+          "engine": "xdp",
+          "stage": "pre_forward",
+          "priority": 10,
+          "program": "firewall:filter",
+          "tc_fallback": "firewall:filter_tc",
+          "mode": "drop",
+          "binding_required": true,
+          "tc_egress": "firewall:track",
+          "when": {
+            "feature": "dataplane.xdp_tc_egress.v1"
+          }
+        },
+        {
+          "id": "wan-filter",
+          "engine": "xdp",
+          "stage": "pre_forward",
+          "priority": 10,
+          "program": "firewall:filter",
+          "tc_fallback": "firewall:filter_tc",
+          "mode": "drop",
+          "binding_required": true,
+          "when": {
+            "not_feature": "dataplane.xdp_tc_egress.v1"
+          }
+        }
+      ],
+      "resources": [
+        {
+          "id": "policies",
+          "description": "Draft policies. Nothing reaches the dataplane before the apply action.",
+          "methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "manual",
+          "max_records": 255,
+          "max_record_bytes": 131072,
+          "schema_version": 2,
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "remark": {
+                "type": "string",
+                "maxLength": 256
+              },
+              "protocol": {
+                "type": "string",
+                "enum": [
+                  "tcp",
+                  "udp",
+                  "tcp+udp",
+                  "icmp",
+                  "icmpv6",
+                  "ip",
+                  "any"
+                ]
+              },
+              "ports": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": [
+                    "string",
+                    "integer"
+                  ]
+                }
+              },
+              "icmp_types": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": [
+                    "string",
+                    "integer"
+                  ]
+                }
+              },
+              "ip_protocols": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": [
+                    "string",
+                    "integer"
+                  ]
+                }
+              },
+              "destinations": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": "string",
+                  "maxLength": 64
+                }
+              },
+              "default_action": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "drop"
+                ]
+              },
+              "tcp_new_only": {
+                "type": "boolean"
+              },
+              "syn_limit": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "max_new",
+                  "window_seconds"
+                ],
+                "properties": {
+                  "max_new": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000000
+                  },
+                  "window_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3600
+                  },
+                  "ban_seconds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 604800
+                  },
+                  "ipv6_prefix": {
+                    "type": "integer",
+                    "minimum": 32,
+                    "maximum": 128
+                  }
+                }
+              },
+              "add_to_set": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "set"
+                ],
+                "properties": {
+                  "set": {
+                    "type": "string",
+                    "maxLength": 48,
+                    "pattern": "^[a-z0-9][a-z0-9_-]{0,47}$"
+                  },
+                  "timeout_seconds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2592000
+                  },
+                  "ipv6_prefix": {
+                    "type": "integer",
+                    "minimum": 32,
+                    "maximum": 128
+                  }
+                }
+              },
+              "sources": {
+                "type": "array",
+                "maxItems": 1024,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "action"
+                  ],
+                  "properties": {
+                    "cidr": {
+                      "type": "string",
+                      "maxLength": 64
+                    },
+                    "set": {
+                      "type": "string",
+                      "maxLength": 48,
+                      "pattern": "^[a-z0-9][a-z0-9_-]{0,47}$"
+                    },
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "allow",
+                        "drop"
+                      ]
+                    },
+                    "remark": {
+                      "type": "string",
+                      "maxLength": 128
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "id": "sets",
+          "description": "Draft address sets: their static elements reach the dataplane with apply; set_add adds elements at once.",
+          "methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "manual",
+          "max_records": 255,
+          "max_record_bytes": 262144,
+          "schema_version": 1,
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "remark": {
+                "type": "string",
+                "maxLength": 256
+              },
+              "elements": {
+                "type": "array",
+                "maxItems": 4096,
+                "items": {
+                  "type": "string",
+                  "maxLength": 64
+                }
+              }
+            }
+          }
+        },
+        {
+          "id": "settings",
+          "description": "Draft settings: bound interfaces, trusted sources, blocklists, baseline checks, connection tracking and the confirmation timeout.",
+          "methods": [
+            "list",
+            "get",
+            "create",
+            "update"
+          ],
+          "runtime_update": "manual",
+          "max_records": 1,
+          "max_record_bytes": 32768,
+          "schema_version": 2,
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "interfaces": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "type": "string",
+                  "maxLength": 15
+                }
+              },
+              "trusted_sources": {
+                "type": "array",
+                "maxItems": 256,
+                "items": {
+                  "type": "string",
+                  "maxLength": 64
+                }
+              },
+              "confirm_timeout_seconds": {
+                "type": "integer",
+                "minimum": 30,
+                "maximum": 600
+              },
+              "log_per_second": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000
+              },
+              "connection_tracking": {
+                "type": "boolean"
+              },
+              "blocklists": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {
+                  "type": "string",
+                  "maxLength": 48,
+                  "pattern": "^[a-z0-9][a-z0-9_-]{0,47}$"
+                }
+              },
+              "baseline": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "bogon_sources": {
+                    "type": "string",
+                    "enum": [
+                      "off",
+                      "reserved",
+                      "all"
+                    ]
+                  },
+                  "invalid_tcp_flags": {
+                    "type": "boolean"
+                  },
+                  "drop_fragments": {
+                    "type": "boolean"
+                  },
+                  "urpf": {
+                    "type": "string",
+                    "enum": [
+                      "off",
+                      "loose",
+                      "strict"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "id": "snapshots",
+          "description": "The applied and the last confirmed rule set, kept to rebuild the maps after a restart.",
+          "methods": [
+            "list",
+            "get"
+          ],
+          "control_methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "manual",
+          "max_records": 2,
+          "max_record_bytes": 1048576
+        },
+        {
+          "id": "hook_bindings",
+          "description": "Interfaces the XDP hook runs on, written by apply and rollback.",
+          "methods": [
+            "list",
+            "get"
+          ],
+          "control_methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "plugin_reconcile",
+          "max_records": 1,
+          "max_record_bytes": 4096
+        }
+      ],
+      "actions": [
+        {
+          "id": "check",
+          "description": "Validate the draft: errors that block an apply, and warnings an apply must accept by passing their token as accept_warnings.",
+          "runtime_update": "runtime_query",
+          "max_payload_bytes": 1024
+        },
+        {
+          "id": "apply",
+          "description": "Apply the draft policies, sets and settings; they stay until confirmed or the deadline restores the previous rule set.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 1024
+        },
+        {
+          "id": "confirm",
+          "description": "Keep the rule set applied last.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 1024
+        },
+        {
+          "id": "rollback",
+          "description": "Restore the last confirmed rule set now.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 1024
+        },
+        {
+          "id": "status",
+          "description": "Read the applied rule set, the confirmation deadline, per-policy and global counters.",
+          "runtime_update": "runtime_query",
+          "max_payload_bytes": 1024
+        },
+        {
+          "id": "interfaces",
+          "description": "List interfaces the hook can bind to.",
+          "runtime_update": "runtime_query",
+          "max_payload_bytes": 1024
+        },
+        {
+          "id": "bans",
+          "description": "List sources banned for going over a SYN limit, a page at a time.",
+          "runtime_update": "runtime_query",
+          "max_payload_bytes": 1024
+        },
+        {
+          "id": "unban",
+          "description": "Lift one ban (key), the bans of one policy, or all of them.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 1024
+        },
+        {
+          "id": "events",
+          "description": "The latest sampled drops, newest first.",
+          "runtime_update": "runtime_query",
+          "max_payload_bytes": 1024
+        },
+        {
+          "id": "set_add",
+          "description": "Add elements to an applied set at once, with an optional timeout: {set, elements, timeout_seconds}.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 65536
+        },
+        {
+          "id": "set_del",
+          "description": "Remove elements added at runtime from a set: {set, elements}.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 65536
+        },
+        {
+          "id": "set_flush",
+          "description": "Remove every element added at runtime from a set: {set}.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 1024
+        },
+        {
+          "id": "set_list",
+          "description": "List the elements of an applied set, a page at a time: {set, cursor, limit}.",
+          "runtime_update": "runtime_query",
+          "max_payload_bytes": 1024
+        }
+      ],
+      "ui": {
+        "static_dir": "ui",
+        "entry": "index.html",
+        "page": "firewall",
+        "page_title": "Firewall",
+        "resources": [
+          {
+            "resource": "policies",
+            "methods": [
+              "list",
+              "get",
+              "create",
+              "update",
+              "delete"
+            ]
+          },
+          {
+            "resource": "sets",
+            "methods": [
+              "list",
+              "get",
+              "create",
+              "update",
+              "delete"
+            ]
+          },
+          {
+            "resource": "settings",
+            "methods": [
+              "list",
+              "get",
+              "create",
+              "update"
+            ]
+          },
+          {
+            "resource": "snapshots",
+            "methods": [
+              "list",
+              "get"
+            ]
+          }
+        ],
+        "actions": [
+          "check",
+          "apply",
+          "confirm",
+          "rollback",
+          "status",
+          "interfaces",
+          "bans",
+          "unban",
+          "events",
+          "set_add",
+          "set_del",
+          "set_flush",
+          "set_list"
+        ]
+      }
+    }
   }
 }

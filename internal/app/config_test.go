@@ -372,9 +372,6 @@ func TestLoadConfigDefaultsPluginsDisabled(t *testing.T) {
 	if cfg.PluginsDataplaneEnabled() {
 		t.Fatal("PluginsDataplaneEnabled() = true, want false by default")
 	}
-	if !cfg.PluginsIsolationEnabled() {
-		t.Fatal("PluginsIsolationEnabled() = false, want true by default")
-	}
 	if cfg.PluginMinimumSandboxLevel() != pluginSandboxLevelFull {
 		t.Fatalf("PluginMinimumSandboxLevel() = %q, want full", cfg.PluginMinimumSandboxLevel())
 	}
@@ -472,7 +469,6 @@ func TestLoadConfigAllowsDisablingPlugins(t *testing.T) {
   "web_token": "test-token",
   "plugins_enabled": false,
   "plugins_dataplane_enabled": true,
-  "plugins_isolation": false,
   "plugins_dir": "custom/plugins"
 }`), 0o644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -490,8 +486,5 @@ func TestLoadConfigAllowsDisablingPlugins(t *testing.T) {
 	}
 	if !cfg.PluginsDataplaneEnabled() {
 		t.Fatal("PluginsDataplaneEnabled() = false, want true when explicitly enabled")
-	}
-	if cfg.PluginsIsolationEnabled() {
-		t.Fatal("PluginsIsolationEnabled() = true, want false when explicitly disabled")
 	}
 }

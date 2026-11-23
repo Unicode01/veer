@@ -76,6 +76,8 @@ func runPluginPackageCLI(args []string, stdout, stderr io.Writer) (bool, error) 
 		err = runPluginPackageVerifyCLI(args[2:], stdout, stderr)
 	case "repository":
 		err = runPluginRepositoryCLI(args[2:], stdout, stderr)
+	case "preflight":
+		err = runPluginPreflightCLI(args[2:], stdout, stderr)
 	case "help", "-h", "--help":
 		writePluginPackageCLIUsage(stdout)
 	default:
@@ -99,9 +101,12 @@ func writePluginPackageCLIUsage(w io.Writer) {
 	fmt.Fprintln(w, "  veer plugin sign --archive FILE --private-key FILE [--output FILE]")
 	fmt.Fprintln(w, "  veer plugin verify --package FILE --public-key FILE")
 	fmt.Fprintln(w, "  veer plugin repository init|add|revoke|publish|rotate-key|status [options]")
+	fmt.Fprintln(w, "  veer plugin preflight [--json] [--install-dir DIR] [--config FILE]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "backup and restore default to ./forward.db and ./plugins; when the current")
 	fmt.Fprintln(w, "directory has no forward.db they use the Veer install beside this binary and its plugins_dir.")
+	fmt.Fprintln(w, "preflight tells, before an upgrade, which installed plugins this binary cannot run")
+	fmt.Fprintln(w, "(old JavaScript plugins, no library for this host, no plugin worker); it changes nothing.")
 }
 
 func runPluginPackagePackCLI(args []string, stdout, stderr io.Writer) error {
@@ -323,10 +328,8 @@ func validatePluginPackageSource(source string) (LoadedPlugin, error) {
 	if plugin.Status != pluginStatusActive {
 		return LoadedPlugin{}, fmt.Errorf("plugin source is invalid: %s", plugin.Error)
 	}
-	isolation := false
 	plugin, err = registerPluginPackageCandidate(plugin, &Config{
-		PluginsIsolationSetting: &isolation,
-		PluginsMinSandboxLevel:  pluginSandboxLevelNone,
+		PluginsMinSandboxLevel: pluginSandboxLevelNone,
 	})
 	if err != nil {
 		return LoadedPlugin{}, err
@@ -354,9 +357,19 @@ func packPluginDirectory(plugin LoadedPlugin, output string, force bool) (plugin
 	}
 	entries := make([]pluginPackagePackEntry, 0)
 	var totalBytes int64
+	// A native plugin ships its library builds (lib/<triple>/); its Rust
+	// crate and build directory stay out of the package.
+	_, cargoErr := os.Stat(filepath.Join(absSource, "Cargo.toml"))
+	nativeSources := map[string]bool{"src": cargoErr == nil, "target": cargoErr == nil, "Cargo.toml": cargoErr == nil, "Cargo.lock": cargoErr == nil}
 	err = filepath.Walk(absSource, func(current string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		if filepath.Dir(current) == absSource && nativeSources[info.Name()] {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("plugin source contains symbolic link %s", current)

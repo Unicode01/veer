@@ -126,6 +126,28 @@ function createHarness() {
     pluginsPagination: makeNode('div')
   };
   const translations = {
+    'plugins.field.after': 'After',
+    'plugins.field.attach': 'Attach',
+    'plugins.field.before': 'Before',
+    'plugins.field.context': 'Context',
+    'plugins.field.engine': 'Engine',
+    'plugins.field.family': 'Family',
+    'plugins.field.hook': 'Hook',
+    'plugins.field.interfaces': 'Interfaces',
+    'plugins.field.kernelAttachment': 'Kernel attachment',
+    'plugins.field.mode': 'Mode',
+    'plugins.field.namespace': 'Namespace',
+    'plugins.field.netfilterHook': 'Netfilter Hook',
+    'plugins.field.packetMetadata': 'Packet metadata',
+    'plugins.field.phase': 'Phase',
+    'plugins.field.pipeline': 'Pipeline',
+    'plugins.field.plugin': 'Plugin',
+    'plugins.field.priority': 'Priority',
+    'plugins.field.program': 'Program',
+    'plugins.field.resolvedOrder': 'Resolved order',
+    'plugins.field.slot': 'Slot',
+    'plugins.field.stage': 'Stage',
+    'plugins.field.status': 'Status',
     'common.actions': 'Actions',
     'common.dash': '-',
     'common.disable': 'Disable',
@@ -327,14 +349,26 @@ function createHarness() {
     toggleTableVisibility(tableId, visible) {
       this.lastTableVisibility = { tableId, visible };
     },
-    getToken() {
-      return 'test-token';
+    isAuthenticated() {
+      return true;
     },
-    clearToken() {
-      this.tokenCleared = true;
+    async authFetch(url, init) {
+      const request = Object.assign({ credentials: 'same-origin' }, init || {});
+      request.headers = Object.assign({}, request.headers || {});
+      const method = String(request.method || 'GET').toUpperCase();
+      if (method !== 'GET' && method !== 'HEAD') request.headers['X-Veer-CSRF'] = 'test-csrf';
+      const response = await this.__context.fetch(url, request);
+      if (response.status === 401) {
+        this.handleUnauthorized(response);
+        throw new Error('unauthorized');
+      }
+      return response;
+    },
+    handleUnauthorized() {
+      this.unauthorizedHandled = true;
     },
     showTokenModal() {
-      this.tokenModalShown = true;
+      this.showedTokenModal = true;
     },
     notify(type, message) {
       notifications.push({ type, message });
@@ -1098,7 +1132,7 @@ test('openPluginUI fetches protected asset and renders inline iframe', async () 
     ui: { entry: 'nested/page #1.html' }
   }];
   app.__context.fetch = async function fetch(url, opts) {
-    calls.push({ url, authorization: opts.headers.Authorization });
+    calls.push({ url, credentials: opts.credentials, authorization: opts.headers.Authorization });
     return {
       ok: true,
       status: 200,
@@ -1111,7 +1145,8 @@ test('openPluginUI fetches protected asset and renders inline iframe', async () 
 
   assert.deepEqual(calls, [{
     url: '/api/plugins/packet_observer/assets/nested/page%20%231.html',
-    authorization: 'Bearer test-token'
+    credentials: 'same-origin',
+    authorization: undefined
   }]);
   assert.equal(app.__openedWindows.length, 0);
   assert.equal(app.el.pluginUIPanel.hidden, false);
@@ -1170,7 +1205,7 @@ test('plugin host loads bounded same-plugin text json style script and image ass
     ui: { entry: 'index.html' }
   }];
   app.__context.fetch = async function fetch(url, opts) {
-    calls.push({ url, authorization: opts.headers.Authorization });
+    calls.push({ url, credentials: opts.credentials, authorization: opts.headers.Authorization });
     if (url.endsWith('index.html')) {
       return response('text/html; charset=utf-8', '<!doctype html><title>Plugin</title>');
     }
@@ -1218,7 +1253,7 @@ test('plugin host loads bounded same-plugin text json style script and image ass
   assert.match(script.textContent, /sourceURL=veer-plugin:\/\/packet_observer\/assets\/plugin\.js/);
   assert.equal(script.parentNode.tagName, 'HEAD');
   assert.equal(await host.assets.dataURL('assets/icon.png'), 'data:image/png;base64,iVBORw==');
-  assert.ok(calls.every((call) => call.authorization === 'Bearer test-token'));
+  assert.ok(calls.every((call) => call.credentials === 'same-origin' && call.authorization === undefined));
 });
 
 test('plugin asset bridge rejects traversal mismatched types invalid JSON and oversized files', async () => {
@@ -1883,8 +1918,7 @@ test('openPluginUI handles unauthorized asset response', async () => {
 
   await app.openPluginUI('packet_observer');
 
-  assert.equal(app.tokenCleared, true);
-  assert.equal(app.tokenModalShown, true);
+  assert.equal(app.unauthorizedHandled, true);
   assert.equal(app.el.pluginUIPanel.hidden, true);
 });
 

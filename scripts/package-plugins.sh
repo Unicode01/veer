@@ -147,10 +147,18 @@ src = pathlib.Path(sys.argv[1]).resolve()
 dst = pathlib.Path(sys.argv[2]).resolve()
 
 ignored_dirs = {"__pycache__", ".pytest_cache", ".tmp", "node_modules"}
+# A native plugin ships its library builds (lib/<triple>/); its Rust crate
+# stays in the source tree.
+native = (src / "Cargo.toml").is_file()
+native_sources = {"src", "Cargo.toml", "Cargo.lock", "target"}
 
-def ignore_runtime_junk(_dir, names):
+def ignore_runtime_junk(directory, names):
     ignored = set()
+    top_level = pathlib.Path(directory).resolve() == src
     for name in names:
+        if native and top_level and name in native_sources:
+            ignored.add(name)
+            continue
         if name in ignored_dirs:
             ignored.add(name)
             continue
@@ -200,6 +208,29 @@ for manifest_path in sorted(root.glob("*/plugin.json")):
         manifest = json.load(fh)
     changed = False
     control = manifest.get("control") if isinstance(manifest.get("control"), dict) else None
+    library = control.get("library") if control is not None and isinstance(control.get("library"), dict) else None
+    if library is not None:
+        # Pin each library build that was made; drop the targets that were
+        # not built, so the host never looks for them.
+        for triple in sorted(library):
+            entry = library[triple] if isinstance(library[triple], dict) else {}
+            library_path = str(entry.get("path") or "").strip()
+            library_file = (plugin_dir / library_path).resolve()
+            try:
+                library_file.relative_to(plugin_dir)
+            except ValueError:
+                raise SystemExit(f"{manifest_path}: control.library.{triple} escapes plugin directory: {library_path}")
+            if not library_path or not library_file.is_file():
+                del library[triple]
+                changed = True
+                continue
+            digest = hashlib.sha256(library_file.read_bytes()).hexdigest()
+            if entry.get("sha256") != digest:
+                entry["sha256"] = digest
+                library[triple] = entry
+                changed = True
+        if not library:
+            raise SystemExit(f"{manifest_path}: no control.library build exists; run scripts/build-native-plugins.sh")
     if control is not None:
         main_path = str(control.get("main") or "").strip()
         if main_path:

@@ -2757,6 +2757,26 @@ func writeDataplanePerfPluginManifest(t *testing.T, path string, pluginID string
 	}
 	manifest["id"] = pluginID
 	manifest["name"] = fmt.Sprintf("Packet Observer %02s", strings.TrimPrefix(pluginID, "packet_observer_"))
+	// Each copy only needs its hook: keep the declared surface without the
+	// native library (which implements packet_observer itself) or the action
+	// it would handle, and give the hook its own priority.
+	control, _ := manifest["control"].(map[string]any)
+	register, _ := control["register"].(map[string]any)
+	if control == nil || register == nil {
+		t.Fatalf("perf plugin manifest has no control.register section")
+	}
+	delete(control, "library")
+	delete(control, "worker")
+	delete(register, "actions")
+	if ui, ok := register["ui"].(map[string]any); ok {
+		delete(ui, "actions")
+	}
+	attachments, _ := register["pipeline_attach"].([]any)
+	if len(attachments) == 0 {
+		t.Fatalf("perf plugin manifest declares no pipeline attachment")
+	}
+	attachment, _ := attachments[0].(map[string]any)
+	attachment["priority"] = priority
 	data, err = json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		t.Fatalf("encode perf plugin manifest: %v", err)
@@ -2764,16 +2784,6 @@ func writeDataplanePerfPluginManifest(t *testing.T, path string, pluginID string
 	data = append(data, '\n')
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		t.Fatalf("write perf plugin manifest: %v", err)
-	}
-
-	controlPath := filepath.Join(filepath.Dir(path), "control.js")
-	control, err := os.ReadFile(controlPath)
-	if err != nil {
-		t.Fatalf("read perf plugin control: %v", err)
-	}
-	nextControl := strings.Replace(string(control), "priority: 10,", fmt.Sprintf("priority: %d,", priority), 1)
-	if err := os.WriteFile(controlPath, []byte(nextControl), 0644); err != nil {
-		t.Fatalf("write perf plugin control: %v", err)
 	}
 }
 

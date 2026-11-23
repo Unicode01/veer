@@ -7,7 +7,7 @@ WebUI 默认显示出口卡片，新建或编辑时按类型显示表单。支�
 | 表单类型 | 普通配置 | 高级配置 |
 | --- | --- | --- |
 | WireGuard | 配置文件导入，或本机 Address/PrivateKey 与远端 Peer | 监听端口、宿主访问远端内网的路由、MTU、出口位置 |
-| Mihomo / sing-box | 实际出站接口、分享链接或 Base64 内容、节点选择 | 直连网段/域名、DNS、原生 JSON；内部 WAN 地址覆盖、MTU、出口位置 |
+| Mihomo / sing-box | 实际出站接口（可选另一个已应用的 VPN 出口）、分享链接或 Base64 内容、节点选择、可选前置节点（链式代理） | 直连网段/域名、DNS、原生 JSON；内部 WAN 地址覆盖、MTU、出口位置 |
 | 外部 TUN | 已有 TUN 接口名、匹配的接口 alias | 内部 WAN 地址覆盖、MTU、出口位置 |
 
 WireGuard 地址须来自实际连接配置，页面不虚构默认地址。代理和外部 TUN 的内部 WAN 地址不属于节点参数，留空在首次应用时自动分配；核心自己的 TUN 地址由插件管理，外部 TUN 地址则由外部程序管理。
@@ -16,11 +16,17 @@ WireGuard 地址须来自实际连接配置，页面不虚构默认地址。代�
 
 “拆除”保留草稿和凭据，供以后重新应用；“删除”通过 `delete_profile` 动作先拆除自有出口，再移除其 VPN / WAN 记录、专用凭据和健康检测设置。清理失败时保留草稿供重试；其他出口引用的凭据、外部 TUN 提供者以及安装的核心版本均保留。删除前应先调整引用该出口的 LAN / 出向 NAT。0.8.4 要求 `wan_core >=1.5.5`，拆除记录在重启后继续保留；兼容旧版误写成“已禁用”的完整撤回状态，核验归属与接口确实不存在后允许重新应用或切换代理核心。
 
-0.8.2 的出口巡检同时核对 TC 双向转接映射；即使接口和核心代际不变，丢失或不匹配的映射也会自动恢复，不重新应用 WAN、不重启核心或清理 flow。WG 每 5 秒巡检，TUN / 代理核心每秒巡检。
+0.8.2 的出口巡检同时核对 TC 双向转接映射；即使接口和核心代际不变，丢失或不匹配的映射也会自动恢复，不重新应用 WAN、不重启核心或清理 flow。WG 每 5 秒巡检，TUN / 代理核心每秒巡检。0.10.0 起每次巡检只检查核心进程和隧道接口，WAN 边界和 TC 映射约每 5 秒核对一次；在 8 个外部 TUN 出口、无流量的测试中，veer 空闲 CPU 从单核的 5.8% 降到 5.0%，其中 vpn_core 巡检部分约从 1.2% 降到 0.4%。0.12.0 起不再定时巡检：任一网络接口的链路事件，或本插件托管的核心进程状态变化（宿主提供 `control.process_events.v1` 时），会在约 250 ms 后核对全部出口的核心、隧道、WAN 边界和 TC 映射，并修复不一致的部分。核对在第一个事件时设定，后续事件（包括宿主在事件可能丢失时发出的 `resync`）不会把它往后推。TUN 仍在协商 offload 的出口每秒再查一次，修复失败的出口按各自的退避（2 秒到 60 秒）重试，另有每 5 分钟一次的完整核对兜底丢失的事件。TC 映射本身没有事件，所以每 5 秒只读核对每个出口的两个映射条目（不读接口和记录），不一致时写回上次检查或安装时的内容。WAN Core 1.7.0 同样改为按事件修复，详见插件开发文档的 WAN 自愈说明。
 
 0.8.5 修复 WG 清理失败后、隧道已不存在时的重试异常；保留 journal 继续完成清理，不影响其他出口。多出口接口故障隔离还需要配合包含对应 TC 挂载与回滚、源地址恢复重试及 veth 双端所有权清理修复的 Veer 主程序。
 
 0.9.1 把各驱动共用的 TC 适配器从 WireGuard 时期的名字改为中性名称：对象文件 `tunnel_adapter*.o`、map `tunnel_links`、hook `tunnel-links` / `tunnel-direct-out`、巡检定时器 `tunnel_repair`。升级后照常读取旧出口记录里的隧道 ifindex，并删除旧 hook 的绑定记录；首次 reconcile 按原接口重新填充映射和绑定，不因改名重建出口。WireGuard 驱动自己的 WAN ID（`wg_<key>`）和接口名（`vwg*`、`veerwg*`）不变，出向 NAT 无需调整。
+
+0.10.0 起插件报错带稳定的原因码，例如 `[ownership_missing] Recorded ownership is missing; leftover: veerwg1`。WebUI 按原因码显示中英文说明和处理办法，原始英文信息作为补充显示；未知错误照常显示原文。出错时 `status` 记录保留 `error_code`、驱动、接口、WAN ID 和首次失败时间 `failed_at`，巡检重复失败不刷新这个时间。残留的接口或 WAN 记录会逐个列出名字；`ip` 命令失败时附带其第一行报错，形似密钥的内容替换为 `[redacted]`，`wg` 和 `nft` 的报错可能引用密钥，仍不显示。代理核心重启次数用完时 `status` 为 `failed`、`error_code` 为 `core_exited`，附带退出码和启动次数；核心输出仍只在“核心日志”中查看。
+
+出口卡片显示运行信息：WireGuard 显示对端和最近握手，代理出口显示上次应用的节点和核心运行时长，所有出口显示隧道收发字节和数据路径（是否保留 GSO、veth 或单口边界、eBPF 或内核扩展）。页面打开时每 15 秒读取一次 `inspect`，只原地更新这些数值，不重建卡片。“详情”列出各对端的 endpoint、最近握手和收发字节；`inspect` 返回结构化的 `peers`、`traffic`、`process`、`node`，不再返回 `wg show` 的原始文本，也从不执行会输出私钥的 `wg show dump`。应用时记录资源修订号 `profile_revision`，草稿保存后尚未应用的出口在卡片上提示“有未应用的修改”并提供“应用”；拆除、删除和核心日志收在“更多”中。
+
+页面使用宿主的公共组件：顶部 KPI 条显示出口总数、就绪数、需处理数和隧道总流量，状态用宿主状态胶囊，接口和地址用等宽字体。代理出口的“实际出站接口”会列出本机接口作为候选（`upstream_interfaces` 查询，不含环回、VPN 隧道与边界、dummy 和虚拟机网卡），其后列出已应用出口的 WAN 边界（见下文“出口串联”，不列出正在编辑的出口自己），sing-box 的出站 IP 按所选接口给出地址候选；两者仍可手动填写，应用时照常校验。应用成功后提示应在出向 NAT 中选择的出口接口和源地址，“详情”中也列出这两项；插件页面目前不能直接跳转到出向 NAT 页面。
 
 ## 链路健康检测（0.8.0）
 
@@ -54,7 +60,7 @@ Linux 集成测试通过实际插件 API 验证 WG、Mihomo、sing-box 探测及
 | `sing_box` | sing-box TUN / gVisor 与代理协议 | 页面安装或本机预装 sing-box，带 gVisor |
 | `tun` | 外部 TUN 提供者 | 提供者自行运行 |
 
-各驱动共用 WAN Core 和双向 TC L2/L3 适配，JavaScript 不逐包转发，无需关闭 Veer 快速 NAT。
+各驱动共用 WAN Core 和双向 TC L2/L3 适配，控制面不逐包转发，无需关闭 Veer 快速 NAT。
 
 0.9.0 配合 `wan_core >=1.5.6` 自动选择两种数据路径。宿主编译了可选 helper、实际加载的模块提供 `dataplane.kfuncs.handoff_ingress.v1`，且插件含 `tunnel_adapter-direct.o` 时，本机 WAN 使用单个 dummy 边界，TC egress 送入隧道，helper 将回包送回该边界的 ingress；每个出口只有本机边界和实际隧道两个接口。未满足这些条件时使用 veth 兼容路径，旧 helper 继续使用原有交接能力。
 
@@ -97,6 +103,23 @@ Veer 热重启（部署更新）时，运行中的 Mihomo / sing-box 核心交�
 
 不支持的协议、传输或参数会在写入 Secret 前报错，不静默丢弃。其他核心功能仍可在“分流与高级配置”中切换为原生 JSON。已有原生 JSON 配置会以原生模式打开，留空继续沿用。这里只导入粘贴内容，不下载订阅 URL，也不接受 YAML；协议映射以 [Mihomo 文档](https://wiki.metacubex.one/en/config/proxies/)、[sing-box 文档](https://sing-box.sagernet.org/configuration/outbound/)、[SIP002](https://shadowsocks.org/doc/sip002.html)、[VMess/VLESS 链接提案](https://github.com/XTLS/Xray-core/discussions/716)、[Hysteria2 URI](https://v2.hysteria.network/docs/developers/URI-Scheme/) 和 [AnyTLS URI](https://github.com/anytls/anytls-go/blob/main/docs/uri_scheme.md) 为依据。
 
+### 链式代理（0.11.0）
+
+代理出口可以给所选节点设置最多 2 个前置节点，从同一次导入的节点中选择。连接顺序是：实际出站接口 → 第一跳 → 第二跳 → 所选节点 → 目标，表单在选择框下方显示这条路径。生成的 sing-box 配置给所选节点和第二跳写 `detour`，Mihomo 写 `dialer-proxy`；只有第一跳从实际出站接口连接，sing-box 的出站 IP 也只绑定第一跳和直连出站。直连例外仍直接从上联发出；接管下游 DNS 时，经节点的 DNS 同样走整条链。UDP 需要每一跳都能转发：后面的节点若是 Hysteria2 这类基于 UDP 的协议，前置节点必须支持 UDP。
+
+`set_core_config` 的链接格式接受 `via`：按连接顺序排列、从 0 开始的节点序号，最多 2 项，不能重复，也不能包含所选节点。`value` 留空只调整选择时，链路按本次的 `via` 替换，省略即不使用。`core_form` 返回 `via`；出口卡片、`status.node` 和 `inspect.node` 的 `via` 列出已应用链路中各前置节点的名称和协议，不含地址和凭据。
+
+### 出口串联（0.11.0）
+
+代理出口（Mihomo / sing-box）的“实际出站接口”可以选另一个已应用出口的 WAN 边界（`veerwgN` / `veervpnN`），这个出口就经前一个出口连接它的节点。核心的所有连接（节点、直连例外、节点域名解析）都从前一个出口的边界发出：插件给 sing-box 写 `route.default_interface`，给 Mihomo 写 `interface-name`，前一个出口的 TC 适配器把这些包送进它的隧道。主要用于内核 WireGuard 在前、代理在后，或串联不同的核心；同一个核心内串联节点请用上一节的前置节点，更快。出口卡片在实际出站接口后注明“经出口 …”。
+
+- 应用：前一个出口须已应用，否则报 `upstream_exit_down`，不改动网络。Veer 启动和巡检恢复按依赖顺序先恢复前级；前级未就绪时后级保持撤销状态并自动重试，不会改走物理上联。
+- 限制：一个代理出口前面最多串 2 个出口（`upstream_chain_too_long`），不能成环（`upstream_cycle`），也不能选其他出口的 TUN 或 pipeline 接口（`upstream_invalid`）。WireGuard 和外部 TUN 出口只能做前级。
+- 保护：被其他出口用作上联的出口不能拆除或删除（`upstream_in_use`）；先拆除后级，或把它的上联改成别的接口并重新应用。
+- 反向路径过滤：回到后级核心的包从前级边界进入，而宿主到节点的最优路由走物理上联，`rp_filter=1` 会丢弃这些包。前级边界的有效值（`all` 与该接口取较大值）为 1 时，插件把该边界自己的 `net.ipv4.conf.<边界>.rp_filter` 设为 2，不改 `all` 或其他接口；需要 `/usr/sbin/sysctl`，失败报 `upstream_rp_filter`。
+- 前级边界重建（例如边界被删除后由巡检恢复，或数据路径迁移）后，后级出口约 5 秒内的完整巡检发现边界 ifindex 变化，停止并重新启动核心，绑定新边界，不消耗重启次数。前级核心重启或重新应用会中断后级经它建立的连接。
+- 性能：每多一级就多一次 TUN 和用户态协议栈。测试中两个 sing-box 出口串联比单个核心内的前置节点慢约 20–25%（单流上行约 1.12 对 1.42 Gbit/s）。
+
 自动配置默认把流量发送到所选节点。高级栏可填写直连 CIDR、直连域名及子域名（依赖 HTTP/TLS/QUIC 嗅探，识别不到时仍走节点）。节点域名解析默认使用经实际上联访问的 `223.5.5.5`，可修改。下游 DNS 默认沿用；可选择接管经过此出口的 TCP/UDP 53 流量，通过节点访问指定 DNS（默认 `1.1.1.1`）。LAN 网关代发的 DNS 不一定经过此出口，DoH/DoT 也不属于 53 端口接管范围。
 
 保存并应用出口配置：
@@ -107,7 +130,7 @@ Veer 热重启（部署更新）时，运行中的 Mihomo / sing-box 核心交�
 
 sing-box 使用 `"driver":"sing_box"`。核心配置由 `set_core_config` 加密保存，原生 JSON 最多 768 KiB；API 不指定 `name` 时沿用 `core_<标识>`，指定时写入该 Secret，并通过 profile 的 `config_secret` 引用。页面新建代理配置使用 `core_<driver>_<标识>`，切换核心类型时不会串用另一种核心的配置；已有默认或自定义 Secret 引用继续沿用。链接导入使用 `format:"links"`、`driver`、`value`、从 0 开始的 `selected` 和 `options`；`value` 留空仅调整同类型已导入节点的选择及高级设置。`core_form` 返回不含凭据的编辑摘要。重新应用后生效；恢复使用单独加密保存的已应用配置，不读取后续草稿。
 
-插件生成独占 TUN，强制 gVisor、关闭自动路由和自动重定向，并指定实际上游。Mihomo 额外入站/控制端口及 sing-box 额外入站/experimental 控制项不沿用；不能把 VPN 自身或其他 VPN 边界作为上游。WAN 地址使用 `/32` 或 `/128`，不安装 `remote_routes`。相对文件和资源下载需按核心要求准备，工作目录是受管理的临时目录。
+插件生成独占 TUN，强制 gVisor、关闭自动路由和自动重定向，并指定实际上游。Mihomo 额外入站/控制端口及 sing-box 额外入站/experimental 控制项不沿用；不能把 VPN 自身、其他出口的 TUN 或 pipeline 作为上游；其他已应用出口的 WAN 边界可以，见“出口串联”。WAN 地址使用 `/32` 或 `/128`，不安装 `remote_routes`。相对文件和资源下载需按核心要求准备，工作目录是受管理的临时目录。
 
 `addresses` 可省略或为空，首次应用会检查本机接口网段、非默认路由、其他出口草稿和已应用租约，从有界候选池选择内部 WAN IPv4 `/32`。优先使用 `10.78.<slot>.1/32`，冲突时尝试其他候选；无可用地址时明确失败，不修改网络或启动核心。已分配地址固定在应用租约中，重新应用和恢复时沿用，避免改变现有 LAN/NAT 选择。高级设置仍可显式填写 `addresses`，保留原 API 行为；已保存的显式地址不会被替换。最终地址发布为 `status.wan_addresses` 和 `status.egress_nat_source_ip`。
 
@@ -115,7 +138,7 @@ sing-box 使用 `"driver":"sing_box"`。核心配置由 `set_core_config` 加密
 
 核心进程存在且自有 TUN 就绪后才发布可用 WAN；每秒检查状态、ifindex 和 MTU；启动后默认 30 秒仍未创建 TUN 则按同一预算重启，可用 startup_timeout_seconds 调整为 1–300 秒。失败时撤销 TC 映射和 WAN 可用状态，保留所选出口，不回退到直连。ready 只表示本机接入完成，不代表远端节点健康；核心重启会中断它持有的代理连接。WebUI 可按需读取核心日志的尾部，日志可能包含凭据，不会自动加入状态。
 
-健康轮询优先使用宿主原生接口查询，避免每秒为各出口启动多个 `ip` 子进程；旧宿主缺少 alias/TUN 元数据时仍按单接口调用 `ip` 并核验归属。受管理 sing-box 的 TUN 确认启用 vnet header、TX checksum、SG、TSO 和 GSO 后，WAN 边界保留 GSO/GRO，避免提前逐包分段；`inspect.tun_gso` 显示本代际的决定。TUN 刚创建而 offload 尚未协商完成时，间隔 1 秒最多探测 3 次，期间出口保持未就绪。探测失败或不支持时使用逐包边界，健康轮询不重复执行 `ethtool`；核心重启会重新探测。Mihomo 和外部 TUN 保持逐包边界。
+健康轮询优先使用宿主原生接口查询，避免每秒为各出口启动多个 `ip` 子进程；旧宿主缺少 alias/TUN 元数据时仍按单接口调用 `ip` 并核验归属。受管理 sing-box 和 Mihomo 的 TUN 确认启用 vnet header、TX checksum、SG、TSO 和 GSO 后，WAN 边界保留 GSO/GRO，避免提前逐包分段；`inspect.tun_gso` 显示本代际的决定。TUN 刚创建而 offload 尚未协商完成时，间隔 1 秒最多探测 3 次，期间出口保持未就绪。探测失败或不支持时使用逐包边界，健康轮询不重复读取 offload；核心重启会重新探测。sing-box 自行协商 offload；0.10.0 起生成的 Mihomo 配置写入 `gso: true` 和 `gso-max-size: 65536` 请求协商，不支持该项的核心照常使用逐包边界；已运行的 Mihomo 出口沿用应用时的配置，下次应用后生效。外部 TUN 保持逐包边界。
 
 slot 1 的出口接口为 `veervpn1`，源 IPv4 使用已发布 WAN 的地址（无冲突时自动分配 `10.78.1.1`），模式为 `prepared_l2`。IPv4 NAT 后核心无法直接区分原下游 IP，设备选择留给 Veer。DNS/fake-IP、UDP/ICMP 支持受核心和代理协议约束，不等同于任意 IP 协议的双向路由 VPN；宿主代发 DNS 不自动继承设备出口。
 
@@ -135,7 +158,7 @@ sudo env "PATH=$PATH" sh scripts/verify-vpn-cores.sh
 
 脚本下载固定版本并核验 SHA256，退出后清理；也可通过 `VEER_TEST_MIHOMO` / `VEER_TEST_SING_BOX` 提供本机核心。
 
-同一测试门禁还运行 `TestVPNMultiExitLinuxIntegration`：一个 Veer 同时承载 WG、Mihomo、sing-box 和普通 WAN，各用独立上联。逐出口注入双向 TC 映射丢失/损坏、隧道 DOWN/MTU 漂移、删除/同名外部接口替换、WAN 边界删除、上联 DOWN/重建、核心退出、清理所有权冲突和拆除后重新应用。故障出口恢复后检查实际 TCP/UDP 收发；其余三个出口始终使用原 TCP/UDP socket，逐包核对序号、内容和后端观察到的出口源地址，同时核对核心 PID、边界接口代际及最终资源清理。只在独立测试网络命名空间注入故障。
+同一测试门禁还运行 `TestVPNChainedExitLinuxIntegration`：宿主开严格反向路径过滤，sing-box 出口串在内核 WireGuard 后面、Mihomo 出口串在 sing-box 后面，出口节点只能经前级到达，目标只能经出口节点到达；检查只放宽前级边界、前级未应用时拒绝、被依赖时不能拆除、成环被拒、前级边界重建后后级核心重新绑定，以及 Veer 冷启动后两条链都恢复。还运行 `TestVPNMultiExitLinuxIntegration`：一个 Veer 同时承载 WG、Mihomo、sing-box 和普通 WAN，各用独立上联。逐出口注入双向 TC 映射丢失/损坏、隧道 DOWN/MTU 漂移、删除/同名外部接口替换、WAN 边界删除、上联 DOWN/重建、核心退出、清理所有权冲突和拆除后重新应用。故障出口恢复后检查实际 TCP/UDP 收发；其余三个出口始终使用原 TCP/UDP socket，逐包核对序号、内容和后端观察到的出口源地址，同时核对核心 PID、边界接口代际及最终资源清理。只在独立测试网络命名空间注入故障。
 
 ## WireGuard 驱动
 
@@ -148,11 +171,11 @@ sudo env "PATH=$PATH" sh scripts/verify-vpn-cores.sh
 回包：内核 WG 解密 → TC 补回 Ethernet → WAN local ingress → Veer reply flow → 下游
 ```
 
-JavaScript 负责配置和恢复，不参与逐包转发。无需关闭 Veer 快速 NAT；不创建源地址策略规则、不安装全局默认路由，不使用 `wg-quick`。加密后的外层 UDP 使用主机原有路由，因此上游仍可为物理 WAN 或 PPPoE。
+控制面负责配置和恢复，不参与逐包转发。无需关闭 Veer 快速 NAT；不创建源地址策略规则、不安装全局默认路由，不使用 `wg-quick`。加密后的外层 UDP 使用主机原有路由，因此上游仍可为物理 WAN 或 PPPoE。
 
 ## 安装
 
-默认使用基础 TC 适配器和 veth 分段边界。可选 [Veer 内核扩展](../../KERNEL.md) 支持接收注入时，插件自动选择 `tunnel_adapter-direct.o`，只创建 WAN local dummy 与实际 WG/TUN 两个接口；发送适配挂 local egress，回包补头后直接进入 local ingress。旧版 helper 使用 `tunnel_adapter-kfuncs.o` 与 veth，模块或对象不可用时保留兼容路径。切换能力后正常重载插件会迁移自有边界，保留 WAN 名称、源地址与配置；改变边界类型会中断该出口的既有连接。WireGuard 加密仍由内核 WG 完成。
+默认使用基础 TC 适配器和 veth 分段边界。0.10.0 起基础路径的 WG 边界也保留 GSO，大包整块交给内核 WireGuard 自行分段，不再在边界上逐个 MTU 小包经过 veth 和 TC；已应用的出口在下次应用后生效。可选 [Veer 内核扩展](../../KERNEL.md) 支持接收注入时，插件自动选择 `tunnel_adapter-direct.o`，只创建 WAN local dummy 与实际 WG/TUN 两个接口；发送适配挂 local egress，回包补头后直接进入 local ingress。旧版 helper 使用 `tunnel_adapter-kfuncs.o` 与 veth，模块或对象不可用时保留兼容路径。切换能力后正常重载插件会迁移自有边界，保留 WAN 名称、源地址与配置；改变边界类型会中断该出口的既有连接。WireGuard 加密仍由内核 WG 完成。
 
 `pipeline.node` / `pipeline.handoff` 只是逻辑定义，本身不创建 Linux 网卡。兼容路径的 pipeline veth 则是真实设备，属于插件内部实现，不出现在普通接口列表或规则出口选择中；诊断资源和 `/api/interfaces?include_internal=true` 仍可查看。隐藏前核验 WAN 所有权、boot ID、接口代际、MAC 与双端关系，不按名称前缀隐藏管理员的设备。
 

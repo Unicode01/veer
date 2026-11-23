@@ -1,27 +1,17 @@
 package app
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/dop251/goja"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 )
 
 func (h *pluginControlHost) callPluginHostMethod(method string, arguments []any) (value any, undefined bool, err error) {
 	if h == nil || h.vm == nil {
 		return nil, false, fmt.Errorf("plugin host capability broker is unavailable")
-	}
-	if method == pluginHostInternalModuleLoadMethod {
-		if len(arguments) != 2 {
-			return nil, false, fmt.Errorf("plugin module load expects referrer and request")
-		}
-		referrer, referrerOK := arguments[0].(string)
-		request, requestOK := arguments[1].(string)
-		if !referrerOK || !requestOK {
-			return nil, false, fmt.Errorf("plugin module load paths must be strings")
-		}
-		source, resolveErr := resolvePluginControlModule(h.plugin, referrer, request)
-		return source, false, resolveErr
 	}
 	if !pluginHostMethodAllowed(method) {
 		return nil, false, fmt.Errorf("plugin host method %q is not allowed", method)
@@ -29,8 +19,8 @@ func (h *pluginControlHost) callPluginHostMethod(method string, arguments []any)
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			switch typed := recovered.(type) {
-			case *goja.Exception:
-				err = fmt.Errorf("%s", typed.String())
+			case *hv.Exception:
+				err = errors.New(typed.Error())
 			case error:
 				err = typed
 			default:
@@ -46,29 +36,33 @@ func (h *pluginControlHost) callPluginHostMethod(method string, arguments []any)
 		return nil, false, fmt.Errorf("invalid plugin host method %q", method)
 	}
 	current := h.vm.Get(parts[0])
-	if current == nil || goja.IsUndefined(current) || goja.IsNull(current) {
+	if current == nil || hv.IsUndefined(current) || hv.IsNull(current) {
 		return nil, false, fmt.Errorf("plugin host API %s is unavailable", parts[0])
 	}
 	for _, part := range parts[1 : len(parts)-1] {
 		current = current.ToObject(h.vm).Get(part)
-		if current == nil || goja.IsUndefined(current) || goja.IsNull(current) {
+		if current == nil || hv.IsUndefined(current) || hv.IsNull(current) {
 			return nil, false, fmt.Errorf("plugin host API %s is unavailable", method)
 		}
 	}
 	functionValue := current.ToObject(h.vm).Get(parts[len(parts)-1])
-	function, ok := goja.AssertFunction(functionValue)
+	function, ok := hv.AssertFunction(functionValue)
 	if !ok {
 		return nil, false, fmt.Errorf("plugin host API %s is not callable", method)
 	}
-	values := make([]goja.Value, len(arguments))
+	values := make([]hv.Value, len(arguments))
 	for i, argument := range arguments {
 		values[i] = h.vm.ToValue(argument)
 	}
-	result, callErr := function(goja.Undefined(), values...)
+	result, callErr := function(hv.Undefined(), values...)
 	if callErr != nil {
+		var exception *hv.Exception
+		if errors.As(callErr, &exception) {
+			return nil, false, errors.New(exception.Error())
+		}
 		return nil, false, callErr
 	}
-	if result == nil || goja.IsUndefined(result) {
+	if result == nil || hv.IsUndefined(result) {
 		return nil, true, nil
 	}
 	exported := result.Export()
@@ -84,7 +78,7 @@ func (h *pluginControlHost) runRemoteEvent(
 	invoke func(pluginHostEventRequest) (pluginHostEventResponse, error),
 ) (PluginRuntimeSurface, any, bool, error) {
 	if h == nil || h.runtime == nil || invoke == nil {
-		return PluginRuntimeSurface{}, nil, false, fmt.Errorf("isolated plugin host is unavailable")
+		return PluginRuntimeSurface{}, nil, false, fmt.Errorf("plugin runtime is unavailable")
 	}
 	eventKey := pluginControlEventKey(event)
 	if len(h.eventStack) >= pluginControlMaxNestedEvents {
@@ -134,7 +128,7 @@ func (h *pluginControlHost) runRemoteEvent(
 		Probe:         event.Kind == "upgrade_probe",
 		CaptureResult: pluginHostEventNeedsResult(event),
 		TimeoutMS:     pluginControlTimeout.Milliseconds(),
-		Context:       pluginControlContext(h.plugin, event),
+		Context:       pluginControlRawContext(h.plugin, event),
 	}
 	response, handlerErr := invoke(request)
 	timerOps := append([]pluginControlTimerOperation(nil), h.timerOps...)
@@ -156,11 +150,11 @@ func (h *pluginControlHost) runRemoteEvent(
 	if !request.CaptureResult {
 		return h.surface, nil, true, nil
 	}
-	value := goja.Undefined()
+	value := hv.Undefined()
 	if !response.Undefined && len(response.Value) > 0 {
 		exported, err := decodePluginHostJSONValue(response.Value)
 		if err != nil {
-			return h.surface, nil, true, fmt.Errorf("decode isolated handler result: %w", err)
+			return h.surface, nil, true, fmt.Errorf("decode handler result: %w", err)
 		}
 		value = h.vm.ToValue(exported)
 	}
@@ -190,4 +184,51 @@ func pluginHostEventNeedsResult(event pluginControlEvent) bool {
 		return true
 	}
 	return event.Kind == "action" && event.Action != nil && event.Action.RuntimeUpdate == "runtime_query"
+}
+
+func (h *pluginControlHost) exportUpgradeState(value hv.Value) (any, error) {
+	if value == nil || hv.IsUndefined(value) {
+		return nil, nil
+	}
+	data, err := json.Marshal(value.Export())
+	if err != nil {
+		return nil, fmt.Errorf("upgrade snapshot is not JSON serializable: %w", err)
+	}
+	if len(data) > pluginControlUpgradeMaxStateBytes {
+		return nil, fmt.Errorf("upgrade snapshot exceeds %d bytes", pluginControlUpgradeMaxStateBytes)
+	}
+	return pluginControlDecodeUpgradeState(data)
+}
+
+func (h *pluginControlHost) exportEBPFStateMigrationResult(value hv.Value) (pluginEBPFStateMigrationResult, error) {
+	if value == nil || hv.IsUndefined(value) || hv.IsNull(value) {
+		return pluginEBPFStateMigrationResult{}, fmt.Errorf("eBPF state migration handler must return progress")
+	}
+	data, err := json.Marshal(value.Export())
+	if err != nil {
+		return pluginEBPFStateMigrationResult{}, fmt.Errorf("eBPF state migration result is not JSON serializable: %w", err)
+	}
+	return decodePluginEBPFStateMigrationResult(data)
+}
+
+func (h *pluginControlHost) exportWorkerResult(value hv.Value) (any, error) {
+	return exportPluginHandlerResult(value, "worker result", pluginControlWorkerMaxPayloadBytes)
+}
+
+func (h *pluginControlHost) exportQueryResult(value hv.Value) (any, error) {
+	return exportPluginHandlerResult(value, "runtime query result", pluginControlQueryMaxResultBytes)
+}
+
+func exportPluginHandlerResult(value hv.Value, label string, limit int) (any, error) {
+	if value == nil || hv.IsUndefined(value) {
+		return nil, nil
+	}
+	data, err := json.Marshal(value.Export())
+	if err != nil {
+		return nil, fmt.Errorf("%s is not JSON serializable: %w", label, err)
+	}
+	if len(data) > limit {
+		return nil, fmt.Errorf("%s exceeds %d bytes", label, limit)
+	}
+	return pluginControlDecodeJSON(json.RawMessage(data)), nil
 }

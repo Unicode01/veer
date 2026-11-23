@@ -820,95 +820,163 @@ func normalizePluginControlNeighRequest(req pluginControlNetNeighRequest, requir
 	return req, nil
 }
 
-func (h *pluginControlHost) claimPluginRouteMutation(req pluginControlNetRouteRequest, currentPresent bool, original []pluginControlNetRouteState, identities []pluginOwnedRouteLinkIdentity) (pluginOwnedRouteMutation, bool, bool, error) {
-	if h.db == nil {
-		return pluginOwnedRouteMutation{}, false, false, fmt.Errorf("plugin ownership store is unavailable")
+// pluginOwnedLeasePlan is the lease row a claim leaves behind: existing is
+// the row it read (nil when it inserts one) and metadata what it stores.
+type pluginOwnedLeasePlan[T any] struct {
+	key      string
+	existing *store.PluginOwnedResource
+	previous T
+	fresh    bool
+	metadata string
+}
+
+// unchanged reports whether storing the plan writes nothing.
+func (plan pluginOwnedLeasePlan[T]) unchanged() bool {
+	return plan.existing != nil && plan.existing.MetadataJSON == plan.metadata
+}
+
+// commitPluginOwnedLease stores a planned lease in the claim's transaction.
+func (h *pluginControlHost) commitPluginOwnedLease(tx store.RuleStore, resourceType, key string, existing *store.PluginOwnedResource, metadata string) error {
+	if existing == nil {
+		return store.AddPluginOwnedResource(tx, store.PluginOwnedResource{
+			PluginID: h.plugin.ID, ResourceType: resourceType, ResourceKey: key, MetadataJSON: metadata,
+		})
 	}
-	var err error
-	req, err = validatePluginControlRouteRequest(req)
+	if existing.MetadataJSON != metadata {
+		return store.UpdatePluginOwnedResource(tx, h.plugin.ID, resourceType, key, metadata)
+	}
+	return nil
+}
+
+// preparePluginRouteClaim validates a route claim. untracked reports that
+// the plugin owns every interface the route names, so the route takes no
+// lease of its own.
+func (h *pluginControlHost) preparePluginRouteClaim(req pluginControlNetRouteRequest, identities []pluginOwnedRouteLinkIdentity) (_ pluginControlNetRouteRequest, _ []pluginOwnedRouteLinkIdentity, untracked bool, _ error) {
+	req, err := validatePluginControlRouteRequest(req)
 	if err != nil {
-		return pluginOwnedRouteMutation{}, false, false, err
+		return req, nil, false, err
 	}
 	identities, err = normalizePluginOwnedRouteLinkIdentities(req, identities)
 	if err != nil {
-		return pluginOwnedRouteMutation{}, false, false, err
+		return req, nil, false, err
 	}
 	allOwned := len(identities) > 0
 	for _, identity := range identities {
 		owned, err := h.pluginOwnedLinkState(req.Namespace, identity.Dev, "net.route")
 		if err != nil {
-			return pluginOwnedRouteMutation{}, false, false, err
+			return req, nil, false, err
 		}
 		if !owned {
 			allOwned = false
 		}
 	}
-	if allOwned {
-		return pluginOwnedRouteMutation{}, false, false, nil
+	return req, identities, allOwned, nil
+}
+
+// planPluginRouteLease reads a route's lease through q and works out what a
+// claim stores; it writes nothing.
+func (h *pluginControlHost) planPluginRouteLease(q store.RuleStore, req pluginControlNetRouteRequest, currentPresent bool, original []pluginControlNetRouteState, identities []pluginOwnedRouteLinkIdentity, namespaceIdentity pluginControlNetNamespaceIdentity) (pluginOwnedLeasePlan[pluginOwnedRouteMutation], error) {
+	plan := pluginOwnedLeasePlan[pluginOwnedRouteMutation]{key: pluginControlNetRouteLeaseKey(req)}
+	existing, err := store.PluginOwnedResourceOrNil(q, pluginOwnedResourceTypeRoute, plan.key)
+	if err != nil {
+		return plan, err
+	}
+	plan.existing = existing
+	plan.fresh = existing == nil
+	candidate := pluginOwnedRouteMutation{
+		Version: 1, BootID: pluginOwnershipBootID, NamespaceIdentity: namespaceIdentity, Original: clonePluginControlNetRouteStates(original),
+		DevIfIndex: pluginOwnedRouteLegacyIfIndex(req, identities), LinkIdentities: append([]pluginOwnedRouteLinkIdentity(nil), identities...),
+	}
+	if existing != nil {
+		if existing.PluginID != h.plugin.ID {
+			return plan, fmt.Errorf("route slot %s is owned by plugin %s", plan.key, existing.PluginID)
+		}
+		if err := json.Unmarshal([]byte(existing.MetadataJSON), &plan.previous); err != nil {
+			return plan, fmt.Errorf("decode route ownership metadata: %w", err)
+		}
+		candidateJSON, err := json.Marshal(candidate)
+		if err != nil {
+			return plan, err
+		}
+		if pluginOwnedResourceGenerationChanged(existing.MetadataJSON, candidateJSON) {
+			plan.previous = candidate
+			plan.fresh = true
+		}
+	} else {
+		plan.previous = candidate
+	}
+	next := plan.previous
+	next.Current = req
+	next.CurrentPresent = currentPresent
+	metadata, err := json.Marshal(next)
+	if err != nil {
+		return plan, err
+	}
+	plan.metadata = string(metadata)
+	return plan, nil
+}
+
+func (h *pluginControlHost) claimPluginRouteMutation(req pluginControlNetRouteRequest, currentPresent bool, original []pluginControlNetRouteState, identities []pluginOwnedRouteLinkIdentity) (pluginOwnedRouteMutation, bool, bool, error) {
+	if h.db == nil {
+		return pluginOwnedRouteMutation{}, false, false, fmt.Errorf("plugin ownership store is unavailable")
+	}
+	req, identities, untracked, err := h.preparePluginRouteClaim(req, identities)
+	if err != nil || untracked {
+		return pluginOwnedRouteMutation{}, false, false, err
 	}
 	namespaceIdentity, err := h.pluginControlNamespaceIdentity(req.Namespace)
 	if err != nil {
 		return pluginOwnedRouteMutation{}, false, false, err
 	}
-	key := pluginControlNetRouteLeaseKey(req)
 	tx, err := h.db.Begin()
 	if err != nil {
 		return pluginOwnedRouteMutation{}, false, false, err
 	}
 	defer tx.Rollback()
-	existing, err := store.PluginOwnedResourceOrNil(tx, pluginOwnedResourceTypeRoute, key)
+	plan, err := h.planPluginRouteLease(tx, req, currentPresent, original, identities, namespaceIdentity)
 	if err != nil {
 		return pluginOwnedRouteMutation{}, false, false, err
 	}
-	previous := pluginOwnedRouteMutation{}
-	insert := existing == nil
-	fresh := insert
-	if existing != nil {
-		if existing.PluginID != h.plugin.ID {
-			return pluginOwnedRouteMutation{}, false, false, fmt.Errorf("route slot %s is owned by plugin %s", key, existing.PluginID)
-		}
-		if err := json.Unmarshal([]byte(existing.MetadataJSON), &previous); err != nil {
-			return pluginOwnedRouteMutation{}, false, false, fmt.Errorf("decode route ownership metadata: %w", err)
-		}
-		candidate := pluginOwnedRouteMutation{
-			Version: 1, BootID: pluginOwnershipBootID, NamespaceIdentity: namespaceIdentity, Original: clonePluginControlNetRouteStates(original),
-			DevIfIndex: pluginOwnedRouteLegacyIfIndex(req, identities), LinkIdentities: append([]pluginOwnedRouteLinkIdentity(nil), identities...),
-		}
-		candidateJSON, marshalErr := json.Marshal(candidate)
-		if marshalErr != nil {
-			return pluginOwnedRouteMutation{}, false, false, marshalErr
-		}
-		if pluginOwnedResourceGenerationChanged(existing.MetadataJSON, candidateJSON) {
-			previous = candidate
-			fresh = true
-		}
-	} else {
-		previous = pluginOwnedRouteMutation{
-			Version: 1, BootID: pluginOwnershipBootID, NamespaceIdentity: namespaceIdentity, Original: clonePluginControlNetRouteStates(original),
-			DevIfIndex: pluginOwnedRouteLegacyIfIndex(req, identities), LinkIdentities: append([]pluginOwnedRouteLinkIdentity(nil), identities...),
-		}
-	}
-	next := previous
-	next.Current = req
-	next.CurrentPresent = currentPresent
-	metadata, err := json.Marshal(next)
-	if err != nil {
-		return pluginOwnedRouteMutation{}, false, false, err
-	}
-	if insert {
-		err = store.AddPluginOwnedResource(tx, store.PluginOwnedResource{
-			PluginID: h.plugin.ID, ResourceType: pluginOwnedResourceTypeRoute, ResourceKey: key, MetadataJSON: string(metadata),
-		})
-	} else if existing.MetadataJSON != string(metadata) {
-		err = store.UpdatePluginOwnedResource(tx, h.plugin.ID, pluginOwnedResourceTypeRoute, key, string(metadata))
-	}
-	if err != nil {
+	if err := h.commitPluginOwnedLease(tx, pluginOwnedResourceTypeRoute, plan.key, plan.existing, plan.metadata); err != nil {
 		return pluginOwnedRouteMutation{}, false, false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return pluginOwnedRouteMutation{}, false, false, err
 	}
-	return previous, fresh, true, nil
+	return plan.previous, plan.fresh, true, nil
+}
+
+// pluginRouteClaimWritesNothing reports whether claiming the route, then
+// releasing its lease as a transaction does afterwards, leaves the store
+// as it is.
+func (h *pluginControlHost) pluginRouteClaimWritesNothing(req pluginControlNetRouteRequest, currentPresent bool, original []pluginControlNetRouteState, identities []pluginOwnedRouteLinkIdentity) (bool, error) {
+	if h.db == nil {
+		return false, nil
+	}
+	claimed, identities, untracked, err := h.preparePluginRouteClaim(req, identities)
+	if err != nil {
+		return false, err
+	}
+	if !untracked {
+		namespaceIdentity, err := h.pluginControlNamespaceIdentity(claimed.Namespace)
+		if err != nil {
+			return false, err
+		}
+		plan, err := h.planPluginRouteLease(h.db, claimed, currentPresent, original, identities, namespaceIdentity)
+		if err != nil {
+			return false, err
+		}
+		if plan.existing == nil {
+			// The claim inserts a lease; the release drops it again when the
+			// slot already held what the plugin asks for.
+			return pluginOwnedRouteLeaseRestored(req, currentPresent, plan.previous.Original), nil
+		}
+		if !plan.unchanged() {
+			return false, nil
+		}
+	}
+	release, err := h.pluginRouteLeaseToRelease(req, currentPresent)
+	return err == nil && release == nil, err
 }
 
 func normalizePluginOwnedRouteLinkIdentities(req pluginControlNetRouteRequest, identities []pluginOwnedRouteLinkIdentity) ([]pluginOwnedRouteLinkIdentity, error) {
@@ -962,56 +1030,93 @@ func (h *pluginControlHost) claimPluginRuleMutation(req pluginControlNetRuleRequ
 	if err != nil {
 		return pluginOwnedRuleMutation{}, false, err
 	}
-	key := pluginControlNetRuleLeaseKey(req)
 	tx, err := h.db.Begin()
 	if err != nil {
 		return pluginOwnedRuleMutation{}, false, err
 	}
 	defer tx.Rollback()
-	existing, err := store.PluginOwnedResourceOrNil(tx, pluginOwnedResourceTypeRule, key)
+	plan, err := h.planPluginRuleLease(tx, req, currentPresent, original, namespaceIdentity, links...)
 	if err != nil {
 		return pluginOwnedRuleMutation{}, false, err
 	}
-	previous := pluginOwnedRuleMutation{}
-	created := existing == nil
-	if existing != nil {
-		if existing.PluginID != h.plugin.ID {
-			return pluginOwnedRuleMutation{}, false, fmt.Errorf("policy rule slot %s is owned by plugin %s", key, existing.PluginID)
-		}
-		if err := json.Unmarshal([]byte(existing.MetadataJSON), &previous); err != nil {
-			return pluginOwnedRuleMutation{}, false, fmt.Errorf("decode policy rule ownership metadata: %w", err)
-		}
-		candidate := pluginOwnedRuleMutation{Version: 1, BootID: pluginOwnershipBootID, NamespaceIdentity: namespaceIdentity, LinkIdentities: pluginOwnedIdentitiesFromTransactionLinks(links...), Original: append([]pluginControlNetRuleState(nil), original...)}
-		candidateJSON, marshalErr := json.Marshal(candidate)
-		if marshalErr != nil {
-			return pluginOwnedRuleMutation{}, false, marshalErr
-		}
-		if pluginOwnedResourceGenerationChanged(existing.MetadataJSON, candidateJSON) {
-			previous = candidate
-			created = true
-		}
-	} else {
-		previous = pluginOwnedRuleMutation{Version: 1, BootID: pluginOwnershipBootID, NamespaceIdentity: namespaceIdentity, LinkIdentities: pluginOwnedIdentitiesFromTransactionLinks(links...), Original: append([]pluginControlNetRuleState(nil), original...)}
-	}
-	next := previous
-	next.Current = req
-	next.CurrentPresent = currentPresent
-	metadata, err := json.Marshal(next)
-	if err != nil {
-		return pluginOwnedRuleMutation{}, false, err
-	}
-	if existing == nil {
-		err = store.AddPluginOwnedResource(tx, store.PluginOwnedResource{PluginID: h.plugin.ID, ResourceType: pluginOwnedResourceTypeRule, ResourceKey: key, MetadataJSON: string(metadata)})
-	} else if existing.MetadataJSON != string(metadata) {
-		err = store.UpdatePluginOwnedResource(tx, h.plugin.ID, pluginOwnedResourceTypeRule, key, string(metadata))
-	}
-	if err != nil {
+	if err := h.commitPluginOwnedLease(tx, pluginOwnedResourceTypeRule, plan.key, plan.existing, plan.metadata); err != nil {
 		return pluginOwnedRuleMutation{}, false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return pluginOwnedRuleMutation{}, false, err
 	}
-	return previous, created, nil
+	return plan.previous, plan.fresh, nil
+}
+
+// planPluginRuleLease reads a policy rule's lease through q and works out
+// what a claim stores; it writes nothing.
+func (h *pluginControlHost) planPluginRuleLease(q store.RuleStore, req pluginControlNetRuleRequest, currentPresent bool, original []pluginControlNetRuleState, namespaceIdentity pluginControlNetNamespaceIdentity, links ...[]pluginNetTransactionLinkIdentity) (pluginOwnedLeasePlan[pluginOwnedRuleMutation], error) {
+	plan := pluginOwnedLeasePlan[pluginOwnedRuleMutation]{key: pluginControlNetRuleLeaseKey(req)}
+	existing, err := store.PluginOwnedResourceOrNil(q, pluginOwnedResourceTypeRule, plan.key)
+	if err != nil {
+		return plan, err
+	}
+	plan.existing = existing
+	plan.fresh = existing == nil
+	candidate := pluginOwnedRuleMutation{Version: 1, BootID: pluginOwnershipBootID, NamespaceIdentity: namespaceIdentity, LinkIdentities: pluginOwnedIdentitiesFromTransactionLinks(links...), Original: append([]pluginControlNetRuleState(nil), original...)}
+	if existing != nil {
+		if existing.PluginID != h.plugin.ID {
+			return plan, fmt.Errorf("policy rule slot %s is owned by plugin %s", plan.key, existing.PluginID)
+		}
+		if err := json.Unmarshal([]byte(existing.MetadataJSON), &plan.previous); err != nil {
+			return plan, fmt.Errorf("decode policy rule ownership metadata: %w", err)
+		}
+		candidateJSON, err := json.Marshal(candidate)
+		if err != nil {
+			return plan, err
+		}
+		if pluginOwnedResourceGenerationChanged(existing.MetadataJSON, candidateJSON) {
+			plan.previous = candidate
+			plan.fresh = true
+		}
+	} else {
+		plan.previous = candidate
+	}
+	next := plan.previous
+	next.Current = req
+	next.CurrentPresent = currentPresent
+	metadata, err := json.Marshal(next)
+	if err != nil {
+		return plan, err
+	}
+	plan.metadata = string(metadata)
+	return plan, nil
+}
+
+// pluginRuleClaimWritesNothing reports whether claiming the policy rule,
+// then releasing its lease as a transaction does afterwards, leaves the
+// store as it is.
+func (h *pluginControlHost) pluginRuleClaimWritesNothing(req pluginControlNetRuleRequest, currentPresent bool, original []pluginControlNetRuleState, links ...[]pluginNetTransactionLinkIdentity) (bool, error) {
+	if h.db == nil {
+		return false, nil
+	}
+	claimed, err := normalizePluginControlRuleRequest(req)
+	if err != nil {
+		return false, err
+	}
+	namespaceIdentity, err := h.pluginControlNamespaceIdentity(claimed.Namespace)
+	if err != nil {
+		return false, err
+	}
+	plan, err := h.planPluginRuleLease(h.db, claimed, currentPresent, original, namespaceIdentity, links...)
+	if err != nil {
+		return false, err
+	}
+	if plan.existing == nil {
+		// The claim inserts a lease; the release drops it again when the
+		// slot already held what the plugin asks for.
+		return pluginOwnedRuleLeaseRestored(req, currentPresent, plan.previous.Original), nil
+	}
+	if !plan.unchanged() {
+		return false, nil
+	}
+	release, err := h.pluginRuleLeaseToRelease(req, currentPresent)
+	return err == nil && release == nil, err
 }
 
 func (h *pluginControlHost) claimPluginNeighMutation(req pluginControlNetNeighRequest, currentPresent bool, original []pluginControlNetNeighState, devIfIndex int, links ...[]pluginNetTransactionLinkIdentity) (pluginOwnedNeighMutation, bool, bool, error) {
@@ -1033,60 +1138,101 @@ func (h *pluginControlHost) claimPluginNeighMutation(req pluginControlNetNeighRe
 	if err != nil {
 		return pluginOwnedNeighMutation{}, false, false, err
 	}
-	key := pluginControlNetNeighLeaseKey(req)
 	tx, err := h.db.Begin()
 	if err != nil {
 		return pluginOwnedNeighMutation{}, false, false, err
 	}
 	defer tx.Rollback()
-	existing, err := store.PluginOwnedResourceOrNil(tx, pluginOwnedResourceTypeNeighbor, key)
+	plan, err := h.planPluginNeighLease(tx, req, currentPresent, original, devIfIndex, namespaceIdentity, links...)
 	if err != nil {
 		return pluginOwnedNeighMutation{}, false, false, err
 	}
-	previous := pluginOwnedNeighMutation{}
-	created := existing == nil
-	if existing != nil {
-		if existing.PluginID != h.plugin.ID {
-			return pluginOwnedNeighMutation{}, false, false, fmt.Errorf("neighbor slot %s is owned by plugin %s", key, existing.PluginID)
-		}
-		if err := json.Unmarshal([]byte(existing.MetadataJSON), &previous); err != nil {
-			return pluginOwnedNeighMutation{}, false, false, fmt.Errorf("decode neighbor ownership metadata: %w", err)
-		}
-		candidate := pluginOwnedNeighMutation{
-			Version: 1, BootID: pluginOwnershipBootID, NamespaceIdentity: namespaceIdentity, LinkIdentities: pluginOwnedIdentitiesFromTransactionLinks(links...), Original: append([]pluginControlNetNeighState(nil), original...), DevIfIndex: devIfIndex,
-		}
-		candidateJSON, marshalErr := json.Marshal(candidate)
-		if marshalErr != nil {
-			return pluginOwnedNeighMutation{}, false, false, marshalErr
-		}
-		if pluginOwnedResourceGenerationChanged(existing.MetadataJSON, candidateJSON) {
-			previous = candidate
-			created = true
-		}
-	} else {
-		previous = pluginOwnedNeighMutation{
-			Version: 1, BootID: pluginOwnershipBootID, NamespaceIdentity: namespaceIdentity, LinkIdentities: pluginOwnedIdentitiesFromTransactionLinks(links...), Original: append([]pluginControlNetNeighState(nil), original...), DevIfIndex: devIfIndex,
-		}
-	}
-	next := previous
-	next.Current = req
-	next.CurrentPresent = currentPresent
-	metadata, err := json.Marshal(next)
-	if err != nil {
-		return pluginOwnedNeighMutation{}, false, false, err
-	}
-	if existing == nil {
-		err = store.AddPluginOwnedResource(tx, store.PluginOwnedResource{PluginID: h.plugin.ID, ResourceType: pluginOwnedResourceTypeNeighbor, ResourceKey: key, MetadataJSON: string(metadata)})
-	} else if existing.MetadataJSON != string(metadata) {
-		err = store.UpdatePluginOwnedResource(tx, h.plugin.ID, pluginOwnedResourceTypeNeighbor, key, string(metadata))
-	}
-	if err != nil {
+	if err := h.commitPluginOwnedLease(tx, pluginOwnedResourceTypeNeighbor, plan.key, plan.existing, plan.metadata); err != nil {
 		return pluginOwnedNeighMutation{}, false, false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return pluginOwnedNeighMutation{}, false, false, err
 	}
-	return previous, created, true, nil
+	return plan.previous, plan.fresh, true, nil
+}
+
+// planPluginNeighLease reads a neighbour's lease through q and works out
+// what a claim stores; it writes nothing.
+func (h *pluginControlHost) planPluginNeighLease(q store.RuleStore, req pluginControlNetNeighRequest, currentPresent bool, original []pluginControlNetNeighState, devIfIndex int, namespaceIdentity pluginControlNetNamespaceIdentity, links ...[]pluginNetTransactionLinkIdentity) (pluginOwnedLeasePlan[pluginOwnedNeighMutation], error) {
+	plan := pluginOwnedLeasePlan[pluginOwnedNeighMutation]{key: pluginControlNetNeighLeaseKey(req)}
+	existing, err := store.PluginOwnedResourceOrNil(q, pluginOwnedResourceTypeNeighbor, plan.key)
+	if err != nil {
+		return plan, err
+	}
+	plan.existing = existing
+	plan.fresh = existing == nil
+	candidate := pluginOwnedNeighMutation{
+		Version: 1, BootID: pluginOwnershipBootID, NamespaceIdentity: namespaceIdentity, LinkIdentities: pluginOwnedIdentitiesFromTransactionLinks(links...), Original: append([]pluginControlNetNeighState(nil), original...), DevIfIndex: devIfIndex,
+	}
+	if existing != nil {
+		if existing.PluginID != h.plugin.ID {
+			return plan, fmt.Errorf("neighbor slot %s is owned by plugin %s", plan.key, existing.PluginID)
+		}
+		if err := json.Unmarshal([]byte(existing.MetadataJSON), &plan.previous); err != nil {
+			return plan, fmt.Errorf("decode neighbor ownership metadata: %w", err)
+		}
+		candidateJSON, err := json.Marshal(candidate)
+		if err != nil {
+			return plan, err
+		}
+		if pluginOwnedResourceGenerationChanged(existing.MetadataJSON, candidateJSON) {
+			plan.previous = candidate
+			plan.fresh = true
+		}
+	} else {
+		plan.previous = candidate
+	}
+	next := plan.previous
+	next.Current = req
+	next.CurrentPresent = currentPresent
+	metadata, err := json.Marshal(next)
+	if err != nil {
+		return plan, err
+	}
+	plan.metadata = string(metadata)
+	return plan, nil
+}
+
+// pluginNeighClaimWritesNothing reports whether claiming the neighbour,
+// then releasing its lease as a transaction does afterwards, leaves the
+// store as it is.
+func (h *pluginControlHost) pluginNeighClaimWritesNothing(req pluginControlNetNeighRequest, currentPresent bool, original []pluginControlNetNeighState, devIfIndex int, links ...[]pluginNetTransactionLinkIdentity) (bool, error) {
+	if h.db == nil {
+		return false, nil
+	}
+	claimed, err := normalizePluginControlNeighRequest(req, currentPresent)
+	if err != nil {
+		return false, err
+	}
+	owned, err := h.pluginOwnedLinkState(claimed.Namespace, claimed.Interface, "net.neigh")
+	if err != nil {
+		return false, err
+	}
+	if !owned {
+		namespaceIdentity, err := h.pluginControlNamespaceIdentity(claimed.Namespace)
+		if err != nil {
+			return false, err
+		}
+		plan, err := h.planPluginNeighLease(h.db, claimed, currentPresent, original, devIfIndex, namespaceIdentity, links...)
+		if err != nil {
+			return false, err
+		}
+		if plan.existing == nil {
+			// The claim inserts a lease; the release drops it again when the
+			// slot already held what the plugin asks for.
+			return pluginOwnedNeighLeaseRestored(req, currentPresent, plan.previous.Original), nil
+		}
+		if !plan.unchanged() {
+			return false, nil
+		}
+	}
+	release, err := h.pluginNeighLeaseToRelease(req, currentPresent)
+	return err == nil && release == nil, err
 }
 
 func rollbackPluginLinkOperation(admin pluginControlNetAdmin, info pluginControlNetLinkInfo, originals map[string]any) error {
@@ -1213,70 +1359,107 @@ func (h *pluginControlHost) releaseRestoredPluginAddressLease(req pluginControlN
 	return nil
 }
 
-func (h *pluginControlHost) releaseRestoredPluginRouteLease(req pluginControlNetRouteRequest, present bool) error {
-	key := pluginControlNetRouteLeaseKey(req)
-	owned, err := store.PluginOwnedResourceOrNil(h.db, pluginOwnedResourceTypeRoute, key)
+// pluginRouteLeaseToRelease returns the route lease a transaction drops
+// once the route is back to the state it had before the plugin claimed it,
+// or nil when the lease stays.
+func (h *pluginControlHost) pluginRouteLeaseToRelease(req pluginControlNetRouteRequest, present bool) (*store.PluginOwnedResource, error) {
+	owned, err := store.PluginOwnedResourceOrNil(h.db, pluginOwnedResourceTypeRoute, pluginControlNetRouteLeaseKey(req))
 	if err != nil || owned == nil || owned.PluginID != h.plugin.ID {
-		return err
+		return nil, err
 	}
 	var metadata pluginOwnedRouteMutation
 	if err := json.Unmarshal([]byte(owned.MetadataJSON), &metadata); err != nil {
-		return err
+		return nil, err
 	}
-	restored := !present && len(metadata.Original) == 0
-	if present && len(metadata.Original) == 1 {
-		restored = pluginControlRouteRequestMatchesState(req, metadata.Original[0])
+	if !pluginOwnedRouteLeaseRestored(req, present, metadata.Original) {
+		return nil, nil
 	}
-	if !restored {
-		return nil
-	}
-	if err := store.DeletePluginOwnedResource(h.db, h.plugin.ID, pluginOwnedResourceTypeRoute, key); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	return nil
+	return owned, nil
 }
 
-func (h *pluginControlHost) releaseRestoredPluginRuleLease(req pluginControlNetRuleRequest, present bool) error {
-	key := pluginControlNetRuleLeaseKey(req)
-	owned, err := store.PluginOwnedResourceOrNil(h.db, pluginOwnedResourceTypeRule, key)
-	if err != nil || owned == nil || owned.PluginID != h.plugin.ID {
+func (h *pluginControlHost) releaseRestoredPluginRouteLease(req pluginControlNetRouteRequest, present bool) error {
+	owned, err := h.pluginRouteLeaseToRelease(req, present)
+	if err != nil || owned == nil {
 		return err
+	}
+	return h.deletePluginOwnedLease(pluginOwnedResourceTypeRoute, owned.ResourceKey)
+}
+
+// pluginRuleLeaseToRelease is pluginRouteLeaseToRelease for policy rules.
+func (h *pluginControlHost) pluginRuleLeaseToRelease(req pluginControlNetRuleRequest, present bool) (*store.PluginOwnedResource, error) {
+	owned, err := store.PluginOwnedResourceOrNil(h.db, pluginOwnedResourceTypeRule, pluginControlNetRuleLeaseKey(req))
+	if err != nil || owned == nil || owned.PluginID != h.plugin.ID {
+		return nil, err
 	}
 	var metadata pluginOwnedRuleMutation
 	if err := json.Unmarshal([]byte(owned.MetadataJSON), &metadata); err != nil {
-		return err
+		return nil, err
 	}
-	restored := !present && len(metadata.Original) == 0
-	if present && len(metadata.Original) == 1 {
-		restored = pluginControlRuleRequestMatchesState(req, metadata.Original[0])
+	if !pluginOwnedRuleLeaseRestored(req, present, metadata.Original) {
+		return nil, nil
 	}
-	if !restored {
-		return nil
-	}
-	if err := store.DeletePluginOwnedResource(h.db, h.plugin.ID, pluginOwnedResourceTypeRule, key); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	return nil
+	return owned, nil
 }
 
-func (h *pluginControlHost) releaseRestoredPluginNeighLease(req pluginControlNetNeighRequest, present bool) error {
-	key := pluginControlNetNeighLeaseKey(req)
-	owned, err := store.PluginOwnedResourceOrNil(h.db, pluginOwnedResourceTypeNeighbor, key)
-	if err != nil || owned == nil || owned.PluginID != h.plugin.ID {
+func (h *pluginControlHost) releaseRestoredPluginRuleLease(req pluginControlNetRuleRequest, present bool) error {
+	owned, err := h.pluginRuleLeaseToRelease(req, present)
+	if err != nil || owned == nil {
 		return err
+	}
+	return h.deletePluginOwnedLease(pluginOwnedResourceTypeRule, owned.ResourceKey)
+}
+
+// pluginNeighLeaseToRelease is pluginRouteLeaseToRelease for neighbours.
+func (h *pluginControlHost) pluginNeighLeaseToRelease(req pluginControlNetNeighRequest, present bool) (*store.PluginOwnedResource, error) {
+	owned, err := store.PluginOwnedResourceOrNil(h.db, pluginOwnedResourceTypeNeighbor, pluginControlNetNeighLeaseKey(req))
+	if err != nil || owned == nil || owned.PluginID != h.plugin.ID {
+		return nil, err
 	}
 	var metadata pluginOwnedNeighMutation
 	if err := json.Unmarshal([]byte(owned.MetadataJSON), &metadata); err != nil {
+		return nil, err
+	}
+	if !pluginOwnedNeighLeaseRestored(req, present, metadata.Original) {
+		return nil, nil
+	}
+	return owned, nil
+}
+
+func (h *pluginControlHost) releaseRestoredPluginNeighLease(req pluginControlNetNeighRequest, present bool) error {
+	owned, err := h.pluginNeighLeaseToRelease(req, present)
+	if err != nil || owned == nil {
 		return err
 	}
-	restored := !present && len(metadata.Original) == 0
-	if present && len(metadata.Original) == 1 {
-		restored = pluginControlNeighRequestMatchesState(req, metadata.Original[0])
+	return h.deletePluginOwnedLease(pluginOwnedResourceTypeNeighbor, owned.ResourceKey)
+}
+
+// The release drops a lease once the slot is back to what it held before
+// the plugin claimed it: absent for a delete, the one original entry for a
+// replace.
+
+func pluginOwnedRouteLeaseRestored(req pluginControlNetRouteRequest, present bool, original []pluginControlNetRouteState) bool {
+	if !present {
+		return len(original) == 0
 	}
-	if !restored {
-		return nil
+	return len(original) == 1 && pluginControlRouteRequestMatchesState(req, original[0])
+}
+
+func pluginOwnedRuleLeaseRestored(req pluginControlNetRuleRequest, present bool, original []pluginControlNetRuleState) bool {
+	if !present {
+		return len(original) == 0
 	}
-	if err := store.DeletePluginOwnedResource(h.db, h.plugin.ID, pluginOwnedResourceTypeNeighbor, key); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	return len(original) == 1 && pluginControlRuleRequestMatchesState(req, original[0])
+}
+
+func pluginOwnedNeighLeaseRestored(req pluginControlNetNeighRequest, present bool, original []pluginControlNetNeighState) bool {
+	if !present {
+		return len(original) == 0
+	}
+	return len(original) == 1 && pluginControlNeighRequestMatchesState(req, original[0])
+}
+
+func (h *pluginControlHost) deletePluginOwnedLease(resourceType, key string) error {
+	if err := store.DeletePluginOwnedResource(h.db, h.plugin.ID, resourceType, key); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	return nil
@@ -1297,7 +1480,15 @@ func pluginControlNeighRequestMatchesState(req pluginControlNetNeighRequest, sta
 		return false
 	}
 	want, err := normalizePluginControlNeighRequest(state.Request, true)
-	return err == nil && req == want
+	if err != nil {
+		return false
+	}
+	// A snapshot is taken of the request's own slot and leaves the namespace
+	// and the ifindex guard a transaction sets empty: they are not part of
+	// the entry. Comparing them made every replace of a static neighbour
+	// that already held write it to the kernel again.
+	want.Namespace, want.expectedIfIndex = req.Namespace, req.expectedIfIndex
+	return req == want
 }
 
 func pluginControlRouteRequestMatchesState(req pluginControlNetRouteRequest, state pluginControlNetRouteState) bool {
@@ -1918,7 +2109,7 @@ func pluginOwnedResourceCleanupPriority(item store.PluginOwnedResource) int {
 	}
 }
 
-func (rt *gojaPluginControlRuntime) cleanupInactivePluginOwnedResources(active map[string]LoadedPlugin) map[string]error {
+func (rt *pluginControlManager) cleanupInactivePluginOwnedResources(active map[string]LoadedPlugin) map[string]error {
 	if rt == nil || rt.db == nil || rt.netAdmin == nil {
 		return nil
 	}

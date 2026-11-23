@@ -23,7 +23,7 @@ exports.onAction = function () {
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
 	controller := &pluginControlMapTransactionControllerTest{pluginControlMapControllerTest: &pluginControlMapControllerTest{}}
-	runtime := newPluginControlRuntime(db, cfg, controller).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, controller).(*pluginControlManager)
 	defer runtime.Close()
 	catalog := loadPluginCatalogWithState(cfg, db)
 	assertPluginReconcileSuccess(t, runtime, catalog, "map_tx")
@@ -65,7 +65,7 @@ exports.onAction = function () {
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
 	controller := &pluginControlMapTransactionControllerTest{pluginControlMapControllerTest: &pluginControlMapControllerTest{}}
-	runtime := newPluginControlRuntime(db, cfg, controller).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, controller).(*pluginControlManager)
 	defer runtime.Close()
 	catalog := loadPluginCatalogWithState(cfg, db)
 	assertPluginReconcileSuccess(t, runtime, catalog, "map_tx_duplicate")
@@ -92,7 +92,7 @@ exports.onAction = function () {
 		pluginControlMapControllerTest: &pluginControlMapControllerTest{},
 		err:                            errors.New("injected map transaction failure"),
 	}
-	runtime := newPluginControlRuntime(db, cfg, controller).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, controller).(*pluginControlManager)
 	defer runtime.Close()
 	catalog := loadPluginCatalogWithState(cfg, db)
 	assertPluginReconcileSuccess(t, runtime, catalog, "map_tx_failure")

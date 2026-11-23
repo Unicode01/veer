@@ -137,7 +137,13 @@ func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) (*apiServer, error) {
 	} else if apiBindExposesRemoteClients(cfg) {
 		log.Printf("SECURITY WARNING: management API %s is exposed over plaintext HTTP; set web_tls to true, restrict it to a trusted network, or place it behind TLS", addr)
 	}
-	handler := buildAPIHandler(cfg, db, pm)
+	sessionKey, err := loadOrCreateWebSessionKey(".")
+	if err != nil {
+		return nil, fmt.Errorf("panel session key: %w", err)
+	}
+	auth := newWebAuth(cfg, db, pm, webAuthOptions{key: sessionKey})
+	logWebAuthStartup(cfg, auth)
+	handler := buildAPIHandlerWithAuth(cfg, db, pm, auth)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
@@ -161,8 +167,15 @@ func startAPI(cfg *Config, db *sql.DB, pm *ProcessManager) (*apiServer, error) {
 	return server, nil
 }
 
+// buildAPIHandler serves the panel with a session key that lives only as
+// long as the handler; startAPI uses the persistent one.
 func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
+	return buildAPIHandlerWithAuth(cfg, db, pm, newWebAuth(cfg, db, pm, webAuthOptions{}))
+}
+
+func buildAPIHandlerWithAuth(cfg *Config, db *sql.DB, pm *ProcessManager, auth *webAuth) http.Handler {
 	mux := http.NewServeMux()
+	auth.register(mux)
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -583,7 +596,7 @@ func buildAPIHandler(cfg *Config, db *sql.DB, pm *ProcessManager) http.Handler {
 		}
 		handleListCurrentConns(w, r, db, pm)
 	}))
-	return securityHeadersMiddleware(authFailureLimitMiddleware(cfg, pluginInstallationPolicyMiddleware(cfg, mux)))
+	return securityHeadersMiddleware(auth.middleware(pluginInstallationPolicyMiddleware(cfg, mux)))
 }
 
 func apiListenAddr(cfg *Config) string {
@@ -634,10 +647,30 @@ func newAPIAuthFailureLimiter() *apiAuthFailureLimiter {
 	}
 }
 
+// apiAuthLimiterKey is the bucket a client's failures count in: its IPv4
+// address, or the /64 of an IPv6 address, since one host commonly holds a
+// whole /64 and could otherwise spread its guesses over billions of
+// addresses. Anything that is not an IP address is its own bucket.
+func apiAuthLimiterKey(client string) string {
+	ip := net.ParseIP(client)
+	if ip == nil {
+		return client
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
+
+// allowFailure counts one failure for client and reports whether it is
+// still within its limit. A full table never refuses a client it has no
+// entry for: the entry whose window started first makes room, so filling
+// the table from many addresses cannot lock everyone else out.
 func (l *apiAuthFailureLimiter) allowFailure(client string) (bool, time.Duration) {
 	if l == nil {
 		return true, 0
 	}
+	client = apiAuthLimiterKey(client)
 	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -655,7 +688,7 @@ func (l *apiAuthFailureLimiter) allowFailure(client string) (bool, time.Duration
 			l.pruneExpiredLocked(now)
 		}
 		if len(l.entries) >= apiAuthFailureMaxClients {
-			return false, apiAuthFailureWindow
+			l.evictOldestLocked()
 		}
 		entry.windowStart = now
 	}
@@ -668,9 +701,21 @@ func (l *apiAuthFailureLimiter) reset(client string) {
 	if l == nil {
 		return
 	}
+	client = apiAuthLimiterKey(client)
 	l.mu.Lock()
 	delete(l.entries, client)
 	l.mu.Unlock()
+}
+
+func (l *apiAuthFailureLimiter) evictOldestLocked() {
+	oldest := ""
+	var oldestStart time.Time
+	for client, entry := range l.entries {
+		if oldest == "" || entry.windowStart.Before(oldestStart) {
+			oldest, oldestStart = client, entry.windowStart
+		}
+	}
+	delete(l.entries, oldest)
 }
 
 func (l *apiAuthFailureLimiter) pruneExpiredLocked(now time.Time) {
@@ -681,25 +726,22 @@ func (l *apiAuthFailureLimiter) pruneExpiredLocked(now time.Time) {
 	}
 }
 
-func authFailureLimitMiddleware(cfg *Config, next http.Handler) http.Handler {
-	limiter := newAPIAuthFailureLimiter()
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !apiCredentialProtectedPath(r.URL.Path) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		client := apiAuthClientKey(r)
-		if authorizedAPIRequest(cfg, r) {
-			limiter.reset(client)
-			next.ServeHTTP(w, r)
-			return
-		}
-		if allowed, retryAfter := limiter.allowFailure(client); !allowed {
-			writeAPIAuthRateLimit(w, retryAfter)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+// release gives back one attempt that allowFailure counted for a request
+// that then could not be checked at all.
+func (l *apiAuthFailureLimiter) release(client string) {
+	if l == nil {
+		return
+	}
+	client = apiAuthLimiterKey(client)
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	entry, ok := l.entries[client]
+	if !ok || entry.failures == 0 || !now.Before(entry.windowStart.Add(apiAuthFailureWindow)) {
+		return
+	}
+	entry.failures--
+	l.entries[client] = entry
 }
 
 func apiCredentialProtectedPath(path string) bool {
@@ -736,11 +778,18 @@ func writeAPIAuthRateLimit(w http.ResponseWriter, retryAfter time.Duration) {
 	writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many authentication attempts"})
 }
 
+func writeAPIUnauthorized(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if state := webAuthStateFromRequest(r); state != nil && state.refused != "" {
+		w.Header().Set(webAuthReasonHeader, state.refused)
+	}
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+}
+
 func authMiddleware(cfg *Config, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !authorizedAPIRequest(cfg, r) {
-			w.Header().Set("Cache-Control", "no-store")
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeAPIUnauthorized(w, r)
 			return
 		}
 		w.Header().Set("Cache-Control", "no-store")
@@ -784,17 +833,22 @@ func authorizedPluginAdminRequest(cfg *Config, r *http.Request) bool {
 func authStaticMiddleware(cfg *Config, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !authorizedAPIRequest(cfg, r) {
-			w.Header().Set("Cache-Control", "no-store")
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeAPIUnauthorized(w, r)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
+// authorizedAPIRequest reports whether r carries valid credentials: the
+// identity the web auth middleware found (a session cookie or the Bearer
+// token), or, for a handler used without that middleware, the Bearer token.
 func authorizedAPIRequest(cfg *Config, r *http.Request) bool {
-	if cfg == nil {
+	if cfg == nil || r == nil {
 		return false
+	}
+	if state := webAuthStateFromRequest(r); state != nil {
+		return state.identity != nil
 	}
 	expected := strings.TrimSpace(cfg.WebToken)
 	fields := strings.Fields(strings.TrimSpace(r.Header.Get("Authorization")))

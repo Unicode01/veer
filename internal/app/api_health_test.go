@@ -218,6 +218,8 @@ func TestBuildAPIHandlerCanDisableStaticWebUIOnly(t *testing.T) {
 }
 
 func TestStartAPIReportsBindFailure(t *testing.T) {
+	// startAPI keeps its state (session key, certificate) in the working directory.
+	t.Chdir(t.TempDir())
 	db := openTestDB(t)
 	pm := &ProcessManager{}
 

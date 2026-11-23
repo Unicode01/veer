@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 	"io"
 	"os"
 	"strings"
@@ -10,7 +11,6 @@ import (
 	"time"
 
 	"github.com/Unicode01/veer/internal/store"
-	"github.com/dop251/goja"
 )
 
 func TestPluginExecHelper(t *testing.T) {
@@ -96,7 +96,7 @@ func TestPluginExecBrokerAuthorization(t *testing.T) {
 	argument := map[string]any{"command": request.Command, "args": request.Args}
 	for _, mode := range []string{"local", "remote", "permission", "registration", "upgrade", "migration", "deadline"} {
 		t.Run(mode, func(t *testing.T) {
-			host := &pluginControlHost{vm: goja.New(), cfg: &Config{}}
+			host := &pluginControlHost{vm: hv.New(), cfg: &Config{}}
 			host.plugin.Control = &PluginControl{Permissions: []string{"exec"}}
 			switch mode {
 			case "remote":
@@ -169,7 +169,7 @@ func TestPluginExecThroughIsolatedAndInProcessRuntime(t *testing.T) {
 			}
 			plugin := loadTestPluginByID(t, cfg, "exec_runtime")
 			db := openTestDB(t)
-			runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+			runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 			t.Cleanup(func() { _ = runtime.Close() })
 			if err := runtime.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`)); err != nil {
 				t.Fatal(err)

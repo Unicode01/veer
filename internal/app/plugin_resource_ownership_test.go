@@ -20,7 +20,7 @@ exports.onAction = function () {
 `)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	runtime.netAdmin = controller
 	defer runtime.Close()
@@ -51,7 +51,7 @@ exports.onAction = function () { return net.link.ensureDummy({name:"veerexisting
 `)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{links: map[string]pluginControlNetLinkInfo{
 		"veerexisting0": {Name: "veerexisting0", Kind: "dummy", IfIndex: 42, MTU: 1500, Up: true},
 	}}
@@ -91,7 +91,7 @@ exports.onAction = function (ctx) {
 };`)
 			cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 			db := openTestDB(t)
-			runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+			runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 			controller := &ownedVethDeleteTestAdmin{&pluginControlNetAdminTest{}}
 			runtime.netAdmin = controller
 			defer runtime.Close()
@@ -151,7 +151,7 @@ exports.onAction = function () {
 `)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	runtime.netAdmin = controller
 	defer runtime.Close()
@@ -172,7 +172,7 @@ func TestPluginCannotTakeOverAnotherPluginsOwnedLink(t *testing.T) {
 	writeOwnedLinkPlugin(t, dir, `exports.onAction = function () { net.link.ensureDummy({name:"veershared0", mtu:1500, up:true}); };`)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	runtime.netAdmin = &pluginControlNetAdminTest{}
 	defer runtime.Close()
 	catalog := loadPluginCatalogWithState(cfg, db)
@@ -236,7 +236,7 @@ exports.onAction = function () {
 };`)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	originalRoute := pluginControlNetRouteState{Dst: "0.0.0.0/0", Gateway: "192.0.2.254", Dev: "host0", DevIfIndex: 50, Table: 100}
 	ruleRequest := pluginControlNetRuleRequest{Family: "ipv4", Priority: 1000, Table: 100, Src: "192.0.2.0/24", IIF: "host0"}
 	neighborRequest := pluginControlNetNeighRequest{Interface: "host0", IP: "192.0.2.1", State: "permanent"}
@@ -292,7 +292,7 @@ func TestPluginNetworkLeaseRejectsCrossPluginTakeover(t *testing.T) {
 	writeNetworkLeasePlugin(t, dir, "lease_contender", `exports.onAction = function () { net.link.setMTU("host0", 1300); };`)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	runtime.netAdmin = &pluginControlNetAdminTest{links: map[string]pluginControlNetLinkInfo{
 		"host0": {Name: "host0", IfIndex: 50, Kind: "device", MTU: 1500, MAC: "02:00:00:00:50:01", Up: true, ARP: true},
 	}}
@@ -323,7 +323,7 @@ exports.onAction = function () {
 };`)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	runtime.netAdmin = &pluginControlNetAdminTest{links: map[string]pluginControlNetLinkInfo{
 		"host0": {Name: "host0", IfIndex: 50, Kind: "device", MTU: 1500, MAC: "02:00:00:00:50:01", Up: true, ARP: true},
 	}}
@@ -383,7 +383,7 @@ exports.onAction = function () {
 };`)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{links: map[string]pluginControlNetLinkInfo{
 		"host0": {Name: "host0", IfIndex: 50, Kind: "device", MTU: 1500, MAC: "02:00:00:00:50:01", Up: true},
 	}}
@@ -442,7 +442,7 @@ func TestPluginCannotDeleteUnownedHostLink(t *testing.T) {
 	writeNetworkLeasePlugin(t, dir, "delete_plugin", `exports.onAction = function () { net.link.delete("host0"); };`)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{links: map[string]pluginControlNetLinkInfo{
 		"host0": {Name: "host0", IfIndex: 50, Kind: "device", MTU: 1500, Up: true},
 	}}
@@ -468,7 +468,7 @@ exports.onAction = function (ctx) {
 };`)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	runtime.netAdmin = &pluginControlNetAdminTest{}
 	defer runtime.Close()
 	catalog := loadPluginCatalogWithState(cfg, db)

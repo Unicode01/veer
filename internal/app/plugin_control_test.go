@@ -139,7 +139,7 @@ func TestPluginControlReconcileAllowsPrivilegedLabByDefault(t *testing.T) {
 	t.Parallel()
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*pluginControlManager)
 	controlPath := filepath.Join(t.TempDir(), "control.js")
 	if err := os.WriteFile(controlPath, []byte(""), 0o644); err != nil {
 		t.Fatalf("WriteFile(control.js) error = %v", err)
@@ -216,7 +216,7 @@ exports.onAction = function () {
 };
 `)
 	transport := &pluginControlUDPTestTransport{}
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*pluginControlManager)
 	rt.udpTransport = transport
 	plugin := LoadedPlugin{
 		PluginManifest: PluginManifest{
@@ -267,7 +267,7 @@ exports.onAction = function () {
   });
 };
 `)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{}), nil).(*pluginControlManager)
 	rt.udpTransport = &pluginControlUDPTestTransport{}
 	plugin := LoadedPlugin{
 		PluginManifest: PluginManifest{

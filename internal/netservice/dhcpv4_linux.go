@@ -371,6 +371,12 @@ func (srv *managedNetworkDHCPv4Server) run() {
 					Events: unix.POLLIN | unix.POLLERR | unix.POLLHUP | unix.POLLNVAL,
 				}
 			}
+			var interfaces interfaceCheckGate
+			socketsNeedReopen := func() bool {
+				return interfaces.run(time.Now(), func() bool {
+					return managedNetworkDHCPv4SocketsNeedReopen(config, sockets)
+				})
+			}
 
 			for {
 				select {
@@ -396,7 +402,7 @@ func (srv *managedNetworkDHCPv4Server) run() {
 					return
 				}
 				if ready == 0 {
-					if managedNetworkDHCPv4SocketsNeedReopen(config, sockets) {
+					if socketsNeedReopen() {
 						return
 					}
 					continue
@@ -457,7 +463,7 @@ func (srv *managedNetworkDHCPv4Server) run() {
 						srv.mu.Unlock()
 					}
 				}
-				if reopen || managedNetworkDHCPv4SocketsNeedReopen(config, sockets) {
+				if reopen || socketsNeedReopen() {
 					return
 				}
 			}
@@ -659,7 +665,7 @@ func lookupManagedNetworkDHCPv4Interface(name string) (*net.Interface, error) {
 	if lookupManagedNetworkDHCPv4InterfaceForTests != nil {
 		return lookupManagedNetworkDHCPv4InterfaceForTests(name)
 	}
-	return net.InterfaceByName(name)
+	return interfaceByName(name)
 }
 
 func managedNetworkDHCPv4InterfaceExists(name string) bool {

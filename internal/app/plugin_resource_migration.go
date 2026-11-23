@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 	"github.com/Unicode01/veer/internal/store"
-	"github.com/dop251/goja"
 )
 
 const pluginResourceMigrationMaxJSONBytes = 16 << 20
@@ -44,11 +44,11 @@ type pluginResourceMigrationJSONRecord struct {
 	Enabled *bool           `json:"enabled,omitempty"`
 }
 
-func (h *pluginControlHost) exportResourceMigrationResult(value goja.Value, resource *PluginResource) (pluginResourceMigrationResult, error) {
+func (h *pluginControlHost) exportResourceMigrationResult(value hv.Value, resource *PluginResource) (pluginResourceMigrationResult, error) {
 	if resource == nil {
 		return pluginResourceMigrationResult{}, fmt.Errorf("resource migration is missing its resource contract")
 	}
-	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
+	if value == nil || hv.IsUndefined(value) || hv.IsNull(value) {
 		return pluginResourceMigrationResult{}, fmt.Errorf("onResourceMigrate must return an object containing records")
 	}
 	raw, err := json.Marshal(value.Export())
@@ -94,7 +94,7 @@ func (h *pluginControlHost) exportResourceMigrationResult(value goja.Value, reso
 	return out, nil
 }
 
-func (rt *gojaPluginControlRuntime) BeginPluginResourceMigrationTransaction() error {
+func (rt *pluginControlManager) BeginPluginResourceMigrationTransaction() error {
 	if rt == nil || rt.db == nil {
 		return nil
 	}
@@ -105,7 +105,7 @@ func (rt *gojaPluginControlRuntime) BeginPluginResourceMigrationTransaction() er
 	return rt.BeginPluginResourceMigrationTransactionWithID(id)
 }
 
-func (rt *gojaPluginControlRuntime) BeginPluginResourceMigrationTransactionWithID(id string) error {
+func (rt *pluginControlManager) BeginPluginResourceMigrationTransactionWithID(id string) error {
 	if rt == nil || rt.db == nil {
 		return nil
 	}
@@ -123,11 +123,11 @@ func (rt *gojaPluginControlRuntime) BeginPluginResourceMigrationTransactionWithI
 	return nil
 }
 
-func (rt *gojaPluginControlRuntime) PluginResourceMigrationTransactionID() string {
+func (rt *pluginControlManager) PluginResourceMigrationTransactionID() string {
 	return rt.currentPluginResourceMigrationTransaction()
 }
 
-func (rt *gojaPluginControlRuntime) beginImplicitPluginResourceMigrationTransaction() (string, bool, error) {
+func (rt *pluginControlManager) beginImplicitPluginResourceMigrationTransaction() (string, bool, error) {
 	if rt == nil || rt.db == nil {
 		return "", false, nil
 	}
@@ -145,13 +145,13 @@ func (rt *gojaPluginControlRuntime) beginImplicitPluginResourceMigrationTransact
 	return id, true, nil
 }
 
-func (rt *gojaPluginControlRuntime) currentPluginResourceMigrationTransaction() string {
+func (rt *pluginControlManager) currentPluginResourceMigrationTransaction() string {
 	rt.migrationMu.Lock()
 	defer rt.migrationMu.Unlock()
 	return rt.migrationTransaction
 }
 
-func (rt *gojaPluginControlRuntime) preparePluginResourceMutation(transactionID string, plugin LoadedPlugin, resource PluginResource) error {
+func (rt *pluginControlManager) preparePluginResourceMutation(transactionID string, plugin LoadedPlugin, resource PluginResource) error {
 	if rt == nil || rt.db == nil {
 		return fmt.Errorf("plugin resource store is unavailable")
 	}
@@ -209,7 +209,7 @@ func (h *pluginControlHost) ensurePluginResourceMutationAllowed(db store.RuleSto
 	return store.EnsurePluginResourceMutationAllowedForTransaction(db, plugin.ID, resource.ID, h.resourceMutationTransaction)
 }
 
-func (rt *gojaPluginControlRuntime) CommitPluginResourceMigrationTransaction() error {
+func (rt *pluginControlManager) CommitPluginResourceMigrationTransaction() error {
 	if rt == nil || rt.db == nil {
 		return nil
 	}
@@ -226,7 +226,7 @@ func (rt *gojaPluginControlRuntime) CommitPluginResourceMigrationTransaction() e
 	return nil
 }
 
-func (rt *gojaPluginControlRuntime) RollbackPluginResourceMigrationTransaction() error {
+func (rt *pluginControlManager) RollbackPluginResourceMigrationTransaction() error {
 	if rt == nil || rt.db == nil {
 		return nil
 	}
@@ -243,7 +243,7 @@ func (rt *gojaPluginControlRuntime) RollbackPluginResourceMigrationTransaction()
 	return nil
 }
 
-func (rt *gojaPluginControlRuntime) clearPluginResourceMigrationTransaction(id string) {
+func (rt *pluginControlManager) clearPluginResourceMigrationTransaction(id string) {
 	rt.migrationMu.Lock()
 	if rt.migrationTransaction == id {
 		rt.migrationTransaction = ""
@@ -252,7 +252,7 @@ func (rt *gojaPluginControlRuntime) clearPluginResourceMigrationTransaction(id s
 	rt.migrationMu.Unlock()
 }
 
-func (rt *gojaPluginControlRuntime) ensurePluginResourceSchemas(plugin LoadedPlugin) error {
+func (rt *pluginControlManager) ensurePluginResourceSchemas(plugin LoadedPlugin) error {
 	if rt == nil || rt.db == nil {
 		return nil
 	}
@@ -268,7 +268,7 @@ func (rt *gojaPluginControlRuntime) ensurePluginResourceSchemas(plugin LoadedPlu
 	return nil
 }
 
-func (rt *gojaPluginControlRuntime) ensurePluginResourceSchema(plugin LoadedPlugin, resource PluginResource, transactionID string) error {
+func (rt *pluginControlManager) ensurePluginResourceSchema(plugin LoadedPlugin, resource PluginResource, transactionID string) error {
 	state, err := store.PluginResourceSchemaStateOrNil(rt.db, plugin.ID, resource.ID)
 	if err != nil {
 		return err
@@ -346,7 +346,7 @@ func (rt *gojaPluginControlRuntime) ensurePluginResourceSchema(plugin LoadedPlug
 	return stagePluginResourceMigration(rt.db, transactionID, plugin, resource, state, storedRecords, storageOutput, pluginResourceLimitsFromConfig(rt.cfg))
 }
 
-func (rt *gojaPluginControlRuntime) pluginResourceMigrationStorageOutput(
+func (rt *pluginControlManager) pluginResourceMigrationStorageOutput(
 	plugin LoadedPlugin,
 	resource PluginResource,
 	storedRecords []store.PluginRecord,

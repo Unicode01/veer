@@ -79,7 +79,7 @@ func (m *pluginPackageManager) pluginPackageRestartCount(pluginID string) uint64
 	if m == nil || m.pm == nil || m.pm.pluginControlRuntime == nil {
 		return 0
 	}
-	runtime, ok := m.pm.pluginControlRuntime.(*gojaPluginControlRuntime)
+	runtime, ok := m.pm.pluginControlRuntime.(*pluginControlManager)
 	if !ok || runtime == nil {
 		return 0
 	}
@@ -459,13 +459,13 @@ func (pm *ProcessManager) checkPluginPackageProbations(now time.Time) {
 }
 
 func (pm *ProcessManager) pluginPackageProbationFailure(record PluginPackageProbation) string {
-	runtime, ok := pm.pluginControlRuntime.(*gojaPluginControlRuntime)
+	runtime, ok := pm.pluginControlRuntime.(*pluginControlManager)
 	if !ok || runtime == nil {
 		return ""
 	}
 	isolation := runtime.pluginHostIsolationSnapshot(record.PluginID)
 	if isolation.RestartCount >= record.BaselineRestarts+pluginPackageProbationRestarts {
-		return fmt.Sprintf("isolated plugin hosts restarted %d times during probation: %s", isolation.RestartCount-record.BaselineRestarts, isolation.LastError)
+		return fmt.Sprintf("plugin instances restarted %d times during probation: %s", isolation.RestartCount-record.BaselineRestarts, isolation.LastError)
 	}
 	startedAt, _ := time.Parse(time.RFC3339Nano, record.StartedAt)
 	health := runtime.pluginControlHealthSnapshot(record.PluginID)

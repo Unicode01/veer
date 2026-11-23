@@ -99,7 +99,7 @@ function createDiagnosticsHarness(savedTab) {
     hasActiveFilters() { return false; },
     hasTableViewChanges() { return false; },
     closeDropdowns() {},
-    getToken() { return 'token'; },
+    isAuthenticated() { return true; },
     stopPolling() {},
     formatClock(value) { return String(value); }
   };

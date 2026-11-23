@@ -45,7 +45,7 @@ func TestPluginNetFailedRollbackPreservesRecoveryState(t *testing.T) {
 			writeNetworkLeasePlugin(t, dir, id, `exports.onAction=function(){return `+tc.body+`;};`)
 			cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 			db := openTestDB(t)
-			rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+			rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 			rt.netAdmin = &auditRollbackFailAdmin{&pluginControlNetAdminTest{links: map[string]pluginControlNetLinkInfo{"host0": {Name: "host0", IfIndex: 50, Kind: "device", MTU: 1500, Up: true, ARP: true}}}}
 			defer rt.Close()
 			catalog := loadPluginCatalogWithState(cfg, db)

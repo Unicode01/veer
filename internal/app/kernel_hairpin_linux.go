@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
 )
@@ -185,7 +186,7 @@ func kernelInterfaceIPv4Addrs(ifindex int) []uint32 {
 	if err != nil {
 		return nil
 	}
-	list, err := netlink.AddrList(link, netlink.FAMILY_V4)
+	list, err := nlretry.AddrList(link, netlink.FAMILY_V4)
 	if err != nil {
 		return nil
 	}

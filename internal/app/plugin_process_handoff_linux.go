@@ -80,21 +80,21 @@ func randomPluginProcessHandoffHex(bytes int) (string, error) {
 // handOffPluginProcesses arms every running managed process for the successor.
 // It runs before the plugin control runtime closes, which would stop them.
 func handOffPluginProcesses(rt pluginControlRuntime) *pluginProcessHandoff {
-	goja, ok := rt.(*gojaPluginControlRuntime)
-	if !ok || goja.processRegistry == nil {
+	manager, ok := rt.(*pluginControlManager)
+	if !ok || manager.processRegistry == nil {
 		return nil
 	}
-	records := goja.processRegistry.handOff(pluginKeeperAdoptWait)
+	records := manager.processRegistry.handOff(pluginKeeperAdoptWait)
 	if len(records) == 0 {
 		return nil
 	}
 	if err := writePluginProcessHandoff(records); err != nil {
 		log.Printf("plugin processes: handoff unavailable, stopping them: %v", err)
-		goja.processRegistry.cancelHandOff(records)
+		manager.processRegistry.cancelHandOff(records)
 		return nil
 	}
 	log.Printf("plugin processes: handed %d process(es) to the successor", len(records))
-	return &pluginProcessHandoff{registry: goja.processRegistry, records: records}
+	return &pluginProcessHandoff{registry: manager.processRegistry, records: records}
 }
 
 func (r *pluginProcessRegistry) handOff(wait time.Duration) []pluginProcessHandoffRecord {

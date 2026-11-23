@@ -56,3 +56,8 @@ kernel/**/*.mod.c
 kernel/**/.*.cmd
 kernel/**/Module.symvers
 kernel/**/modules.order
+
+# native plugin builds
+/target/
+internal/app/pluginworker/*/
+plugins/*/lib/

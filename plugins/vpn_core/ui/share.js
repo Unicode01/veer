@@ -1,7 +1,7 @@
 (function (root) {
   'use strict';
   // Shared by the sandboxed UI and the plugin runtime; no browser/Node APIs.
-  const LIMIT=256*1024, MAX_NODES=128;
+  const LIMIT=256*1024, MAX_NODES=128, MAX_VIA=2;
   // Messages follow the host locale in the page; the plugin runtime has no locale and uses Chinese.
   const messages={
     'zh-CN':{
@@ -64,6 +64,9 @@
       'cidr':'直连网段必须是有效 CIDR',
       'dns':'DNS 服务器请填写 IPv4 地址',
       'selected':'请选择有效节点',
+      'via':'请选择有效的前置节点',
+      'viaCount':'最多可设置 {{max}} 个前置节点',
+      'viaConflict':'前置节点不能重复，也不能是所选节点',
       'summary':'节点名称或高级规则摘要过大，请减少节点或规则',
       'invalid':'{{label}}无效',
       'node':'第 {{index}} 个节点：{{message}}',
@@ -133,6 +136,9 @@
       'cidr':'Direct CIDRs must be valid CIDRs',
       'dns':'DNS servers must be IPv4 addresses',
       'selected':'Choose a valid node',
+      'via':'Choose a valid front node',
+      'viaCount':'At most {{max}} front nodes are allowed',
+      'viaConflict':'Front nodes must differ from each other and from the selected node',
       'summary':'Node names or advanced rules are too large; use fewer nodes or rules',
       'invalid':'Invalid {{label}}',
       'node':'Node {{index}}: {{message}}',
@@ -326,10 +332,26 @@
     if(!ipv4(o.bootstrap_dns) || !ipv4(o.proxy_dns))fail(msg('dns'));
     return o;
   }
-  function create(driver,source,selected,rawOptions) {
+  // Front hops in dialing order: via[0] is dialed from the uplink and the
+  // selected node is reached through the last one.
+  function via(raw,count,selected) {
+    if(raw==null || raw==='')return [];
+    const list=Array.isArray(raw)?raw:[raw];
+    if(list.length>MAX_VIA)fail(msg('viaCount',{max:MAX_VIA}));
+    const out=list.map(v=>{
+      if(!/^\d+$/.test(String(v)) || Number(v)>=count)fail(msg('via'));
+      return Number(v);
+    });
+    if(out.some((v,i)=>v===selected || out.indexOf(v)!==i))fail(msg('viaConflict'));
+    return out;
+  }
+  function create(driver,source,selected,rawOptions,rawVia) {
     const nodes=parse(source,driver), index=selected==null?0:Number(selected);
     if(!Number.isInteger(index) || index<0 || index>=nodes.length)fail(msg('selected'));
-    const value={veer_proxy:1,driver,links:source,selected:index,options:options(rawOptions)};
+    const hops=via(rawVia,nodes.length,index);
+    const value={veer_proxy:1,driver,links:source,selected:index};
+    if(hops.length)value.via=hops;
+    value.options=options(rawOptions);
     // runtime_query has a 64 KiB response bound, including JSON escaping.
     const summary=JSON.stringify({nodes:nodes.map(n=>({name:n.name,type:n.type})),options:value.options});
     // Go's JSON encoder additionally escapes HTML and line separators.
@@ -339,11 +361,13 @@
   function metadata(value) {
     if(!value || value.veer_proxy!==1)return {mode:'native'};
     const nodes=parse(value.links,value.driver);
-    return {mode:'links',driver:value.driver,nodes:nodes.map(n=>({name:n.name,type:n.type})),selected:value.selected,options:options(value.options)};
+    return {mode:'links',driver:value.driver,nodes:nodes.map(n=>({name:n.name,type:n.type})),selected:value.selected,
+      via:via(value.via,nodes.length,value.selected),options:options(value.options)};
   }
-  function proxy(n,driver) {
+  function proxy(n,driver,tag) {
     const m=driver==='mihomo';
-    const p=m?{name:'veer-node',type:n.type,server:n.server,port:n.port,udp:true}:{tag:'veer-node',type:n.type==='ss'?'shadowsocks':n.type,server:n.server,server_port:n.port};
+    tag=tag||'veer-node';
+    const p=m?{name:tag,type:n.type,server:n.server,port:n.port,udp:true}:{tag,type:n.type==='ss'?'shadowsocks':n.type,server:n.server,server_port:n.port};
     if(n.type==='ss') {p[m?'cipher':'method']=n.method;p.password=n.password;}
     else if(n.type==='vmess') {p.uuid=n.uuid;p[m?'cipher':'security']=n.cipher;p[m?'alterId':'alter_id']=0;}
     else if(n.type==='vless') {p.uuid=n.uuid;if(n.flow)p.flow=n.flow;}
@@ -379,17 +403,29 @@
     if(n.obfs) {if(m) {p.obfs=n.obfs.type;p['obfs-password']=n.obfs.password;}else p.obfs=n.obfs;}
     return p;
   }
+  // A chain dials veer-hop-1 from the uplink; each later hop and finally
+  // veer-node connect through the previous hop (sing-box detour, Mihomo dialer-proxy).
+  function chain(nodes,v) {
+    const m=v.driver==='mihomo', key=m?'dialer-proxy':'detour', hops=(v.via||[]).map((index,i)=>{
+      const p=proxy(nodes[index],v.driver,'veer-hop-'+(i+1));
+      if(i)p[key]='veer-hop-'+i;
+      return p;
+    });
+    const main=proxy(nodes[v.selected],v.driver);
+    if(hops.length)main[key]='veer-hop-'+hops.length;
+    return {main,hops};
+  }
   function generate(value) {
-    const v=create(value.driver,value.links,value.selected,value.options), n=parse(v.links,v.driver)[v.selected], o=v.options;
+    const v=create(value.driver,value.links,value.selected,value.options,value.via), nodes=parse(v.links,v.driver), o=v.options, ch=chain(nodes,v);
     if(v.driver==='mihomo') {
-      const c={mode:'rule','log-level':'warning',ipv6:true,proxies:[proxy(n,v.driver)],rules:[],dns:{enable:true,'enhanced-mode':'redir-host','default-nameserver':[o.bootstrap_dns],'proxy-server-nameserver':[o.bootstrap_dns],nameserver:[o.dns_hijack?o.proxy_dns+'#veer-node':o.bootstrap_dns]}};
+      const c={mode:'rule','log-level':'warning',ipv6:true,proxies:[ch.main,...ch.hops],rules:[],dns:{enable:true,'enhanced-mode':'redir-host','default-nameserver':[o.bootstrap_dns],'proxy-server-nameserver':[o.bootstrap_dns],nameserver:[o.dns_hijack?o.proxy_dns+'#veer-node':o.bootstrap_dns]}};
       if(o.direct_domains.length) {c.sniffer={enable:true,'parse-pure-ip':true,'override-destination':false,sniff:{HTTP:{ports:[80,8080]},TLS:{ports:[443]},QUIC:{ports:[443]}}};}
       o.direct_cidrs.forEach(v=>c.rules.push((v.includes(':')?'IP-CIDR6':'IP-CIDR')+','+v+',DIRECT,no-resolve'));
       o.direct_domains.forEach(v=>c.rules.push('DOMAIN-SUFFIX,'+v+',DIRECT'));
       c.rules.push('MATCH,veer-node');if(o.dns_hijack)c.tun={'dns-hijack':['any:53','tcp://any:53']};
       return c;
     }
-    const c={log:{level:'warn'},outbounds:[proxy(n,v.driver),{type:'direct',tag:'direct'}],dns:{servers:[{type:'udp',tag:'bootstrap',server:o.bootstrap_dns}],final:'bootstrap',strategy:'ipv4_only'},route:{default_domain_resolver:'bootstrap',final:'veer-node',rules:[]}};
+    const c={log:{level:'warn'},outbounds:[ch.main,{type:'direct',tag:'direct'},...ch.hops],dns:{servers:[{type:'udp',tag:'bootstrap',server:o.bootstrap_dns}],final:'bootstrap',strategy:'ipv4_only'},route:{default_domain_resolver:'bootstrap',final:'veer-node',rules:[]}};
     if(o.direct_domains.length)c.route.rules.push({action:'sniff',sniffer:['http','tls','quic'],timeout:'300ms'});
     if(o.dns_hijack) {
       c.dns.servers.push({type:'udp',tag:'remote',server:o.proxy_dns,detour:'veer-node'});c.dns.final='remote';
@@ -399,6 +435,6 @@
     if(o.direct_domains.length)c.route.rules.push({domain_suffix:o.direct_domains,action:'route',outbound:'direct'});
     return c;
   }
-  const api={parse,create,metadata,generate,options};
+  const api={parse,create,metadata,generate,options,MAX_VIA};
   if(typeof module==='object' && module.exports)module.exports=api;else root.VPNShare=api;
 })(typeof window==='object'?window:globalThis);

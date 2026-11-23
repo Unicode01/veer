@@ -7,17 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os/exec"
 	"sort"
 	"strings"
-	"time"
 
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/vishvananda/netlink"
-	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
 )
-
-const pluginControlNetLinkLookupAttempts = 8
 
 // Supply the address in RTM_NEWLINK, before udev can apply its persistent-MAC
 // policy. A kernel-generated random address can otherwise change after the
@@ -37,6 +33,10 @@ func pluginControlNetEthernetAttrs(name string) (netlink.LinkAttrs, error) {
 func newPluginControlNetAdmin() pluginControlNetAdmin {
 	return &linuxPluginControlNetAdmin{provider: newLinuxPluginNetworkProvider()}
 }
+
+// Its link reads are plain netlink and ethtool queries the plugin worker
+// makes itself.
+func (*linuxPluginControlNetAdmin) workerCanReplace() bool { return true }
 
 type linuxPluginControlNetAdmin struct {
 	provider *linuxPluginNetworkProvider
@@ -102,23 +102,10 @@ func pluginControlNetRetryLinkLookup(lookup func() (netlink.Link, error)) (netli
 	return pluginControlNetRetryDump(lookup)
 }
 
+// pluginControlNetRetryDump dumps again when the kernel flags a dump as
+// interrupted; see nlretry.
 func pluginControlNetRetryDump[T any](operation func() (T, error)) (T, error) {
-	var zero T
-	var lastErr error
-	for attempt := 0; attempt < pluginControlNetLinkLookupAttempts; attempt++ {
-		value, err := operation()
-		if err == nil {
-			return value, nil
-		}
-		if !errors.Is(err, nl.ErrDumpInterrupted) {
-			return zero, err
-		}
-		lastErr = err
-		if attempt+1 < pluginControlNetLinkLookupAttempts {
-			time.Sleep(time.Duration(1<<attempt) * time.Millisecond)
-		}
-	}
-	return zero, lastErr
+	return nlretry.Do(operation)
 }
 
 func (linuxPluginControlNetAdmin) LinkList() ([]pluginControlNetLinkInfo, error) {
@@ -126,13 +113,26 @@ func (linuxPluginControlNetAdmin) LinkList() ([]pluginControlNetLinkInfo, error)
 	if err != nil {
 		return nil, err
 	}
+	addrs, err := nlretry.AddrsByLinkIndex(unix.AF_UNSPEC)
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[int]string, len(links))
+	for _, link := range links {
+		if link == nil || link.Attrs() == nil {
+			return nil, fmt.Errorf("invalid link")
+		}
+		names[link.Attrs().Index] = link.Attrs().Name
+	}
+	linkName := func(index int) string {
+		if name, ok := names[index]; ok {
+			return name
+		}
+		return pluginControlNetLinkNameByIndex(index)
+	}
 	out := make([]pluginControlNetLinkInfo, 0, len(links))
 	for _, link := range links {
-		info, err := pluginControlNetLinkInfoFromLink(link)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, info)
+		out = append(out, pluginControlNetLinkInfoWith(link, addrs[link.Attrs().Index], linkName))
 	}
 	return out, nil
 }
@@ -694,22 +694,12 @@ func (linuxPluginControlNetAdmin) LinkGetOffloads(name string) (map[string]bool,
 	if _, err := pluginControlNetLinkByName(name); err != nil {
 		return nil, err
 	}
-	if _, err := exec.LookPath("ethtool"); err != nil {
-		return nil, fmt.Errorf("ethtool not found: %w", err)
-	}
-	out, err := exec.Command("ethtool", "-k", name).CombinedOutput()
+	dev, err := openPluginOffloadDevice(name)
 	if err != nil {
-		text := strings.TrimSpace(string(out))
-		if text == "" {
-			text = err.Error()
-		}
-		return nil, fmt.Errorf("ethtool -k %s failed: %s", name, text)
+		return nil, err
 	}
-	features := parsePluginControlOffloadFeatures(string(out))
-	if len(features) == 0 {
-		return nil, fmt.Errorf("ethtool -k %s returned no supported feature state", name)
-	}
-	return features, nil
+	defer dev.Close()
+	return dev.read()
 }
 
 func (linuxPluginControlNetAdmin) LinkSetOffloads(req pluginControlNetOffloadRequest) error {
@@ -723,34 +713,17 @@ func (linuxPluginControlNetAdmin) LinkSetOffloads(req pluginControlNetOffloadReq
 	if len(req.Features) == 0 {
 		return fmt.Errorf("features are required")
 	}
-	if _, err := exec.LookPath("ethtool"); err != nil {
-		return fmt.Errorf("ethtool not found: %w", err)
-	}
-	features := make([]string, 0, len(req.Features))
 	for feature := range req.Features {
 		if !isAllowedPluginControlOffloadFeature(feature) {
 			return fmt.Errorf("unsupported offload feature %q", feature)
 		}
-		features = append(features, feature)
 	}
-	sort.Strings(features)
-	args := []string{"-K", name}
-	for _, feature := range features {
-		state := "off"
-		if req.Features[feature] {
-			state = "on"
-		}
-		args = append(args, feature, state)
-	}
-	out, err := exec.Command("ethtool", args...).CombinedOutput()
+	dev, err := openPluginOffloadDevice(name)
 	if err != nil {
-		text := strings.TrimSpace(string(out))
-		if text == "" {
-			text = err.Error()
-		}
-		return fmt.Errorf("ethtool -K %s failed: %s", name, text)
+		return err
 	}
-	return nil
+	defer dev.Close()
+	return dev.set(req.Features)
 }
 
 func (admin linuxPluginControlNetAdmin) LinkSetGSO(req pluginControlNetGSORequest) (pluginControlNetLinkInfo, error) {
@@ -797,9 +770,7 @@ func (linuxPluginControlNetAdmin) AddrReplace(req pluginControlNetAddrRequest) e
 	if err != nil {
 		return err
 	}
-	current, err := pluginControlNetRetryDump(func() ([]netlink.Addr, error) {
-		return netlink.AddrList(link, netlink.FAMILY_ALL)
-	})
+	current, err := nlretry.AddrList(link, netlink.FAMILY_ALL)
 	if err != nil {
 		return fmt.Errorf("list addresses on %s: %w", strings.TrimSpace(req.Interface), err)
 	}
@@ -1543,13 +1514,18 @@ func pluginControlNetLinkInfoFromLink(link netlink.Link) (pluginControlNetLinkIn
 	if link == nil || link.Attrs() == nil {
 		return pluginControlNetLinkInfo{}, fmt.Errorf("invalid link")
 	}
-	attrs := link.Attrs()
-	addrs, err := pluginControlNetRetryDump(func() ([]netlink.Addr, error) {
-		return netlink.AddrList(link, unix.AF_UNSPEC)
-	})
+	addrs, err := nlretry.AddrList(link, unix.AF_UNSPEC)
 	if err != nil {
 		return pluginControlNetLinkInfo{}, err
 	}
+	return pluginControlNetLinkInfoWith(link, addrs, pluginControlNetLinkNameByIndex), nil
+}
+
+// pluginControlNetLinkInfoWith builds a link's view from its addresses and a
+// lookup of link names by index, so a caller that reads every link dumps the
+// addresses and the names once instead of once per link.
+func pluginControlNetLinkInfoWith(link netlink.Link, addrs []netlink.Addr, linkName func(int) string) pluginControlNetLinkInfo {
+	attrs := link.Attrs()
 	addrTexts := make([]string, 0, len(addrs))
 	for _, addr := range addrs {
 		if addr.IPNet != nil {
@@ -1585,14 +1561,14 @@ func pluginControlNetLinkInfoFromLink(link netlink.Link) (pluginControlNetLinkIn
 		}
 	}
 	if attrs.ParentIndex > 0 {
-		info.Parent = pluginControlNetLinkNameByIndex(attrs.ParentIndex)
+		info.Parent = linkName(attrs.ParentIndex)
 		if link.Type() == "veth" {
 			info.PeerIfIndex = attrs.ParentIndex
 			info.PeerName = info.Parent
 		}
 	}
 	if attrs.MasterIndex > 0 {
-		info.MasterName = pluginControlNetLinkNameByIndex(attrs.MasterIndex)
+		info.MasterName = linkName(attrs.MasterIndex)
 	}
 	switch typed := link.(type) {
 	case *netlink.Tuntap:
@@ -1608,7 +1584,7 @@ func pluginControlNetLinkInfoFromLink(link netlink.Link) (pluginControlNetLinkIn
 	case *netlink.Vrf:
 		info.VRFTable = typed.Table
 	}
-	return info, nil
+	return info
 }
 
 func pluginControlNetRoute(req pluginControlNetRouteRequest) (*netlink.Route, error) {

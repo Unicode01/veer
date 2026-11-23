@@ -5,6 +5,7 @@ package app
 import (
 	"net"
 
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -25,7 +26,7 @@ func lookupUserspaceSecondaryUplink(routes *userspaceUplinkRoutes, iface string,
 	if addr == nil {
 		return false
 	}
-	link, err := netlink.LinkByName(iface)
+	link, err := nlretry.LinkByName(iface)
 	if err != nil || link.Attrs() == nil {
 		return false
 	}
@@ -51,7 +52,7 @@ func lookupUserspaceSecondaryUplink(routes *userspaceUplinkRoutes, iface string,
 // included; none when the routes cannot be listed.
 func listUserspaceDefaultRouteLinks(family int) map[int]bool {
 	links := make(map[int]bool)
-	routes, err := netlink.RouteListFiltered(family, &netlink.Route{Table: unix.RT_TABLE_UNSPEC}, netlink.RT_FILTER_TABLE)
+	routes, err := nlretry.RouteListFiltered(family, &netlink.Route{Table: unix.RT_TABLE_UNSPEC}, netlink.RT_FILTER_TABLE)
 	if err != nil {
 		return links
 	}

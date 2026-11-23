@@ -802,7 +802,7 @@ func purgePluginBlobData(stateRoot, pluginID string) error {
 func purgePluginBlobDataForRuntime(pm *ProcessManager, stateRoot, pluginID string) error {
 	if pm != nil {
 		pm.mu.Lock()
-		runtime, _ := pm.pluginControlRuntime.(*gojaPluginControlRuntime)
+		runtime, _ := pm.pluginControlRuntime.(*pluginControlManager)
 		pm.mu.Unlock()
 		if runtime != nil {
 			if store := runtime.currentPluginBlobStore(); store != nil {

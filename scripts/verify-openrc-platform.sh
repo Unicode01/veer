@@ -113,5 +113,5 @@ for phase in create reuse delete; do
         ip netns exec "$SERVICE_NAME" true
     fi
 done
-run_phase sandbox '^(TestPluginHostLinuxSandboxIdentityAndCgroup|TestPluginHostLinuxSandboxEnforcementProbe|TestPluginHostLinuxChrootFallbackEnforcementProbe)$'
-echo 'OpenRC deployment service namespace lifecycle, retained worker and plugin sandbox: passed'
+run_phase plugin-worker '^TestPluginNativeWorkerServiceLaunch$'
+echo 'OpenRC deployment service namespace lifecycle, retained worker and plugin worker: passed'

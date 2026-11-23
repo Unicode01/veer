@@ -131,7 +131,7 @@ exports.onAction = function () {
 };`, interfaceName, table, interfaceName, table, priority, table, interfaceName, interfaceName))
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	defer runtime.Close()
 	catalog := loadPluginCatalogWithState(cfg, db)
 	assertPluginReconcileSuccess(t, runtime, catalog, "net_policy_transaction")
@@ -1290,7 +1290,7 @@ func TestPluginLANCoreResolvesWANCoreStatusLinuxIntegration(t *testing.T) {
 		t.Fatalf("load lan_core bundled plugin: %v", err)
 	}
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	defer rt.Close()
 
 	wanLocal := pluginIntegrationLinkName("veerl")
@@ -1541,7 +1541,7 @@ func assertPluginIntegrationEnabledRecord(t *testing.T, db *sql.DB, pluginID, re
 	}
 }
 
-func assertPluginIntegrationTimer(t *testing.T, rt *gojaPluginControlRuntime, pluginID, timerName string) {
+func assertPluginIntegrationTimer(t *testing.T, rt *pluginControlManager, pluginID, timerName string) {
 	t.Helper()
 	timers := rt.pluginTimerList(pluginID)
 	if len(timers) != 1 || timers[0]["name"] != timerName || timers[0]["kind"] != pluginControlTimerKindInterval {
@@ -1549,7 +1549,7 @@ func assertPluginIntegrationTimer(t *testing.T, rt *gojaPluginControlRuntime, pl
 	}
 }
 
-func loadPluginIntegrationControlRuntimeForTest(t *testing.T, pluginID string) (LoadedPlugin, *sql.DB, *gojaPluginControlRuntime) {
+func loadPluginIntegrationControlRuntimeForTest(t *testing.T, pluginID string) (LoadedPlugin, *sql.DB, *pluginControlManager) {
 	t.Helper()
 
 	pluginsRoot := t.TempDir()
@@ -1562,7 +1562,7 @@ func loadPluginIntegrationControlRuntimeForTest(t *testing.T, pluginID string) (
 		t.Fatalf("load %s bundled plugin: %v", pluginID, err)
 	}
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: pluginsRoot}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: pluginsRoot}), nil).(*pluginControlManager)
 	return plugin, db, rt
 }
 

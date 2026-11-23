@@ -41,14 +41,90 @@ const (
 // protocol on the same listener.
 type apiServer struct {
 	servers []*http.Server
+	fresh   *apiFreshConns
 }
 
+// apiShutdownSweep is how often Shutdown closes connections that have not
+// sent a request yet.
+const apiShutdownSweep = 50 * time.Millisecond
+
+// Shutdown stops accepting and lets the requests in flight finish. A
+// connection that has not sent a request yet is closed instead of waited for:
+// http.Server.Shutdown counts one as idle only once it is 5 seconds old, and
+// such connections are common (a browser's preconnect, a spare connection an
+// HTTP client dialed and never used), so each held a hot restart up by about
+// 5 seconds.
 func (s *apiServer) Shutdown(ctx context.Context) error {
-	var errs []error
+	done := make(chan error, len(s.servers))
 	for _, server := range s.servers {
-		errs = append(errs, server.Shutdown(ctx))
+		go func(server *http.Server) { done <- server.Shutdown(ctx) }(server)
+	}
+	sweep := time.NewTicker(apiShutdownSweep)
+	defer sweep.Stop()
+	s.fresh.closeAll()
+	var errs []error
+	for remaining := len(s.servers); remaining > 0; {
+		select {
+		case err := <-done:
+			errs = append(errs, err)
+			remaining--
+		case <-sweep.C:
+			s.fresh.closeAll()
+		}
 	}
 	return errors.Join(errs...)
+}
+
+// apiFreshConns tracks the panel's connections that have not sent a request.
+type apiFreshConns struct {
+	mu    sync.Mutex
+	conns map[net.Conn]struct{}
+}
+
+func newAPIFreshConns() *apiFreshConns {
+	return &apiFreshConns{conns: make(map[net.Conn]struct{})}
+}
+
+// track is an http.Server.ConnState hook.
+func (f *apiFreshConns) track(conn net.Conn, state http.ConnState) {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if state == http.StateNew {
+		f.conns[conn] = struct{}{}
+	} else {
+		delete(f.conns, conn)
+	}
+}
+
+func (f *apiFreshConns) closeAll() {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	conns := make([]net.Conn, 0, len(f.conns))
+	for conn := range f.conns {
+		conns = append(conns, conn)
+		delete(f.conns, conn)
+	}
+	f.mu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+}
+
+// trackFresh chains the fresh-connection hook into server's ConnState.
+func (f *apiFreshConns) trackFresh(server *http.Server) *http.Server {
+	previous := server.ConnState
+	server.ConnState = func(conn net.Conn, state http.ConnState) {
+		f.track(conn, state)
+		if previous != nil {
+			previous(conn, state)
+		}
+	}
+	return server
 }
 
 func (s *apiServer) Close() error {
@@ -71,19 +147,20 @@ func serveAPIListener(listener net.Listener, handler http.Handler, panel *panelT
 			}
 		}()
 	}
+	fresh := newAPIFreshConns()
 	if panel == nil {
-		server := newServer(handler)
+		server := fresh.trackFresh(newServer(handler))
 		serve("http", func() error { return server.Serve(listener) })
-		return &apiServer{servers: []*http.Server{server}}
+		return &apiServer{servers: []*http.Server{server}, fresh: fresh}
 	}
 	split := newAPIProtocolListener(listener)
-	secure := newServer(handler)
+	secure := fresh.trackFresh(newServer(handler))
 	secure.TLSConfig = panel.config
-	plain := newServer(newAPIPlainHTTPGuard(handler, panel, panelRelay))
+	plain := fresh.trackFresh(newServer(newAPIPlainHTTPGuard(handler, panel, panelRelay)))
 	go split.run()
 	serve("https", func() error { return secure.ServeTLS(split.tls, "", "") })
 	serve("http", func() error { return plain.Serve(split.plain) })
-	return &apiServer{servers: []*http.Server{secure, plain}}
+	return &apiServer{servers: []*http.Server{secure, plain}, fresh: fresh}
 }
 
 type apiProtocolListener struct {

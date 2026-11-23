@@ -9,6 +9,7 @@ import (
 )
 
 func TestWANWithdrawalPreservesBoundaryIdentityForRetry(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	for _, mode := range []string{"direct", "segmented_veth"} {
 		t.Run(mode, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "wan_core")
@@ -25,7 +26,7 @@ func TestWANWithdrawalPreservesBoundaryIdentityForRetry(t *testing.T) {
 				}
 			}
 			db := openTestDB(t)
-			rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(dir)}), nil).(*gojaPluginControlRuntime)
+			rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(dir)}), nil).(*pluginControlManager)
 			rt.netAdmin = &pluginControlNetAdminTest{}
 			t.Cleanup(func() { _ = rt.Close() })
 			payload, _ := json.Marshal(map[string]any{"wan_id": "vpn", "driver_plugin": "vpn_core", "local_interface": "veerlocal0", "pipeline_interface": "veerpipe0", "handoff_mode": mode, "state": "prepared", "usable": false})

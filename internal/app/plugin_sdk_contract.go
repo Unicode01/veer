@@ -8,11 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sort"
-	"strings"
 )
 
-const pluginSDKContractVersion = 16
+// 19: native plugins only; the goja and module features are gone.
+const pluginSDKContractVersion = 20
 
 type pluginSDKAPIContract struct {
 	Version           int                                 `json:"version"`
@@ -27,7 +26,10 @@ type pluginSDKAPIContract struct {
 	Operations        pluginSDKOperationContract          `json:"operations"`
 	Control           pluginSDKControlContract            `json:"control"`
 	ControlMethods    []string                            `json:"control_methods"`
-	WebUI             pluginSDKWebUIContract              `json:"webui"`
+	// WorkerMethods are the control methods a native plugin's worker serves
+	// in the plugin's own process (system calls only); the rest go to the host.
+	WorkerMethods []string               `json:"worker_methods"`
+	WebUI         pluginSDKWebUIContract `json:"webui"`
 }
 
 type pluginSDKWebUIContract struct {
@@ -132,6 +134,9 @@ func currentPluginSDKAPIContract() pluginSDKAPIContract {
 				pluginEventTopicNetAddr,
 				pluginEventTopicNetNeigh,
 				pluginEventTopicNetRoute,
+				pluginEventTopicNetRule,
+				pluginEventTopicNetOffload,
+				pluginEventTopicProcessState,
 				pluginEventTopicResourceChanged,
 				pluginEventTopicPluginLifecycle,
 			},
@@ -164,6 +169,7 @@ func currentPluginSDKAPIContract() pluginSDKAPIContract {
 			Capabilities:     append([]pluginHostControlCapability(nil), pluginHostControlCapabilities...),
 		},
 		ControlMethods: append([]string(nil), pluginHostControlMethods...),
+		WorkerMethods:  append([]string(nil), pluginNativeWorkerMethods...),
 	}
 }
 
@@ -201,52 +207,4 @@ func decodePluginSDKAPIContract(data []byte) (pluginSDKAPIContract, error) {
 		return pluginSDKAPIContract{}, fmt.Errorf("decode trailing plugin SDK contract content: %w", err)
 	}
 	return contract, nil
-}
-
-func encodePluginSDKMethodTypes(methods []string) ([]byte, error) {
-	values := append([]string(nil), methods...)
-	sort.Strings(values)
-	var output strings.Builder
-	output.WriteString("/// <reference path=\"./control.d.ts\" />\n\n")
-	output.WriteString("export {};\n\ndeclare global {\n")
-	output.WriteString("  interface VeerHostControlMethodMap {\n")
-	for index, method := range values {
-		if !validPluginSDKMethodName(method) {
-			return nil, fmt.Errorf("invalid plugin SDK method %q", method)
-		}
-		if index > 0 && values[index-1] == method {
-			return nil, fmt.Errorf("duplicate plugin SDK method %q", method)
-		}
-		fmt.Fprintf(&output, "    %q: typeof %s;\n", method, method)
-	}
-	output.WriteString("  }\n\n")
-	output.WriteString("  type VeerHostControlMethod = keyof VeerHostControlMethodMap;\n")
-	output.WriteString("}\n")
-	return []byte(output.String()), nil
-}
-
-func validPluginSDKMethodName(value string) bool {
-	parts := strings.Split(value, ".")
-	if len(parts) < 2 {
-		return false
-	}
-	for _, part := range parts {
-		if part == "" || !pluginSDKIdentifierStart(part[0]) {
-			return false
-		}
-		for index := 1; index < len(part); index++ {
-			if !pluginSDKIdentifierPart(part[index]) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func pluginSDKIdentifierStart(value byte) bool {
-	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z' || value == '_' || value == '$'
-}
-
-func pluginSDKIdentifierPart(value byte) bool {
-	return pluginSDKIdentifierStart(value) || value >= '0' && value <= '9'
 }

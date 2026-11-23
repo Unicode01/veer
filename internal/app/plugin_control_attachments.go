@@ -1,7 +1,7 @@
 package app
 
 import (
-	"github.com/dop251/goja"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 )
 
 // pluginAttachmentStatusProvider exposes the dataplane state the host keeps
@@ -74,7 +74,7 @@ func (h *pluginControlHost) kernelEngineOrder() []string {
 
 // pluginAttachments implements plugin.attachments(): the calling plugin's own
 // dataplane attachment state, never another plugin's.
-func (h *pluginControlHost) pluginAttachments(goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) pluginAttachments(hv.FunctionCall) hv.Value {
 	h.requireRuntimeHandlerPhase("plugin.attachments")
 	var state PluginRuntimeState
 	if provider := h.attachmentStatusProvider(); provider != nil {

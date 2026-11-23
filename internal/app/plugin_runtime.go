@@ -280,31 +280,17 @@ type PluginResourceLeaseState struct {
 	UpdatedAt string `json:"updated_at,omitempty"`
 }
 
+// PluginControlIsolationState describes the worker processes that run a
+// plugin's instances.
 type PluginControlIsolationState struct {
-	Enabled               bool   `json:"enabled"`
-	Platform              string `json:"platform"`
-	ProcessCount          int    `json:"process_count"`
-	PIDs                  []int  `json:"pids,omitempty"`
-	RestartCount          uint64 `json:"restart_count"`
-	RSSBytes              uint64 `json:"rss_bytes"`
-	RestartBackoffUntil   string `json:"restart_backoff_until,omitempty"`
-	LastError             string `json:"last_error,omitempty"`
-	ResourceLimitMode     string `json:"resource_limit_mode"`
-	ResourceLimitDegraded string `json:"resource_limit_degraded,omitempty"`
-	SandboxMode           string `json:"sandbox_mode,omitempty"`
-	SandboxLevel          string `json:"sandbox_level,omitempty"`
-	SandboxDegraded       string `json:"sandbox_degraded,omitempty"`
-}
-
-type PluginHostSandboxState struct {
-	Platform         string   `json:"platform"`
-	Mode             string   `json:"mode"`
-	Level            string   `json:"level"`
-	NoNewPrivileges  bool     `json:"no_new_privileges,omitempty"`
-	IdentityIsolated bool     `json:"identity_isolated,omitempty"`
-	FilesystemPolicy bool     `json:"filesystem_policy,omitempty"`
-	SyscallPolicy    bool     `json:"syscall_policy,omitempty"`
-	Degraded         []string `json:"degraded,omitempty"`
+	Enabled             bool   `json:"enabled"`
+	Platform            string `json:"platform"`
+	ProcessCount        int    `json:"process_count"`
+	PIDs                []int  `json:"pids,omitempty"`
+	RestartCount        uint64 `json:"restart_count"`
+	RSSBytes            uint64 `json:"rss_bytes"`
+	RestartBackoffUntil string `json:"restart_backoff_until,omitempty"`
+	LastError           string `json:"last_error,omitempty"`
 }
 
 type PluginControlWorkerQueueState struct {
@@ -472,6 +458,10 @@ type PluginHook struct {
 	// Where native XDP is unavailable the host attaches it at TC ingress ahead
 	// of the Veer core instead of running the hook in generic XDP mode.
 	TCFallback string `json:"tc_fallback,omitempty"`
+	// TCEgress names a tc program in the same object that the host attaches
+	// at TC egress of every interface the xdp hook is bound to, whatever runs
+	// the hook at ingress. It observes what leaves; it never drops.
+	TCEgress string `json:"tc_egress,omitempty"`
 }
 
 type PluginPacketMetadataBinding struct {
@@ -537,6 +527,12 @@ type PluginControl struct {
 	EventAccess     []PluginEventAccess    `json:"event_access,omitempty"`
 	NetAccess       []PluginNetAccess      `json:"net_access,omitempty"`
 	NamespaceAccess []string               `json:"namespace_access,omitempty"`
+	// Native plugins: one shared library per target triple, the worker group
+	// that loads it, and the surface it registers.
+	Library      map[string]PluginNativeLibrary `json:"library,omitempty"`
+	Worker       string                         `json:"worker,omitempty"`
+	UpgradeState bool                           `json:"upgrade_state,omitempty"`
+	Register     *PluginNativeRegistration      `json:"register,omitempty"`
 }
 
 type PluginResourceAccess struct {
@@ -601,9 +597,16 @@ type LoadedPlugin struct {
 	AssetBasePath      string                    `json:"asset_base_path,omitempty"`
 	ResourceUsage      *PluginResourceUsage      `json:"resource_usage,omitempty"`
 
-	rootDir            string
-	staticDir          string
-	controlMainPath    string
+	rootDir         string
+	staticDir       string
+	controlMainPath string
+	// The library build this host loads, when the plugin is native and one
+	// exists for this platform.
+	nativeLibraryPath   string
+	nativeLibrarySHA256 string
+	// controlDigest identifies the control section, so the VM key does not
+	// serialize it again for every event.
+	controlDigest      string
 	objectArchitecture string
 	sourceFingerprint  string
 	resolutionError    bool
@@ -652,12 +655,20 @@ func loadPluginCatalogWithState(cfg *Config, db store.RuleStore) PluginCatalog {
 }
 
 func applyPluginStatesFromDB(catalog PluginCatalog, db store.RuleStore) PluginCatalog {
+	catalog = applyPluginEnabledStatesFromDB(catalog, db)
+	if !pluginRuleStoreIsNil(db) {
+		applyPluginDatabaseResourceUsage(&catalog, db)
+	}
+	return catalog
+}
+
+// applyPluginEnabledStatesFromDB disables the plugins whose stored state
+// says so. Unlike applyPluginStatesFromDB it leaves out the database usage,
+// which only the API views show and which costs a scan of every record.
+func applyPluginEnabledStatesFromDB(catalog PluginCatalog, db store.RuleStore) PluginCatalog {
 	clearPluginResolutionErrors(&catalog)
 	for i := range catalog.Plugins {
 		catalog.Plugins[i].Enabled = true
-		if catalog.Plugins[i].Builtin {
-			continue
-		}
 	}
 	if pluginRuleStoreIsNil(db) {
 		return resolvePluginCatalogRelationships(catalog, currentPluginHostEnvironment())
@@ -665,9 +676,7 @@ func applyPluginStatesFromDB(catalog PluginCatalog, db store.RuleStore) PluginCa
 	states, err := store.GetPluginStates(db)
 	if err != nil {
 		logPluginStateLoadError(err)
-		catalog = resolvePluginCatalogRelationships(catalog, currentPluginHostEnvironment())
-		applyPluginDatabaseResourceUsage(&catalog, db)
-		return catalog
+		return resolvePluginCatalogRelationships(catalog, currentPluginHostEnvironment())
 	}
 	enabledByPlugin := make(map[string]bool, len(states))
 	for _, state := range states {
@@ -690,9 +699,7 @@ func applyPluginStatesFromDB(catalog PluginCatalog, db store.RuleStore) PluginCa
 		}
 		disableLoadedPlugin(plugin)
 	}
-	catalog = resolvePluginCatalogRelationships(catalog, currentPluginHostEnvironment())
-	applyPluginDatabaseResourceUsage(&catalog, db)
-	return catalog
+	return resolvePluginCatalogRelationships(catalog, currentPluginHostEnvironment())
 }
 
 func pluginRuleStoreIsNil(db store.RuleStore) bool {
@@ -821,13 +828,13 @@ func pluginRuntimeCapabilities(cfg *Config) PluginRuntimeCapabilities {
 			"tc pipeline plugin priority is compared with Veer Core priority 1000; lower priority runs before core lookup and higher priority runs after core lookup on the selected packet direction; phase=after_apply runs after core rewrite/checksum and before the final redirect",
 			"tc pipeline plugins are callable stages in the shared prog-array chain and must tail-call the shared continue slot after processing unless they intentionally return a final tc action",
 			"post-core tc plugins may read the family-scoped tc_plugin_ctx_v4 or tc_plugin_ctx_v6 context after Veer Core has parsed L3/L4 and matched a rule or flow",
-			"control.main scripts run in persistent per-plugin Goja control VMs only; declared worker VMs can offload control tasks but never run in packet hot paths",
-			"control permissions gate kv/resource/secret/crypto/timer/worker/net.l2/net.tcp/net.udp/plugin.resource/ebpf map updates; registration APIs are only available during control script initialization",
+			"control code is a native library (control.library) run by plugin worker processes, never in packet hot paths; a crashing or hanging plugin is moved to a dedicated worker",
+			"control permissions gate kv/resource/secret/crypto/timer/worker/net.l2/net.tcp/net.udp/plugin.resource/ebpf map updates; registration comes from control.register in the manifest",
 			"plugin.resource is a two-step grant: the permission enables the API namespace and control.resource_access must explicitly allow each target plugin/resource/method",
 			"typed service discovery exposes only action/resource endpoints already authorized by the caller manifest; ambiguous providers require an explicit provider selection",
 			"control timer and worker state is capped at 64 named timers and 16 named workers per plugin to avoid control-plane resource exhaustion",
 			"outstanding worker requests are capped per plugin at 256 requests and 16 MiB of payload across all worker queues and executions",
-			"persistent TCP/UDP sockets are host-owned and capped at 32 handles per plugin; transactional upgrades transfer compatible handles to the candidate VM, while cold replacement, plugin deactivation, and runtime shutdown close them",
+			"persistent TCP/UDP sockets are host-owned and capped at 32 handles per plugin; transactional upgrades transfer compatible handles to the new instance, while cold replacement, plugin deactivation, and runtime shutdown close them",
 			"plugin dataplane mode is a trust contract for installed eBPF objects; keep external dataplane loading disabled unless the object source is trusted",
 			"plugin stability is declared by manifest.stability: lab is for examples/tests only, preview is suitable for controlled deployments, stable is expected to be production-ready, and deprecated should not be used for new deployments",
 			"lab, preview, and stable plugins can execute control scripts and join external tc dataplane when the corresponding global plugin switches are enabled; deprecated plugins are always blocked",

@@ -7,12 +7,13 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
 
 func LoadHostNetworkInterfaces() ([]HostNetworkInterface, error) {
-	links, err := netlink.LinkList()
+	links, err := nlretry.LinkList()
 	if err != nil {
 		return nil, err
 	}
@@ -27,6 +28,8 @@ func LoadHostNetworkInterfaces() ([]HostNetworkInterface, error) {
 	}
 	defaultIPv4ByIndex := loadHostDefaultRouteLinkIndexes(unix.AF_INET)
 	defaultIPv6ByIndex := loadHostDefaultRouteLinkIndexes(unix.AF_INET6)
+	// One dump for every link's addresses, not one per link.
+	addrsByIndex, addrErr := nlretry.AddrsByLinkIndex(unix.AF_UNSPEC)
 
 	result := make([]HostNetworkInterface, 0, len(links))
 	for _, link := range links {
@@ -47,10 +50,9 @@ func LoadHostNetworkInterfaces() ([]HostNetworkInterface, error) {
 			item.Parent = nameByIndex[attrs.ParentIndex]
 		}
 
-		addrs, err := netlink.AddrList(link, unix.AF_UNSPEC)
-		if err == nil {
+		if addrErr == nil {
 			seen := make(map[string]struct{})
-			for _, addr := range addrs {
+			for _, addr := range addrsByIndex[attrs.Index] {
 				address, ok := normalizeHostInterfaceAddress(addr.IP, addr.IPNet)
 				if !ok {
 					continue
@@ -76,7 +78,7 @@ func LoadHostNetworkInterfaces() ([]HostNetworkInterface, error) {
 }
 
 func loadHostDefaultRouteLinkIndexes(family int) map[int]struct{} {
-	routes, err := netlink.RouteListFiltered(family, &netlink.Route{}, 0)
+	routes, err := nlretry.RouteListFiltered(family, &netlink.Route{}, 0)
 	if err != nil {
 		return nil
 	}

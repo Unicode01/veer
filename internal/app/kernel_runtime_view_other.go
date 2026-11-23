@@ -26,6 +26,7 @@ func (pm *ProcessManager) snapshotKernelRuntimeWithForce(force bool) KernelRunti
 		Available:                           false,
 		AvailableReason:                     "kernel dataplane requires Linux",
 		KernelCapabilities:                  kernelcap.DetectKernelCapabilities(),
+		KernelXDPNative:                     kernelcap.DetectXDPNativeDevices(),
 		KernelHelperModule:                  optionalKernelModuleRuntimeStatus(),
 		DefaultEngine:                       ruleEngineAuto,
 		ConfiguredOrder:                     defaultKernelEngineOrder(),

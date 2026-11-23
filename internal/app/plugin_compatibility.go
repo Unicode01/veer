@@ -13,8 +13,7 @@ import (
 const pluginManifestRelationshipLimit = 64
 
 var pluginRuntimeFeatures = []string{
-	"control.goja.v1",
-	"control.modules.v1",
+	"control.native.v1",
 	"control.action_schema.v1",
 	"control.attachment_status.v1",
 	"control.blobs.v1",
@@ -29,6 +28,7 @@ var pluginRuntimeFeatures = []string{
 	"control.net_offloads.v1",
 	"control.dns_client.v1",
 	"control.net_events.v1",
+	"control.net_policy_events.v1",
 	"control.net_leases.v1",
 	"control.net_multipath.v1",
 	"control.netns_provider.v1",
@@ -42,6 +42,7 @@ var pluginRuntimeFeatures = []string{
 	"control.process_isolation.v1",
 	"control.exec.v1",
 	"control.process.v1",
+	"control.process_events.v1",
 	"control.process_binaries.v1",
 	"control.raw_l2",
 	"control.resource_schema.v1",
@@ -60,6 +61,7 @@ var pluginRuntimeFeatures = []string{
 	"dataplane.hook_bindings.v1",
 	"dataplane.xdp_pipeline.v1",
 	"dataplane.xdp_tc_fallback.v1",
+	"dataplane.xdp_tc_egress.v1",
 	"dataplane.netfilter_pipeline.v1",
 	"dataplane.netfilter_skb_dynptr.v1",
 	"ebpf.bounded_reads.v1",
@@ -89,7 +91,7 @@ type pluginHostEnvironment struct {
 func currentPluginHostEnvironment() pluginHostEnvironment {
 	features := make(map[string]struct{}, len(pluginRuntimeFeatures))
 	for _, feature := range pluginRuntimeFeatures {
-		if runtime.GOOS != "linux" && (feature == "control.process_binaries.v1" || feature == "control.process.v1" || feature == "control.netns_provider.v1" || feature == "control.netns_scoped.v1" || feature == "control.tuntap_provider.v1") {
+		if runtime.GOOS != "linux" && (feature == "control.process_binaries.v1" || feature == "control.process.v1" || feature == "control.process_events.v1" || feature == "control.netns_provider.v1" || feature == "control.netns_scoped.v1" || feature == "control.tuntap_provider.v1") {
 			continue
 		}
 		features[feature] = struct{}{}

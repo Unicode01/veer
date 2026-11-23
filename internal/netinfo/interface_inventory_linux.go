@@ -6,12 +6,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/vishvananda/netlink"
+	"github.com/Unicode01/veer/internal/nlretry"
 	"golang.org/x/sys/unix"
 )
 
 func LoadInterfaceInfos() ([]InterfaceInfo, error) {
-	links, err := netlink.LinkList()
+	links, err := nlretry.LinkList()
 	if err != nil {
 		return nil, err
 	}
@@ -24,6 +24,8 @@ func LoadInterfaceInfos() ([]InterfaceInfo, error) {
 		}
 		nameByIndex[attrs.Index] = attrs.Name
 	}
+	// One dump for every link's addresses, not one per link.
+	addrsByIndex, addrErr := nlretry.AddrsByLinkIndex(unix.AF_UNSPEC)
 
 	result := make([]InterfaceInfo, 0, len(links))
 	for _, link := range links {
@@ -42,11 +44,10 @@ func LoadInterfaceInfos() ([]InterfaceInfo, error) {
 			info.Parent = nameByIndex[attrs.ParentIndex]
 		}
 
-		addrs, err := netlink.AddrList(link, unix.AF_UNSPEC)
-		if err == nil {
+		if addrErr == nil {
 			seen := make(map[string]struct{})
 			seenNetworks := make(map[string]struct{})
-			for _, addr := range addrs {
+			for _, addr := range addrsByIndex[attrs.Index] {
 				if !isVisibleInterfaceIP(addr.IP) {
 					continue
 				}

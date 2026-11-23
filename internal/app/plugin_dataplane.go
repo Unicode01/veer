@@ -154,7 +154,7 @@ func applyPluginControlRegistrationSurfaces(catalog *PluginCatalog, cfg *Config)
 	if catalog == nil {
 		return
 	}
-	rt, ok := newPluginControlRuntime(nil, cfg, nil).(*gojaPluginControlRuntime)
+	rt, ok := newPluginControlRuntime(nil, cfg, nil).(*pluginControlManager)
 	if !ok || rt == nil {
 		return
 	}
@@ -343,7 +343,28 @@ func completePluginRuntimeSnapshot(catalog PluginCatalog, snapshot pluginRuntime
 	return out
 }
 
+// pluginCatalogWithConfig is the catalog the API lists: the running
+// plugins with their runtime state and database usage.
 func (pm *ProcessManager) pluginCatalogWithConfig(fallbackCfg *Config) PluginCatalog {
+	catalog := pm.pluginCatalogWithRuntimeState(fallbackCfg)
+	if pm != nil {
+		applyPluginCatalogDatabaseUsage(&catalog, pm.db)
+	}
+	return catalog
+}
+
+// applyPluginCatalogDatabaseUsage adds each plugin's stored record usage. It
+// scans every plugin record, so only views that show it ask for it.
+func applyPluginCatalogDatabaseUsage(catalog *PluginCatalog, db store.RuleStore) {
+	if pluginRuleStoreIsNil(db) {
+		return
+	}
+	applyPluginDatabaseResourceUsage(catalog, db)
+}
+
+// pluginCatalogWithRuntimeState is pluginCatalogWithConfig without the
+// database usage: what plugin actions and resource requests look up.
+func (pm *ProcessManager) pluginCatalogWithRuntimeState(fallbackCfg *Config) PluginCatalog {
 	cfg := fallbackCfg
 	if pm != nil {
 		if pm.cfg != nil {
@@ -376,30 +397,23 @@ func (pm *ProcessManager) pluginCatalogWithConfig(fallbackCfg *Config) PluginCat
 	return catalog
 }
 
+// pluginCatalogWithControlSurface is the running catalog with the surfaces
+// the control runtime registered and the stored hook bindings. It reads the
+// plugin files from the cache (pluginCatalogCache), not from disk.
 func (pm *ProcessManager) pluginCatalogWithControlSurface(cfg *Config) PluginCatalog {
-	if pm == nil || pm.pluginControlRuntime == nil {
-		var db store.RuleStore
-		if pm != nil {
-			db = pm.db
-		}
-		catalogCfg := cfg
-		sourceDir := ""
-		if pm != nil {
-			catalogCfg, sourceDir = pm.appliedPluginCatalogConfig(cfg)
-		}
-		catalog := loadPluginCatalogWithControlRegistrationAndState(catalogCfg, db)
-		if sourceDir != "" {
-			catalog.Directory = sourceDir
-		}
-		if pm == nil {
-			return catalog
-		}
+	if pm == nil {
+		return loadPluginCatalogWithControlRegistrationAndState(cfg, nil)
+	}
+	catalog, catalogCfg, sourceDir := pm.pluginCatalogWithState(cfg)
+	if sourceDir != "" {
+		catalog.Directory = sourceDir
+	}
+	if pm.pluginControlRuntime == nil {
+		applyPluginControlRegistrationSurfaces(&catalog, catalogCfg)
+		catalog = resolvePluginCatalogAfterRuntimeSurfaces(catalog)
 		return applyPluginHookBindingsFromDB(catalog, pm.db)
 	}
 
-	catalogCfg, sourceDir := pm.appliedPluginCatalogConfig(cfg)
-	catalog := loadPluginCatalogWithState(catalogCfg, pm.db)
-	catalog.Directory = sourceDir
 	snapshot := pm.pluginControlRuntime.Snapshot()
 	if len(snapshot.Plugins) == 0 && len(snapshot.Surfaces) == 0 {
 		// This path is used by the initial dataplane reconcile while redistributeMu
@@ -472,12 +486,13 @@ func (pm *ProcessManager) reconcilePluginsForRuntimeWithError() (pluginRuntimeSn
 	}
 	pm.pluginReconcileMu.Lock()
 	defer pm.pluginReconcileMu.Unlock()
+	// Plugins can contribute managed networks; a reconcile may change them.
+	defer pm.noteManagedRuntimeInputsChanged()
 	startedAt := time.Now()
 	pm.mu.Lock()
 	pm.pluginReconcileLastAttemptAt = startedAt
 	pm.mu.Unlock()
-	catalogCfg, sourceDir := pm.appliedPluginCatalogConfig(pm.cfg)
-	catalog := loadPluginCatalogWithState(catalogCfg, pm.db)
+	catalog, _, sourceDir := pm.pluginCatalogWithState(pm.cfg)
 	catalog.Directory = sourceDir
 	snapshot, err := pm.reconcilePluginCatalogForRuntime(catalog)
 	completedAt := time.Now()
@@ -665,8 +680,9 @@ func (pm *ProcessManager) ApplyPluginResourceReconcileFromControl(plugin LoadedP
 		_ = markPluginRuntimeError(pm.db, plugin.ID, "resource", resource.ID, err)
 		return err
 	}
-	catalogCfg := pluginCatalogConfigForProcess(pm, pm.cfg)
-	catalog := loadPluginCatalogWithControlRegistrationAndState(catalogCfg, pm.db)
+	catalog, catalogCfg, _ := pm.pluginCatalogWithState(pm.cfg)
+	applyPluginControlRegistrationSurfaces(&catalog, catalogCfg)
+	catalog = resolvePluginCatalogAfterRuntimeSurfaces(catalog)
 	refreshCorePlans := pluginCatalogMayAffectActiveCorePlans(catalog, catalogCfg) || pluginResourceAffectsActiveCorePlans(plugin, resource, catalogCfg)
 	catalog = applyPluginHookBindingsFromDB(catalog, pm.db)
 	snapshot, redistributed := pm.reconcilePluginDataplaneForCatalog(catalog)

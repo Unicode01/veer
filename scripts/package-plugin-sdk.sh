@@ -55,6 +55,10 @@ sources = [
     ("docs/plugins/vpn_core", root / "docs" / "plugins" / "vpn_core"),
     ("LICENSE", root / "LICENSE"),
     ("sdk/plugin", root / "sdk" / "plugin"),
+    ("sdk/native/include", root / "sdk" / "native" / "include"),
+    ("sdk/native/rust", root / "sdk" / "native" / "rust"),
+    ("sdk/native/examples", root / "sdk" / "native" / "examples"),
+    ("sdk/native/build-plugin.sh", root / "sdk" / "native" / "build-plugin.sh"),
     ("plugins/include", root / "plugins" / "include"),
 ]
 
@@ -72,7 +76,7 @@ for archive_root, source in sources:
         child.lstat()
         if child.is_symlink():
             raise SystemExit(f"plugin SDK source cannot contain symlinks: {child}")
-        if child.is_dir():
+        if child.is_dir() or "target" in child.relative_to(source).parts:
             continue
         if not child.is_file():
             raise SystemExit(f"plugin SDK source must contain regular files only: {child}")

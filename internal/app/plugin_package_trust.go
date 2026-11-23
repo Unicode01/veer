@@ -133,6 +133,13 @@ func ensurePluginPackageDirectory(path string, mode os.FileMode) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return fmt.Errorf("%s is not a regular directory", path)
 	}
+	// A chmod that changes nothing still reports an attribute change to
+	// inotify, and the plugins directory is watched: the probation check
+	// every five seconds made the update monitor hash every plugin file.
+	const modeBits = os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky
+	if info.Mode()&modeBits == mode&modeBits {
+		return nil
+	}
 	return os.Chmod(path, mode)
 }
 

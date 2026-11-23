@@ -2,24 +2,213 @@
   "api_version": "v1",
   "id": "wan_core",
   "name": "WAN Core",
-  "version": "1.6.2",
+  "version": "1.8.0",
   "kind": "control",
   "stability": "stable",
   "description": "Protocol-neutral WAN adapter with direct and kernel-segmented Linux L3 handoff modes.",
   "compatibility": {
     "runtime": ">=1.0.0 <2.0.0",
     "control_api_abi": 1,
-    "features": ["control.net_admin", "control.net_policy.v1", "control.typed_services.v1", "ui.capabilities.v1"]
+    "features": [
+      "control.events.v1",
+      "control.native.v1",
+      "control.net_admin",
+      "control.net_events.v1",
+      "control.net_policy.v1",
+      "control.typed_services.v1",
+      "ui.capabilities.v1"
+    ]
   },
   "control": {
-    "main": "control.js",
-    "sha256": "c758656b6346c918c38c2549eee3a9aa5ad261165a75fc52d22ffdf8eef356b0",
-    "permissions": ["net.admin", "plugin.register", "resource", "timer", "ui"],
+    "library": {
+      "x86_64-linux-gnu": {
+        "path": "lib/x86_64-linux-gnu/libwan_core.so"
+      },
+      "x86_64-linux-musl": {
+        "path": "lib/x86_64-linux-musl/libwan_core.so"
+      },
+      "aarch64-linux-gnu": {
+        "path": "lib/aarch64-linux-gnu/libwan_core.so"
+      },
+      "aarch64-linux-musl": {
+        "path": "lib/aarch64-linux-musl/libwan_core.so"
+      }
+    },
+    "worker": "shared",
+    "permissions": [
+      "event",
+      "net.admin",
+      "plugin.register",
+      "resource",
+      "timer",
+      "ui"
+    ],
     "net_access": [
       {
-        "interfaces": ["veer*"],
-        "operations": ["addr.write", "link.create", "link.delete", "link.offload", "link.read", "link.state", "neigh.write", "route.write", "rule.write"]
+        "interfaces": [
+          "veer*"
+        ],
+        "operations": [
+          "addr.write",
+          "link.create",
+          "link.delete",
+          "link.offload",
+          "link.read",
+          "link.state",
+          "neigh.write",
+          "route.write",
+          "rule.write"
+        ]
       }
-    ]
+    ],
+    "register": {
+      "capabilities": [
+        "wan",
+        "local_route",
+        "veer_core_adapter",
+        "net_admin",
+        "control"
+      ],
+      "handoffs": [
+        {
+          "id": "wan0",
+          "description": "Linux L3 boundary shared by the system stack, Veer Core and an optional segmented protocol pipeline."
+        }
+      ],
+      "resources": [
+        {
+          "id": "profiles",
+          "description": "WAN handoff defaults such as the local interface, MTU, addresses, and route policy.",
+          "methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "manual",
+          "max_records": 32,
+          "max_record_bytes": 16384
+        },
+        {
+          "id": "sessions",
+          "description": "Normalized WAN driver session state. Any protocol driver can publish this shape.",
+          "methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "runtime_apply",
+          "max_records": 32,
+          "max_record_bytes": 32768
+        },
+        {
+          "id": "status",
+          "description": "Last applied WAN adapter state and veer_core handoff details.",
+          "methods": [
+            "list",
+            "get"
+          ],
+          "control_methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "manual",
+          "max_records": 32,
+          "max_record_bytes": 32768
+        }
+      ],
+      "actions": [
+        {
+          "id": "apply_session",
+          "description": "Apply a normalized WAN session from payload or the sessions resource.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 32768
+        },
+        {
+          "id": "prepare_handoff",
+          "description": "Create the plugin-managed local WAN boundary without publishing a usable WAN session.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 32768
+        },
+        {
+          "id": "teardown",
+          "description": "Delete the local WAN boundary when it is plugin-managed and mark the WAN adapter down.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 8192
+        }
+      ],
+      "services": [
+        {
+          "id": "wan.adapter",
+          "version": "1.0.0",
+          "description": "Protocol-neutral WAN session and Linux handoff service.",
+          "actions": [
+            "apply_session",
+            "prepare_handoff",
+            "teardown"
+          ],
+          "resources": [
+            "profiles",
+            "sessions",
+            "status"
+          ]
+        }
+      ],
+      "subscriptions": [
+        {
+          "id": "wan_net",
+          "topic": "net",
+          "match": "prefix",
+          "handler": "onNetEvent",
+          "queue_size": 64
+        },
+        {
+          "id": "wan_records",
+          "topic": "resource.changed",
+          "handler": "onRecordEvent",
+          "queue_size": 16
+        }
+      ],
+      "ui": {
+        "static_dir": "ui",
+        "entry": "index.html",
+        "sha256": "8e2cd72664249a09817869d68f9c445635013cd87254e72c2971e8b71dd159f7",
+        "page": "wan",
+        "page_title": "WAN",
+        "resources": [
+          {
+            "resource": "profiles",
+            "methods": [
+              "list",
+              "create",
+              "update"
+            ]
+          },
+          {
+            "resource": "sessions",
+            "methods": [
+              "list"
+            ]
+          },
+          {
+            "resource": "status",
+            "methods": [
+              "list"
+            ]
+          }
+        ],
+        "actions": [
+          "apply_session",
+          "prepare_handoff",
+          "teardown"
+        ]
+      }
+    }
   }
 }

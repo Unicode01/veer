@@ -6,7 +6,9 @@
   let records=[], statuses={}, busy=false, original={}, currentDriver='wireguard', savedDriver='', editing=false;
   let peers=[], dirty=false, rawDirty=false, coreDriver='mihomo', coreSequence=0, corePoll=null, statusPoll=null;
   let storedMode='empty', nodeNames=[];
-  let healthStates={}, healthPoll=null, coreStatus=null;
+  let healthStates={}, healthPoll=null, coreStatus=null, runtime={}, runtimePoll=null, detailKey='';
+  // Per-card runtime cells, updated in place so a poll never rebuilds buttons under the pointer.
+  const slots=new Map(), expanded=new Set();
   // Locale: text built once is bound to its message (L) and refreshed when the host locale
   // changes; render functions pass translated strings (T) and are simply rerun.
   const T=(key,params) => I.t(key,params), L=(key,params) => () => T(key,params);
@@ -32,30 +34,110 @@
   function showNotice(error) { notice.hidden=!notice.textContent;notice.dataset.tone=error?'error':'';F.requestResize(); }
   function message(text,error) { setRaw(notice,text || '');showNotice(error); }
   function say(key,params) { setMessage(notice,key,params);showNotice(false); }
+  // The plugin prefixes errors it can explain with a stable [code]: show the
+  // localized explanation and what to do, and keep the original text as detail.
+  function errorInfo(text,code) {
+    let detail=String(text || '');
+    if (!code) {const match=/^\[([a-z_]+)\] ([\s\S]*)$/.exec(detail);if(match){code=match[1];detail=match[2];}}
+    if (!code || !Object.prototype.hasOwnProperty.call(I.messages['zh-CN'],'err.'+code)) return {title:detail,hint:'',detail:''};
+    return {title:T('err.'+code),hint:T('err.'+code+'.hint'),detail};
+  }
+  function errorView(info,className) {
+    return h('div',{className:'vpn-error'+(className?' '+className:''),attrs:{role:'alert'}},[
+      node('p','vpn-error-title',info.title),info.facts?node('p','vpn-error-facts',info.facts):null,info.hint?node('p','vpn-error-hint',info.hint):null,
+      info.detail?node('p','vpn-error-detail',T('err.detail',{text:info.detail})):null]);
+  }
+  function showError(text) {
+    const info=errorInfo(text);
+    dynamic.delete(notice);notice.replaceChildren(errorView(info));showNotice(true);notifyError(info.title);
+  }
   async function run(task) {
     if (busy) return;
     busy=true; controlNodes().forEach(el => {el.disabled=true;});
     try { await task(); }
-    catch (error) { message(F.errorText(error),true);notifyError(error); }
+    catch (error) { showError(F.errorText(error)); }
     finally { busy=false;controlNodes().forEach(el => {el.disabled=false;});keyInput.readOnly=editing;renderProxyMode();F.requestResize(); }
   }
   function button(text,task,secondary) { return bind(F.button('',() => run(task),secondary),'text',text); }
   function actions(children) { return h('div',{className:'vpn-actions'},children); }
   const count=node('span','vpn-count','0'), list=h('div',{className:'vpn-list'});
+  const kpis=h('div',{className:F.classes.grid+' vpn-kpis'});
+  function renderKpis() {
+    const states=records.map(r=>(statuses[r.key] || {}).phase), ready=states.filter(p=>p==='applied' || p==='configured').length;
+    const attention=states.filter(p=>p==='error' || p==='failed').length;
+    let sent=0, received=0, known=false;
+    Object.values(runtime).forEach(view=>{if(view && view.traffic){known=true;sent+=Number(view.traffic.tx_bytes) || 0;received+=Number(view.traffic.rx_bytes) || 0;}});
+    kpis.replaceChildren(F.stat(T('kpi.outlets'),String(records.length)),F.stat(T('kpi.ready'),ready+' / '+records.length),
+      F.stat(T('kpi.attention'),String(attention)),F.stat(T('kpi.traffic'),known?T('kpi.trafficValue',{tx:bytes(sent),rx:bytes(received)}):'—'));
+    kpis.hidden=!records.length;
+  }
   const notice=h('div',{className:'vpn-notice',attrs:{role:'status','aria-live':'polite',hidden:true}});
   const outletPanel=h('section',{},[list]);
   const corePanel=h('section',{attrs:{hidden:true}});
-  const editor=h('section',{className:'vpn-panel vpn-editor',attrs:{hidden:true}});
+  const editor=h('section',{className:F.classes.card+' vpn-panel vpn-editor',attrs:{hidden:true}});
   const editorTitle=setMessage(h('h2'),'editor.new');
   const keyInput=input(L('field.key'),''), addressInput=input(L('field.wgAddress'),''), wanAddressInput=input(L('field.wanAddress'),''), slotInput=input(L('field.slot'),1,'number');
   bind(addressInput,'placeholder',L('field.wgAddress.placeholder'));bind(wanAddressInput,'placeholder',L('field.wanAddress.placeholder'));
   const mtuInput=input(L('field.mtu'),1420,'number'), upstream=input(L('field.upstream'),'','text');
   const upstreamIP=bind(input(L('field.upstreamIP'),'','text'),'placeholder',L('field.upstreamIP.placeholder'));
+  const upstreamList=h('datalist',{attrs:{id:'vpn-upstreams'}}), upstreamIPList=h('datalist',{attrs:{id:'vpn-upstream-ips'}});
+  upstream.setAttribute('list','vpn-upstreams');upstreamIP.setAttribute('list','vpn-upstream-ips');
+  upstream.classList.add(F.classes.mono);upstreamIP.classList.add(F.classes.mono);
+  let upstreams=[], upstreamsAt=0;
+  function fillUpstreamIPs() {
+    const chosen=upstreams.find(item=>item.name===upstream.value.trim());
+    upstreamIPList.replaceChildren(...(chosen?chosen.addresses:[]).map(a=>h('option',{attrs:{value:a.split('/')[0]}})));
+  }
+  // Applied VPN exits are offered too (never the one being edited): choosing
+  // one chains this exit behind it.
+  function renderUpstreams() {
+    const self=keyInput.value.trim();
+    upstreamList.replaceChildren(...upstreams.filter(item=>!item.exit || item.exit!==self).map(item=>h('option',{attrs:{value:item.name,
+      label:[item.name,...(item.exit?[T('field.upstream.exit',{key:item.exit})]:[]),item.addresses[0] || T('field.upstream.noAddress'),T(item.up?'field.upstream.up':'field.upstream.down')].join(' · ')}})));
+    fillUpstreamIPs();
+  }
+  async function loadUpstreams() {
+    // Suggestions only: the backend still validates whatever is typed.
+    if (Date.now()-upstreamsAt>=30000) {
+      try {
+        const response=await F.action('upstream_interfaces',{});
+        upstreams=(response && response.result && response.result.items) || [];upstreamsAt=Date.now();
+      } catch (_) { upstreams=[]; }
+    }
+    renderUpstreams();
+  }
+  upstream.addEventListener('input',()=>{fillUpstreamIPs();if(nodeNames.length)renderVia();});
   const listenPort=input(L('field.listenPort'),0,'number'), privateKey=input(L('field.privateKey'),'','password');
   const routes=input(L('field.routes'),''), tunName=input(L('field.tunName'),''), tunAlias=input(L('field.tunAlias'),'');
   const coreConfig=area(L('field.coreConfig')), rawConfig=area(L('field.rawConfig')), importConfig=area(L('field.importConfig'));
   const shareLinks=area(L('field.shareLinks')), nodeSelect=bind(h('select',{className:F.classes.input}),'aria-label',L('field.node'));
   shareLinks.classList.add('vpn-links');bind(shareLinks,'placeholder',L('field.shareLinks.placeholder'));
+  // Front hops of a proxy chain in dialing order: the first is dialed from the
+  // uplink and the selected node is reached through the last (see share.js).
+  const viaSelects=[0,1].map(i=>bind(h('select',{className:F.classes.input}),'aria-label',L(i?'field.via.second':'field.via.first')));
+  const viaPath=h('span',{className:'vpn-field-help vpn-via-path'}), viaSecond=field(L('field.via.second'),viaSelects[1]);
+  const viaPanel=h('div',{className:'vpn-via'},[h('div',{className:'vpn-fields'},[field(L('field.via.first'),viaSelects[0]),viaSecond]),viaPath]);
+  function currentVia() {return viaSelects.map(select=>select.value).filter(v=>v!=='').map(Number);}
+  function renderVia(via) {
+    const selectedNode=Number(nodeSelect.value);
+    via=(via || currentVia()).filter(i=>Number.isInteger(i) && i!==selectedNode && i<nodeNames.length).slice(0,S.MAX_VIA);
+    viaSelects.forEach((select,i)=>{
+      const others=via.filter((_,j)=>j!==i);
+      select.replaceChildren(h('option',{attrs:{value:''},text:T('field.via.none')}),...nodeNames.map((n,k)=>{
+        const el=h('option',{attrs:{value:String(k)},text:(k+1)+'. '+n.name+' · '+n.type});
+        el.disabled=k===selectedNode || others.includes(k);
+        return el;
+      }));
+      select.value=via[i]==null?'':String(via[i]);
+    });
+    viaPanel.hidden=nodeNames.length<2;
+    viaSecond.hidden=!via.length || nodeNames.length<3;
+    const target=nodeNames[selectedNode];
+    viaPath.textContent=via.length && target?T('field.via.path',{path:[upstream.value.trim() || T('field.via.uplink'),...via.map(i=>nodeNames[i].name),target.name,T('field.via.target')].join(' → ')}):T('field.via.help');
+    F.requestResize();
+  }
+  viaSelects.forEach(select=>select.addEventListener('change',()=>renderVia()));
+  nodeSelect.addEventListener('change',()=>renderVia());
   const configMode=bind(h('select',{className:F.classes.input},[
     option('links',L('field.configMode.links')),option('native',L('field.configMode.native'))
   ]),'aria-label',L('field.configMode'));
@@ -66,16 +148,17 @@
     option('off',L('field.hijackDNS.off')),option('on',L('field.hijackDNS.on'))
   ]),'aria-label',L('field.hijackDNS'));
   const linksPanel=h('div',{}), nativePanel=h('div',{}), routingPanel=h('div',{});
-  function nodeOptions(nodes,selected) {
+  function nodeOptions(nodes,selected,via) {
     nodeNames=nodes.map(n=>({name:n.name,type:n.type}));
     nodeSelect.replaceChildren(...nodeNames.map((n,i)=>h('option',{attrs:{value:String(i)},text:(i+1)+'. '+n.name+' · '+n.type})));
     if(!nodeNames.length)nodeSelect.appendChild(h('option',{attrs:{value:'0'},text:T('field.node.placeholder')}));
     nodeSelect.value=String(selected||0);
+    renderVia(via || []);
   }
   function proxyOptions() {return S.options({direct_cidrs:directCIDRs.value,direct_domains:directDomains.value,dns_hijack:hijackDNS.value==='on',bootstrap_dns:bootstrapDNS.value.trim(),proxy_dns:proxyDNS.value.trim()});}
   function proxyForm(form) {
     storedMode=form.mode||'empty';configMode.value=storedMode==='native'?'native':'links';
-    nodeOptions(form.nodes||[],form.selected);
+    nodeOptions(form.nodes||[],form.selected,form.via);
     const o=S.options(form.options);
     directCIDRs.value=o.direct_cidrs.join('\n');directDomains.value=o.direct_domains.join('\n');
     bootstrapDNS.value=o.bootstrap_dns;proxyDNS.value=o.proxy_dns;hijackDNS.value=o.dns_hijack?'on':'off';
@@ -152,15 +235,15 @@
     wgAdvanced.hidden=currentDriver!=='wireguard';proxyAdvanced.hidden=currentDriver==='wireguard';
     driverSpecific.replaceChildren();
     if (currentDriver==='wireguard') driverSpecific.appendChild(h('div',{className:'vpn-subsection'},[
-      node('h3','vpn-section-title',T('wg.title')),
+      node('h3','vpn-section-title veer-section-title',T('wg.title')),
       node('p','vpn-subtle',T('wg.intro')),wgImport,
       h('div',{className:'vpn-fields'},[
         field(T('field.wgAddress'),addressInput,T('field.wgAddress.help')),
         field(T('field.localPrivateKey'),privateKey,T('field.localPrivateKey.help'))]),
-      h('div',{className:'vpn-subsection'},[node('h3','vpn-section-title',T('wg.peers')),peerList,button(T('peer.add'),async () => {if(peers.length>=8)throw new Error(T('error.maxPeers'));addPeer();dirty=true;},true)])
+      h('div',{className:'vpn-subsection'},[node('h3','vpn-section-title veer-section-title',T('wg.peers')),peerList,button(T('peer.add'),async () => {if(peers.length>=8)throw new Error(T('error.maxPeers'));addPeer();dirty=true;},true)])
     ]));
     else if (currentDriver==='tun') driverSpecific.appendChild(h('div',{className:'vpn-subsection'},[
-      node('h3','vpn-section-title',T('tun.title')),
+      node('h3','vpn-section-title veer-section-title',T('tun.title')),
       node('p','vpn-subtle',T('tun.intro')),
       h('div',{className:'vpn-fields'},[field(T('field.tunName'),tunName,T('field.tunName.help')),field(T('field.tunAliasShort'),tunAlias,T('field.tunAlias.help'))])
     ]));
@@ -168,10 +251,10 @@
       const name=M.drivers[currentDriver].name;
       coreConfig.setAttribute('aria-label',T('field.nativeConfig',{name}));
       driverSpecific.appendChild(h('div',{className:'vpn-subsection'},[
-        node('h3','vpn-section-title',T('proxy.title',{name})),
+        node('h3','vpn-section-title veer-section-title',T('proxy.title',{name})),
         node('p','vpn-subtle',T('proxy.intro')),
         h('div',{className:'vpn-fields'},[
-          field(T('field.upstream'),upstream,T('field.upstream.help'),currentDriver!=='sing_box'),
+          field(T('field.upstream'),upstream,T('field.upstream.help'),currentDriver!=='sing_box'),upstreamList,upstreamIPList,
           currentDriver==='sing_box'?field(T('field.upstreamIP.optional'),upstreamIP,T('field.upstreamIP.help')):null
         ]),
         linksPanel,
@@ -185,13 +268,15 @@
         actions([button(T('proxy.detect'),async()=>{
           nodeOptions(S.parse(shareLinks.value,currentDriver),0);dirty=true;
           say('proxy.detected',{count:nodeNames.length});
-        },true)]),field(T('field.node'),nodeSelect,T('field.node.help'))
+        },true)]),field(T('field.node'),nodeSelect,T('field.node.help')),viaPanel
       );
+      renderVia();
       routingPanel.replaceChildren(node('p','vpn-subtle',T('proxy.routingIntro')),
         h('div',{className:'vpn-fields'},[field(T('field.directCIDRs'),directCIDRs,T('field.directCIDRs.help')),field(T('field.directDomainsLong'),directDomains,T('field.directDomains.help')),
           field(T('field.bootstrapDNS'),bootstrapDNS,T('field.bootstrapDNS.help')),field(T('field.hijackDNS'),hijackDNS,T('field.hijackDNS.help')),field(T('field.proxyDNS'),proxyDNS,T('field.proxyDNS.help'))])
       );
       nativePanel.replaceChildren(field(T('field.nativeConfig',{name}),coreConfig,T('field.nativeConfig.help')));
+      loadUpstreams();
       renderProxyMode();
     }
   }
@@ -227,9 +312,9 @@
     button(L('editor.applyJSON'),async () => {
       const value=JSON.parse(rawConfig.value);if(!value || typeof value!=='object' || Array.isArray(value))throw new Error(T('error.profileObject'));
       const keep=['mihomo','sing_box'].includes(currentDriver) && value.driver===currentDriver && value.config_secret===original.config_secret;
-      const draft=keep?{storedMode,mode:configMode.value,nodes:nodeNames,selected:Number(nodeSelect.value),options:proxyOptions(),links:shareLinks.value,native:coreConfig.value}:null;
+      const draft=keep?{storedMode,mode:configMode.value,nodes:nodeNames,selected:Number(nodeSelect.value),via:currentVia(),options:proxyOptions(),links:shareLinks.value,native:coreConfig.value}:null;
       fill(value);
-      if(draft) {proxyForm({mode:draft.storedMode,nodes:draft.nodes,selected:draft.selected,options:draft.options});configMode.value=draft.mode;shareLinks.value=draft.links;coreConfig.value=draft.native;renderProxyMode();}
+      if(draft) {proxyForm({mode:draft.storedMode,nodes:draft.nodes,selected:draft.selected,via:draft.via,options:draft.options});configMode.value=draft.mode;shareLinks.value=draft.links;coreConfig.value=draft.native;renderProxyMode();}
       dirty=true;notify(T('editor.jsonApplied'));
     },true)
   ]);
@@ -242,7 +327,7 @@
     const managed=['mihomo','sing_box'].includes(currentDriver), links=shareLinks.value.trim();
     let imported=null;
     if(managed && configMode.value==='links') {
-      if(links)imported=S.create(currentDriver,links,nodeSelect.value,proxyOptions());
+      if(links)imported=S.create(currentDriver,links,nodeSelect.value,proxyOptions(),currentVia());
       else {if(storedMode!=='links')throw new Error(T('error.linksRequired'));proxyOptions();}
     } else if(managed) {
       if(text) {try {const parsed=JSON.parse(text);if(!parsed || typeof parsed!=='object' || Array.isArray(parsed))throw new Error();}catch(error){throw new Error(T('error.coreJSON'));}}
@@ -256,9 +341,9 @@
         if (privateKey.value.trim()) await F.action('set_key',{key,value:privateKey.value.trim()});
         for (let i=0;i<peers.length;i++) if (peers[i].psk.value.trim()) await F.action('set_key',{key,name:profile.peers[i].preshared_key_secret,value:peers[i].psk.value.trim()});
       } else if(managed && configMode.value==='links') {
-        const result=await F.action('set_core_config',{key,...(profile.config_secret?{name:profile.config_secret}:{}),format:'links',driver:currentDriver,value:links,selected:Number(nodeSelect.value),options:proxyOptions()});
+        const result=await F.action('set_core_config',{key,...(profile.config_secret?{name:profile.config_secret}:{}),format:'links',driver:currentDriver,value:links,selected:Number(nodeSelect.value),via:currentVia(),options:proxyOptions()});
         if(result.result && result.result.form)proxyForm(result.result.form);
-        else {storedMode='links';if(imported)nodeOptions(S.metadata(imported).nodes,imported.selected);}
+        else {storedMode='links';if(imported)nodeOptions(S.metadata(imported).nodes,imported.selected,imported.via);}
       } else if(managed && text) {await F.action('set_core_config',{key,...(profile.config_secret?{name:profile.config_secret}:{}),value:text});storedMode='native';}
     } finally {privateKey.value='';peers.forEach(p=>{p.psk.value='';});coreConfig.value='';shareLinks.value='';}
     await F.data.upsert('profiles',key,profile,{enabled:true});
@@ -266,9 +351,8 @@
     if (apply) {
       say('save.applying');
       try {
-        const response=await F.action('apply',{key});
-        const result=response && response.result || {};
-        say(result.phase==='starting'?'save.starting':'save.applied');
+        const response=await F.action('apply',{key});upstreamsAt=0;
+        appliedNotice(response && response.result || {});
       } catch (error) { await reload();throw error; }
     } else say('save.draftOnly');
     await reload();notify(T(apply?'save.applySubmitted':'save.draftSaved'));
@@ -283,10 +367,11 @@
     h('div',{className:'vpn-savebar'},[node('span','vpn-field-help',L('editor.saveHint')),actions([button(L('editor.saveDraft'),()=>save(false),true),button(L('editor.saveApply'),()=>save(true))])])
   );
   editor.addEventListener('input',()=>{dirty=true;});
-  const detailPanel=h('section',{className:'vpn-panel vpn-details',attrs:{hidden:true}}), detailOutput=h('pre',{className:'vpn-raw'});
+  const detailPanel=h('section',{className:F.classes.card+' vpn-panel vpn-details',attrs:{hidden:true}}), detailOutput=h('pre',{className:'vpn-raw'}), detailBody=h('div',{className:'vpn-detail-body'});
   const detailTitle=setMessage(h('h2'),'details.title');
-  detailPanel.append(h('div',{className:'vpn-heading'},[detailTitle,button(L('details.close'),async()=>{detailPanel.hidden=true;detailOutput.textContent='';},true)]),detailOutput);
-  const healthPhases={unknown:['health.unknown',''],checking:['health.checking',''],healthy:['health.healthy','ready'],unhealthy:['health.unhealthy','error'],stale:['health.stale',''],unavailable:['health.unavailable','']};
+  detailPanel.append(h('div',{className:'vpn-heading'},[detailTitle,button(L('details.close'),async()=>{detailPanel.hidden=true;detailKey='';detailOutput.textContent='';detailBody.replaceChildren();},true)]),detailBody,detailOutput);
+  function pill(text,tone) { return h('span',{className:F.classes.status,attrs:{'data-tone':tone},text}); }
+  const healthPhases={unknown:['health.unknown','off'],checking:['health.checking','off'],healthy:['health.healthy','live'],unhealthy:['health.unhealthy','error'],stale:['health.stale','warn'],unavailable:['health.unavailable','']};
   // Results carry a reason code; the runtime's own text is the fallback for unknown reasons.
   function healthMessage(result) {
     const key='health.reason.'+result.reason;
@@ -295,7 +380,7 @@
   function healthSummary(key) {
     const value=healthStates[key] || {}, phase=healthPhases[value.state] || healthPhases.unknown, result=value.result;
     const row=h('div',{className:'vpn-health-result',attrs:{role:'status','aria-live':'polite'}},[
-      h('span',{className:'vpn-badge',attrs:{'data-tone':phase[1]},text:T(phase[0])}),
+      pill(T(phase[0]),phase[1]),
       result && ['healthy','unhealthy'].includes(value.state)?node('span','vpn-health-time',result.latency_ms+' ms · '+new Date(result.checked_at).toLocaleTimeString(I.locale())):null
     ]);
     if(result && value.state==='unhealthy')row.appendChild(node('span','vpn-health-message',healthMessage(result)+(result.consecutive_failures>1?' · '+T('health.failures',{count:result.consecutive_failures}):'')));
@@ -305,54 +390,198 @@
     clearTimeout(healthPoll);
     const response=await F.action('health_status',{});
     healthStates={};((response.result || {}).items || []).forEach(value=>{healthStates[value.key]=value;});
-    renderList();
+    records.forEach(r=>fillHealth(r.key));
     const values=Object.values(healthStates), checking=values.some(v=>v.state==='checking');
     if(checking || values.some(v=>v.settings.enabled))healthPoll=setTimeout(()=>refreshHealth().catch(notifyError),checking?1000:5000);
     F.requestResize();
   }
-  const phases={applied:['phase.ready','ready'],configured:['phase.ready','ready'],starting:['phase.starting',''],failed:['phase.failed','error'],error:['phase.error','error'],down:['phase.stopped',''],deleted:['phase.stopped','']};
+  function statusError(status) {
+    const info=errorInfo(status.error,status.error_code==='unknown'?'':status.error_code);
+    // A stopped core's supervisor facts read better localized than as the English detail.
+    if (status.error_code==='core_exited' && status.process) {info.detail='';info.facts=T('err.process',{code:status.process.exit_code,starts:status.process.starts});}
+    return info;
+  }
+  const phases={applied:['phase.ready','live'],configured:['phase.ready','live'],starting:['phase.starting','off'],failed:['phase.failed','error'],error:['phase.error','error'],down:['phase.stopped','off'],deleted:['phase.stopped','off']};
+  // Runtime facts come from inspect: counters, handshakes and the core process.
+  function bytes(value) {
+    const n=Number(value) || 0, units=['B','KiB','MiB','GiB','TiB'];
+    let i=0, v=n;
+    while (v>=1024 && i<units.length-1) {v/=1024;i++;}
+    return (i?v.toFixed(1):String(v))+' '+units[i];
+  }
+  function ago(ms) {
+    const seconds=Math.round((Date.now()-ms)/1000), format=new Intl.RelativeTimeFormat(I.locale(),{numeric:'auto'});
+    if (seconds<60) return format.format(-Math.max(seconds,0),'second');
+    if (seconds<3600) return format.format(-Math.round(seconds/60),'minute');
+    if (seconds<86400) return format.format(-Math.round(seconds/3600),'hour');
+    return format.format(-Math.round(seconds/86400),'day');
+  }
+  function when(ms) {
+    if (!ms) return node('span','',T('list.never'));
+    return h('time',{attrs:{datetime:new Date(ms).toISOString(),title:new Date(ms).toLocaleString(I.locale())},text:ago(ms)});
+  }
+  function mono(text) { return h('span',{className:F.classes.mono,text:text == null || text === '' ? '—' : String(text)}); }
+  // An upstream that is another applied exit's WAN boundary also names that exit.
+  function upstreamCell(name) {
+    const front=Object.keys(statuses).find(k=>statuses[k] && statuses[k].phase==='applied' && statuses[k].local_interface===name);
+    return front?h('span',{},[mono(name),node('span','vpn-upstream-exit',' · '+T('list.upstreamExit',{key:front}))]):mono(name);
+  }
+  function handshake(view) {
+    const times=(view && view.peers || []).map(p=>p.latest_handshake).filter(Boolean);
+    return times.length?Math.max(...times)*1000:0;
+  }
+  function pathText(view) {
+    return [T(view.boundary_gso?'list.gsoOn':'list.gsoOff'),T(view.handoff_mode==='direct'?'list.boundaryDirect':'list.boundaryVeth'),T(view.dataplane==='kfuncs'?'list.dataplaneKfuncs':'list.dataplaneBpf')].join(' · ');
+  }
+  function coreText(proc) {
+    if (!proc) return '—';
+    const state=T(['running','starting','restarting','stopped','exited','failed'].includes(proc.state)?'process.'+proc.state:'process.unknown');
+    return proc.state==='running' && proc.started_at?T('list.coreSince',{state,since:ago(proc.started_at)}):state;
+  }
+  function pending(record,status) {
+    // Status carries the profile revision of the last explicit apply.
+    return !!(status.profile_revision && record.revision && record.revision>status.profile_revision);
+  }
+  function factsText(view,profile) {
+    if (!view || !view.driver) return '';
+    const parts=[];
+    if (view.traffic) parts.push(T('list.traffic',{tx:bytes(view.traffic.tx_bytes),rx:bytes(view.traffic.rx_bytes)}));
+    if (['mihomo','sing_box'].includes(profile.driver)) parts.push(coreText(view.process));
+    parts.push(pathText(view));
+    return parts.join(' · ');
+  }
+  function fillHealth(key) {
+    const slot=slots.get(key), value=healthStates[key];
+    if (!slot) return;
+    const shown=!!value && !['unknown','unavailable'].includes(value.state);
+    slot.health.hidden=!shown;slot.health.replaceChildren(...(shown?[healthSummary(key)]:[]));
+  }
+  function fillRuntime(key) {
+    const slot=slots.get(key), record=records.find(r=>r.key===key);
+    if (!slot || !record) return;
+    const view=runtime[key], text=factsText(view,record.data);
+    slot.facts.textContent=text;slot.facts.hidden=!text;
+    if (slot.handshake) slot.handshake.replaceChildren(view && view.peers?when(handshake(view)):node('span','','—'));
+    if (slot.path) slot.path.textContent=view && view.driver?pathText(view):'—';
+  }
+  async function refreshRuntime() {
+    clearTimeout(runtimePoll);
+    const live=records.filter(r=>{const s=statuses[r.key];return s && ['applied','configured','starting','failed','error'].includes(s.phase);});
+    const views=await Promise.all(live.map(r=>F.action('inspect',{key:r.key}).then(v=>[r.key,v.result || v]).catch(()=>[r.key,null])));
+    runtime={};views.forEach(([key,view])=>{if(view)runtime[key]=view;});
+    records.forEach(r=>fillRuntime(r.key));renderKpis();F.requestResize();
+    if (detailKey && runtime[detailKey]) renderDetails(detailKey);
+    // Counters and handshakes age: refresh while the page is open.
+    if (live.length) scheduleRuntime();
+  }
+  function scheduleRuntime() {
+    clearTimeout(runtimePoll);
+    // A background poll stays quiet on failure; the next one or a reload reports it.
+    runtimePoll=setTimeout(()=>{if(document.hidden)scheduleRuntime();else refreshRuntime().catch(()=>scheduleRuntime());},15000);
+  }
+  // The applied node, with its front hops when it is reached through a chain.
+  function nodeText(n) {
+    const text=n.name+' · '+n.type;
+    return n.via && n.via.length?text+' · '+T('list.via',{path:n.via.map(v=>v.name).join(' → ')}):text;
+  }
+  function detailRows(rows) {
+    return h('dl',{className:'vpn-metadata vpn-detail-facts'},rows.map(pair=>h('div',{},[node('dt','',pair[0]),h('dd',{},[pair[1] instanceof Node?pair[1]:mono(pair[1])])])));
+  }
+  function renderDetails(key) {
+    const view=runtime[key] || {}, status=statuses[key] || {}, wg=view.driver==='wireguard';
+    const rows=[[T('details.tunnel'),view.interface],[T('list.interface'),view.local_interface],[T('details.wanID'),view.wan_id],[T('details.path'),node('span','',view.driver?pathText(view):'—')]];
+    if (view.traffic) rows.push([T('details.traffic'),node('span','',T('list.traffic',{tx:bytes(view.traffic.tx_bytes),rx:bytes(view.traffic.rx_bytes)}))]);
+    if (wg) rows.push([T('details.publicKey'),view.public_key]);
+    if (view.process) rows.push([T('details.core'),node('span','',coreText(view.process))],[T('details.pid'),view.process.pid || '—'],[T('details.starts'),String(view.process.starts || 0)]);
+    if (view.node) rows.push([T('list.node'),nodeText(view.node)]);
+    if (status.egress_nat_source_ip) rows.push([T('details.assign'),node('span',F.classes.mono,T('details.assignValue',{interface:status.egress_nat_interface || view.local_interface,source:status.egress_nat_source_ip}))]);
+    const parts=[detailRows(rows)];
+    if (wg && (view.peers || []).length) {
+      // The host table takes text; mark the address-like columns and give times their absolute value.
+      const table=F.table([T('details.peer'),T('peer.endpoint'),T('list.handshake'),T('details.received'),T('details.sent')],
+        view.peers.map(p=>[p.public_key.slice(0,10)+'…',p.endpoint,p.latest_handshake?ago(p.latest_handshake*1000):T('list.never'),bytes(p.rx_bytes),bytes(p.tx_bytes)]));
+      table.querySelectorAll('tbody tr').forEach((row,i)=>{
+        [0,1,3,4].forEach(c=>row.cells[c].classList.add(F.classes.mono));
+        row.cells[0].title=view.peers[i].public_key;
+        if (view.peers[i].latest_handshake) row.cells[2].title=new Date(view.peers[i].latest_handshake*1000).toLocaleString(I.locale());
+      });
+      parts.push(node('h3','vpn-section-title veer-section-title',T('details.peers')),table);
+    }
+    detailBody.replaceChildren(...parts);
+  }
   async function showDetails(key,logs) {
     const value=await F.action(logs?'core_logs':'inspect',{key});
     setMessage(detailTitle,logs?'details.logs':'details.runtime',{key});
-    detailOutput.textContent=JSON.stringify(value.result || value,null,2);detailPanel.hidden=false;
+    if (logs) {detailKey='';detailBody.replaceChildren();detailOutput.hidden=false;detailOutput.textContent=JSON.stringify(value.result || value,null,2);}
+    else {detailKey=key;runtime[key]=value.result || value;detailOutput.hidden=true;detailOutput.textContent='';renderDetails(key);}
+    detailPanel.hidden=false;
     detailPanel.scrollIntoView({block:'nearest',behavior:'smooth'});
   }
+  function appliedNotice(result) {
+    if (result.phase==='starting') say('save.starting');
+    else if (result.egress_nat_interface && result.egress_nat_source_ip) say('save.appliedAssign',{interface:result.egress_nat_interface,source:result.egress_nat_source_ip});
+    else say('save.applied');
+  }
+  async function applyOutlet(key) {
+    say('save.applying');
+    const response=await F.action('apply',{key});upstreamsAt=0;
+    appliedNotice(response && response.result || {});
+    await reload();
+  }
   function renderList() {
-    count.textContent=String(records.length);list.replaceChildren();list.className=records.length?'vpn-list':'';list.hidden=!records.length && !editor.hidden;
-    if (!records.length) {list.appendChild(h('div',{className:'vpn-empty'},[
+    count.textContent=String(records.length);list.replaceChildren();slots.clear();renderKpis();list.className=records.length?'vpn-list':'';list.hidden=!records.length && !editor.hidden;
+    if (!records.length) {list.appendChild(h('div',{className:'veer-empty vpn-empty'},[
       node('div','vpn-icon','↗'),node('h2','',T('list.emptyTitle')),node('p','',T('list.emptyBody')),button(T('list.create'),()=>openEditor(),true)
     ]));return;}
     records.forEach(record=>{
       const profile=record.data, driver=M.drivers[profile.driver || 'wireguard'] || {name:profile.driver,short:'?'}, status=statuses[record.key] || {};
-      const phase=phases[status.phase] || ['phase.notApplied',''], name=status.local_interface || (profile.driver && profile.driver!=='wireguard'?'veervpn':'veerwg')+profile.slot;
-      const metadata=h('dl',{className:'vpn-metadata'});
-      const wg=!profile.driver || profile.driver==='wireguard';
+      const phase=phases[status.phase] || ['phase.notApplied','off'], name=status.local_interface || (profile.driver && profile.driver!=='wireguard'?'veervpn':'veerwg')+profile.slot;
+      const view=runtime[record.key], wg=!profile.driver || profile.driver==='wireguard', proxy=['mihomo','sing_box'].includes(profile.driver);
       const addresses=profile.addresses && profile.addresses.length?profile.addresses:status.wan_addresses || [];
-      [[T('list.interface'),name],[T(wg?'field.wgAddress':'field.wanAddress'),addresses.join(', ') || T(wg?'list.notConfigured':'list.assignedOnApply')],
-        [T(wg?'list.peerRouting':profile.driver==='tun'?'list.tunInterface':'field.upstream'),wg?T('list.hostRoutes'):profile.driver==='tun'?profile.tun_interface:profile.upstream_interface],
-        [T('list.attach'),T('list.attachValue')]].forEach(pair=>metadata.append(h('div',{},[node('dt','',pair[0]),node('dd','',pair[1])])));
-      const card=h('article',{className:'vpn-outlet'},[
-        h('div',{className:'vpn-card-top'},[h('div',{className:'vpn-card-heading'},[node('div','vpn-icon',driver.short),h('div',{},[node('h3','',record.key),node('p','vpn-caption',driver.name)])]),h('span',{className:'vpn-badge',attrs:{'data-tone':phase[1]},text:T(phase[0])})]),metadata,
-        status.error?node('p','vpn-card-error',status.error):null,
-        healthStates[record.key] && !['unknown','unavailable'].includes(healthStates[record.key].state)?h('div',{className:'vpn-health-line'},[healthSummary(record.key)]):null,
+      const peers=profile.peers || [], endpoints=peers.map(p=>p.endpoint).filter(Boolean);
+      const rows=[[T('list.interface'),mono(name)],[T(wg?'field.wgAddress':'field.wanAddress'),addresses.length?mono(addresses.join(', ')):node('span','',T(wg?'list.notConfigured':'list.assignedOnApply'))]];
+      if (wg) rows.push([T('list.peers'),endpoints.length===1 && peers.length===1?mono(endpoints[0]):node('span','',T('list.peerCount',{count:peers.length}))],
+        [T('list.handshake'),h('span',{})]);
+      else if (proxy) rows.push([T('field.upstream'),upstreamCell(profile.upstream_interface)],[T('list.node'),node('span','',status.node?nodeText(status.node):status.profile_revision?T('list.nativeConfig'):'—')]);
+      else rows.push([T('list.tunInterface'),mono(profile.tun_interface)],[T('details.path'),h('span',{})]);
+      const metadata=h('dl',{className:'vpn-metadata'},rows.map(pair=>h('div',{},[node('dt','',pair[0]),h('dd',{},[pair[1]])])));
+      const slot={facts:h('p',{className:'vpn-facts'}),health:h('div',{className:'vpn-health-line'}),handshake:wg?rows[3][1]:null,path:!wg && !proxy?rows[3][1]:null};
+      const stale=pending(record,status), applied=['applied','configured','starting'].includes(status.phase);
+      const remove=button(T('list.delete'),async()=>{
+        if (!await F.confirm({title:T('confirm.delete.title',{key:record.key}),message:T('confirm.delete.message'),confirmText:T('list.delete'),cancelText:T('action.cancel'),danger:true}))return;
+        await F.action('delete_profile',{key:record.key});
+        if(editing && keyInput.value===record.key) {editor.hidden=true;editing=false;dirty=false;original={};}
+        detailPanel.hidden=true;detailKey='';await reload();say('list.deleted',{key:record.key});
+      },true);
+      const teardown=applied || status.phase==='error' || status.phase==='failed'?button(T('list.teardown'),async()=>{
+        if (!await F.confirm({title:T('confirm.teardown.title',{key:record.key}),message:T('confirm.teardown.message'),confirmText:T('list.teardown'),cancelText:T('action.cancel'),danger:true}))return;
+        await F.action('teardown',{key:record.key});await reload();
+      },true):null;
+      [remove,teardown].forEach(b=>{if(b)b.classList.add('is-danger');});
+      // Rarely used and destructive actions stay one click away, not beside Edit.
+      const moreRow=h('div',{className:'vpn-more-actions',attrs:{hidden:!expanded.has(record.key)}},[
+        proxy?button(T('list.coreLogs'),async()=>{
+          if(await F.confirm({title:T('confirm.logs.title'),message:T('confirm.logs.message'),confirmText:T('confirm.logs.confirm'),cancelText:T('action.cancel')}))await showDetails(record.key,true);
+        },true):null,teardown,remove]);
+      const more=F.button(T('list.more'),()=>{
+        moreRow.hidden=!moreRow.hidden;if(moreRow.hidden)expanded.delete(record.key);else expanded.add(record.key);
+        more.setAttribute('aria-expanded',String(!moreRow.hidden));F.requestResize();
+      },true);
+      more.setAttribute('aria-expanded',String(!moreRow.hidden));
+      const card=h('article',{className:F.classes.card+' vpn-outlet'},[
+        h('div',{className:'vpn-card-top'},[h('div',{className:'vpn-card-heading'},[node('div','vpn-icon',driver.short),h('div',{},[node('h3','',record.key),node('p','vpn-caption',driver.name)])]),pill(T(phase[0]),phase[1])]),
+        stale?node('p','vpn-pending',T('list.pendingChanges')):null,
+        metadata,slot.facts,
+        status.error || status.error_code?errorView(statusError(status),'vpn-card-error'):null,
+        slot.health,
         h('div',{className:'vpn-card-footer'},[
-          button(T('list.edit'),()=>openEditor(record),true),button(T('list.status'),()=>showDetails(record.key,false),true),
-          button(T('list.healthCheck'),async()=>{await F.action('health_check',{key:record.key});await refreshHealth();},true),
-          button(T('list.teardown'),async()=>{
-            if (!await F.confirm({title:T('confirm.teardown.title',{key:record.key}),message:T('confirm.teardown.message'),confirmText:T('list.teardown'),cancelText:T('action.cancel'),danger:true}))return;
-            await F.action('teardown',{key:record.key});await reload();
-          },true),
-          button(T('list.delete'),async()=>{
-            if (!await F.confirm({title:T('confirm.delete.title',{key:record.key}),message:T('confirm.delete.message'),confirmText:T('list.delete'),cancelText:T('action.cancel'),danger:true}))return;
-            await F.action('delete_profile',{key:record.key});
-            if(editing && keyInput.value===record.key) {editor.hidden=true;editing=false;dirty=false;original={};}
-            detailPanel.hidden=true;await reload();say('list.deleted',{key:record.key});
-          },true),
-          ['mihomo','sing_box'].includes(profile.driver)?button(T('list.coreLogs'),async()=>{
-            if(await F.confirm({title:T('confirm.logs.title'),message:T('confirm.logs.message'),confirmText:T('confirm.logs.confirm'),cancelText:T('action.cancel')}))await showDetails(record.key,true);
-          },true):null
-        ])
-      ]);list.appendChild(card);
+          button(T('list.edit'),()=>openEditor(record),true),
+          stale || !applied?button(T('list.apply'),()=>applyOutlet(record.key),true):null,
+          applied?button(T('list.healthCheck'),async()=>{await F.action('health_check',{key:record.key});await refreshHealth();},true):null,
+          applied || status.phase==='failed' || status.phase==='error'?button(T('list.details'),()=>showDetails(record.key,false),true):null,
+          more
+        ]),moreRow
+      ]);list.appendChild(card);slots.set(record.key,slot);fillRuntime(record.key);fillHealth(record.key);
     });
   }
   async function reload() {
@@ -362,13 +591,13 @@
     statuses={};state.forEach(r=>{statuses[r.key]=r.data || {};});renderList();
     clearTimeout(statusPoll);
     if(state.some(r=>r.data && r.data.phase==='starting'))statusPoll=setTimeout(()=>reload().catch(notifyError),2500);
-    await refreshHealth();
+    await Promise.all([refreshHealth(),refreshRuntime()]);
     F.requestResize();
   }
   const coreVersion=setMessage(h('div',{className:'vpn-core-version'}),'core.notInstalled'),coreInfo=node('p','vpn-status-line',''),coreProgress=h('progress',{className:'vpn-progress',attrs:{hidden:true,max:100}});
   const installVersion=bind(input(L('core.installVersion'),''),'placeholder',L('core.installVersion.placeholder')),installDigest=input('SHA256','');
   const installed=bind(h('select',{className:F.classes.input}),'aria-label',L('core.installedVersions.label'));
-  const coreName=node('h2','','Mihomo'),coreOptions={},coreDetails=h('div',{className:'vpn-panel'});
+  const coreName=node('h2','','Mihomo'),coreOptions={},coreDetails=h('div',{className:F.classes.card+' vpn-panel'});
   const jobPhases=['resolving','downloading','verifying','ready','failed'];
   function setCoreStatus(status) {
     coreStatus=status;
@@ -416,10 +645,10 @@
   outletPanel.append(editor,detailPanel);
   const refreshOutletButton=button(L('action.refreshOutlets'),reload,true);
   const createOutletButton=button(L('action.newOutlet'),async()=>{switchTab(false);await openEditor();});
-  const page=h('main',{className:F.classes.page+' vpn-page'},[
-    actions([refreshOutletButton, createOutletButton]),
+  const page=h('main',{className:F.classes.page+' vpn-page'},[h('div',{className:F.classes.stack},[
+    actions([refreshOutletButton, createOutletButton]),kpis,
     bind(h('nav',{className:'vpn-nav',attrs:{role:'tablist'}},[outletTab,coreTab]),'aria-label',L('page.nav')),notice,outletPanel,corePanel
-  ]);
+  ])]);
   // Rerendering keeps every input value; only the open state of the rebuilt proxy section needs restoring.
   function relocalize() {
     bound.forEach(put);peers.forEach(p=>p.bound.forEach(put));
@@ -433,7 +662,7 @@
     F.requestResize();
   }
   if (F.onLocaleChange) F.onLocaleChange(relocalize);
-  window.addEventListener('pagehide',()=>{++coreSequence;clearTimeout(corePoll);clearTimeout(statusPoll);clearTimeout(healthPoll);privateKey.value='';coreConfig.value='';shareLinks.value='';importConfig.value='';});
+  window.addEventListener('pagehide',()=>{++coreSequence;clearTimeout(corePoll);clearTimeout(statusPoll);clearTimeout(healthPoll);clearTimeout(runtimePoll);privateKey.value='';coreConfig.value='';shareLinks.value='';importConfig.value='';});
   document.body.replaceChildren(page);
       if (F.headerActions) F.headerActions([refreshOutletButton, createOutletButton]);reload().catch(error=>message(F.errorText(error),true));
 })();

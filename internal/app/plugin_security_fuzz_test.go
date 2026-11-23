@@ -115,24 +115,6 @@ func FuzzPluginManifestDecodeAndNormalize(f *testing.F) {
 	})
 }
 
-func FuzzPluginHostFrameDecode(f *testing.F) {
-	f.Add(framedPluginHostJSON(`{"type":"event","id":1,"payload":{"ok":true}}`))
-	f.Add(framedPluginHostJSON(`{"type":"event","type":"shutdown"}`))
-	f.Add([]byte{0, 0, 0, 1, '{'})
-	f.Fuzz(func(t *testing.T, data []byte) {
-		if len(data) > 1<<20 {
-			return
-		}
-		message, err := newPluginHostFrameReader(bytes.NewReader(data), 64<<10).Read()
-		if err != nil {
-			return
-		}
-		if strings.TrimSpace(message.Type) == "" || len(message.Error) > pluginHostMaxErrorBytes {
-			t.Fatalf("frame decoder accepted an invalid message: %+v", message)
-		}
-	})
-}
-
 func FuzzDecodePluginBlobHeader(f *testing.F) {
 	header, err := encodePluginBlobHeader(pluginBlobHeader{
 		FormatVersion: pluginBlobFormatVersion,

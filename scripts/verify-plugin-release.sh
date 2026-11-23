@@ -2,6 +2,8 @@
 set -eu
 
 ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+# shellcheck source=/dev/null
+. "$ROOT_DIR/scripts/rust-env.sh"
 PROFILE=${1:-portable}
 TMP_DIR=
 PACKAGE_DIR=
@@ -130,7 +132,7 @@ assert_minimum() {
 }
 
 run_portable() {
-	for command_name in go node npm npx python3 sh tar cmp govulncheck; do
+	for command_name in go node npm npx python3 sh tar cmp govulncheck cargo; do
 		require_command "$command_name"
 	done
 	new_temp_dir
@@ -138,6 +140,11 @@ run_portable() {
 	log "Go module integrity"
 	(cd "$ROOT_DIR" && go mod verify && go mod tidy -diff)
 
+	log "Rust plugin SDK, worker and bundled plugin tests"
+	(cd "$ROOT_DIR" && cargo test --workspace)
+
+	# Plugins are native: on Linux build-all-ebpf.sh also builds the worker
+	# veer embeds and the bundled plugins' libraries (plugins/<id>/lib/).
 	prepare_portable_ebpf
 
 	log "deployment platform scripts"
@@ -153,11 +160,16 @@ run_portable() {
 	esac
 	(cd "$ROOT_DIR" && go build -trimpath -o "$verify_binary" .)
 
+	# On Linux the tests that run bundled plugins must not skip for want of
+	# a worker or library.
+	native_required=0
+	[ "$(uname -s)" = Linux ] && native_required=1
+
 	log "Go tests"
-	(cd "$ROOT_DIR" && go test ./... -count=1)
+	(cd "$ROOT_DIR" && VEER_REQUIRE_NATIVE_PLUGINS=$native_required go test ./... -count=1)
 
 	log "Go race tests"
-	(cd "$ROOT_DIR" && go test -race ./... -count=1 -timeout=15m)
+	(cd "$ROOT_DIR" && VEER_REQUIRE_NATIVE_PLUGINS=$native_required go test -race ./... -count=1 -timeout=15m)
 
 	log "Go vet"
 	(cd "$ROOT_DIR" && go vet ./...)
@@ -171,16 +183,10 @@ run_portable() {
 	log "WebUI browser tests"
 	(cd "$ROOT_DIR" && npm run test:web:e2e)
 
-	log "plugin SDK Node tests"
-	(cd "$ROOT_DIR" && node --test sdk/plugin/test-host.test.cjs)
-
-	log "PPPoE control-plane self-test"
-	(cd "$ROOT_DIR" && node plugins/pppoe_client/test-control-node.js)
-
-	log "plugin SDK TypeScript declarations"
+	log "plugin SDK WebUI TypeScript declarations"
 	(cd "$ROOT_DIR" && npx --yes --package typescript@5.9.3 tsc \
 		--noEmit --strict --skipLibCheck false --target ES2022 --moduleResolution node \
-		sdk/plugin/control.d.ts sdk/plugin/methods.d.ts sdk/plugin/webui.d.ts sdk/plugin/test-host.d.ts)
+		sdk/plugin/webui.d.ts)
 
 	log "SDK contract"
 	"$verify_binary" plugin contract --check "$ROOT_DIR/sdk/plugin/api-contract.json"
@@ -195,13 +201,18 @@ run_portable() {
 	mkdir -p "$sdk_extract"
 	tar -xzf "$sdk_archive_a" -C "$sdk_extract"
 	test -f "$sdk_extract/veer-plugin-sdk/sdk-manifest.json" || fail "plugin SDK manifest is missing"
-	test -f "$sdk_extract/veer-plugin-sdk/sdk/plugin/control.d.ts" || fail "plugin SDK control declarations are missing"
-	test -f "$sdk_extract/veer-plugin-sdk/sdk/plugin/test-host.cjs" || fail "plugin SDK test host is missing"
+	test -f "$sdk_extract/veer-plugin-sdk/sdk/native/include/veer_plugin.h" || fail "plugin SDK C ABI header is missing"
+	test -f "$sdk_extract/veer-plugin-sdk/sdk/native/rust/veer-plugin/Cargo.toml" || fail "plugin SDK Rust crate is missing"
+	test -f "$sdk_extract/veer-plugin-sdk/sdk/native/build-plugin.sh" || fail "plugin SDK library build script is missing"
+	sdk_crate="$sdk_extract/veer-plugin-sdk/sdk/native/rust/veer-plugin"
+	# The scaffolds build their library for this runner only.
+	VEER_PLUGIN_NATIVE_TARGETS=x86_64-linux-gnu
+	export VEER_PLUGIN_NATIVE_TARGETS
 	test -f "$sdk_extract/veer-plugin-sdk/plugins/include/veer_plugin_helpers.h" || fail "plugin SDK eBPF helper is missing"
 	test -f "$sdk_extract/veer-plugin-sdk/sdk/plugin/templates/plugin-ci.yml" || fail "plugin SDK CI template is missing"
 	scaffold="$TMP_DIR/plugin-sdk-scaffold"
 	"$verify_binary" plugin init --id release_gate --kind pipeline --directory "$scaffold" \
-		--sdk-include "$sdk_extract/veer-plugin-sdk/plugins/include"
+		--sdk-include "$sdk_extract/veer-plugin-sdk/plugins/include" --sdk-crate "$sdk_crate"
 	VEER_BIN="$verify_binary" \
 		sh "$sdk_extract/veer-plugin-sdk/sdk/plugin/ci/verify.sh" "$scaffold"
 	prebuilt_scaffold="$TMP_DIR/plugin-sdk-prebuilt-scaffold"
@@ -210,11 +221,11 @@ run_portable() {
 	VEER_BIN="$verify_binary" \
 		sh "$sdk_extract/veer-plugin-sdk/sdk/plugin/ci/verify.sh" "$prebuilt_scaffold"
 	control_scaffold="$TMP_DIR/plugin-sdk-control-scaffold"
-	"$verify_binary" plugin init --id release_control --kind control --directory "$control_scaffold"
+	"$verify_binary" plugin init --id release_control --kind control --directory "$control_scaffold" --sdk-crate "$sdk_crate"
 	VEER_BIN="$verify_binary" \
 		sh "$sdk_extract/veer-plugin-sdk/sdk/plugin/ci/verify.sh" "$control_scaffold"
 	ui_scaffold="$TMP_DIR/plugin-sdk-ui-scaffold"
-	"$verify_binary" plugin init --id release_ui --kind ui --directory "$ui_scaffold"
+	"$verify_binary" plugin init --id release_ui --kind ui --directory "$ui_scaffold" --sdk-crate "$sdk_crate"
 	VEER_BIN="$verify_binary" \
 		sh "$sdk_extract/veer-plugin-sdk/sdk/plugin/ci/verify.sh" "$ui_scaffold"
 
@@ -263,12 +274,14 @@ run_privileged() {
 	new_temp_dir
 	log "build eBPF objects for privileged integration"
 	sh "$ROOT_DIR/scripts/build-all-ebpf.sh"
+	log "build the native conformance plugin"
+	(cd "$ROOT_DIR" && cargo build --release -p veer-plugin-example-echo)
 	log "build privileged integration binary"
 	privileged_binary="$TMP_DIR/veer-plugin-privileged.test"
 	go test -c -o "$privileged_binary" ./internal/app
 
 	privileged_log="$TMP_DIR/privileged.log"
-	privileged_pattern='^(TestPluginHostSeccompFilterRejectsForeignABIAndBlockedSyscalls|TestPluginHostLinuxSandboxIdentityAndCgroup|TestPluginHostLinuxSandboxSupportsConcurrentHosts|TestPluginHostLinuxSandboxEnforcementProbe|TestPluginHostLinuxChrootFallbackEnforcementProbe|TestPluginHostIsolationContainsMemoryExhaustion|TestPluginHostIsolationLoadsRelativeControlModulesInMainAndWorker|TestPluginHostIsolationBrokersTypedServiceDiscoveryAndCall|TestCleanupOrphanPluginHostCgroups|TestCleanupOrphanPluginHostFilesystemRoots|TestLinuxPluginScopedNamespaceNetworkAPIs|TestEgressNATTCActiveTCPRefreshesBothFlowEntries|TestEgressNATTCNextHopCacheFollowsNeighbourChange|TestEgressNATTCFullConeSYNRetryKeepsNATPort|TestPlugin(NetPolicyProviderLinuxIntegration|NetPolicyTransactionsLinuxIntegration|MultipathRouteLinuxIntegration|NamespaceTunTapLinuxIntegration|NamespaceTunTapCrashRecoveryLinuxIntegration|NetTransactionCrashRecoveryLinuxIntegration|WANCoreLinuxIntegration|VToLocalLinuxIntegration|LANCoreLinuxIntegration|ActionApplyPersistsAndRepairsLinuxIntegration|LANCoreResolvesWANCoreStatusLinuxIntegration|ControlNetEnsureVethRejectsMismatchedExistingPeersLinuxIntegration|ControlNetOwnedLinkMACLinuxIntegration|ControlNetEnsureMacvlanLinuxIntegration|ControlNetSetGSOLinuxIntegration|ControlNetAddrReplaceIdempotentLinuxIntegration|DataplaneRuntimeAttachesTCObservePlugin|IPv6AssignmentPlanLinuxIntegration|LANCoreGeneratedEgressNATTCIntegration|LANCoreResolvesWANCoreEgressNATTCIntegration)|TestKernelPluginPipelineRuntime.*|TestKernelXDPPluginPipelineChainHotUpdateAndConflict|TestKernelXDPPluginPipelineRecoversOrphanAfterSIGKILL|TestKernelXDPPluginPipelineHotRestartHandsOffInPlace|TestKernelXDPPluginTCFallbackRunsAheadOfCore|TestKernelXDPPluginTCFallbackHotRestartHandsOffInPlace|TestPinKernelHotRestartTailCallsKeepsChainAfterLastFD|TestPluginMapHandoffKeepsPreservedMaps|TestPluginMapHandoffSkipsMapsThatDoNotMatchTheirRecord|TestPluginMapHandoffNeedsHotRestart|TestSyncKernelPluginConfigsWriteBankBeforeHeader|TestKernelNetfilterPlugin(PipelineIntegration|PriorityIntegration|NamespaceRecreateIntegration|InitialMissingNamespaceRecoversIntegration)|TestOrderedKernelRuntimeChainsXDPIntoTCPlugin)$'
+	privileged_pattern='^(TestNativePlugin.*|TestPluginHostIsolationLoadsRelativeControlModulesInMainAndWorker|TestPluginHostIsolationBrokersTypedServiceDiscoveryAndCall|TestCleanupOrphanPluginHostCgroups|TestLinuxPluginScopedNamespaceNetworkAPIs|TestEgressNATTCActiveTCPRefreshesBothFlowEntries|TestEgressNATTCNextHopCacheFollowsNeighbourChange|TestEgressNATTCFullConeSYNRetryKeepsNATPort|TestPlugin(NetPolicyProviderLinuxIntegration|NetPolicyTransactionsLinuxIntegration|MultipathRouteLinuxIntegration|NamespaceTunTapLinuxIntegration|NamespaceTunTapCrashRecoveryLinuxIntegration|NetTransactionCrashRecoveryLinuxIntegration|WANCoreLinuxIntegration|VToLocalLinuxIntegration|LANCoreLinuxIntegration|ActionApplyPersistsAndRepairsLinuxIntegration|LANCoreResolvesWANCoreStatusLinuxIntegration|ControlNetEnsureVethRejectsMismatchedExistingPeersLinuxIntegration|ControlNetOwnedLinkMACLinuxIntegration|ControlNetEnsureMacvlanLinuxIntegration|ControlNetSetGSOLinuxIntegration|ControlNetAddrReplaceIdempotentLinuxIntegration|DataplaneRuntimeAttachesTCObservePlugin|IPv6AssignmentPlanLinuxIntegration|LANCoreGeneratedEgressNATTCIntegration|LANCoreResolvesWANCoreEgressNATTCIntegration)|TestKernelPluginPipelineRuntime.*|TestKernelXDPPluginPipelineChainHotUpdateAndConflict|TestKernelXDPPluginPipelineRecoversOrphanAfterSIGKILL|TestKernelXDPPluginPipelineHotRestartHandsOffInPlace|TestKernelXDPPluginTCFallbackRunsAheadOfCore|TestKernelXDPPluginTCFallbackHotRestartHandsOffInPlace|TestKernelXDPPluginTCEgressAttachesOnBoundInterfaces|TestKernelXDPPluginTCEgressBesideNativeXDP|TestKernelXDPPluginTCEgressHotRestartHandsOffInPlace|TestPinKernelHotRestartTailCallsKeepsChainAfterLastFD|TestPluginMapHandoffKeepsPreservedMaps|TestPluginMapHandoffSkipsMapsThatDoNotMatchTheirRecord|TestPluginMapHandoffNeedsHotRestart|TestSyncKernelPluginConfigsWriteBankBeforeHeader|TestKernelNetfilterPlugin(PipelineIntegration|PriorityIntegration|NamespaceRecreateIntegration|InitialMissingNamespaceRecoversIntegration)|TestOrderedKernelRuntimeChainsXDPIntoTCPlugin)$'
 	env_command=$(command -v env)
 	set -- \
 		"$env_command" \
@@ -286,6 +299,9 @@ run_privileged() {
 		VEER_RUN_XDP_PLUGIN_TESTS=1 \
 		VEER_RUN_NETFILTER_PLUGIN_TEST=1 \
 		VEER_PLUGIN_OOM_TEST=1 \
+		VEER_REQUIRE_NATIVE_PLUGINS=1 \
+		"VEER_PLUGIN_WORKER=$ROOT_DIR/internal/app/pluginworker/x86_64-linux-gnu/veer-plugin-worker" \
+		"VEER_TEST_NATIVE_ECHO=$ROOT_DIR/target/release/libnative_echo.so" \
 		"$privileged_binary" \
 		-test.v -test.run "$privileged_pattern" -test.count=1 -test.timeout=30m
 	if command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
@@ -298,13 +314,13 @@ run_privileged() {
 	run_no_skips "privileged plugin integration" "$privileged_log" "$@"
 
 	for required_test in \
-		TestPluginHostSeccompFilterRejectsForeignABIAndBlockedSyscalls \
-		TestPluginHostLinuxSandboxIdentityAndCgroup \
-		TestPluginHostLinuxSandboxSupportsConcurrentHosts \
-		TestPluginHostLinuxSandboxEnforcementProbe \
-		TestPluginHostLinuxChrootFallbackEnforcementProbe \
-		TestCleanupOrphanPluginHostFilesystemRoots \
-		TestPluginHostIsolationContainsMemoryExhaustion \
+		TestNativePluginQueryAndHostCalls \
+		TestNativePluginPanicRestartsInstance \
+		TestNativePluginCrashDemotesSharedPlugin \
+		TestNativePluginTimeoutKillsWorker \
+		TestNativePluginDispatchRunsOnItsOwnInstance \
+		TestNativePluginEventLatency \
+		TestCleanupOrphanPluginHostCgroups \
 		TestPluginHostIsolationLoadsRelativeControlModulesInMainAndWorker \
 		TestPluginHostIsolationBrokersTypedServiceDiscoveryAndCall \
 		TestPluginNetPolicyTransactionsLinuxIntegration \
@@ -337,6 +353,9 @@ run_privileged() {
 		TestKernelXDPPluginPipelineHotRestartHandsOffInPlace \
 		TestKernelXDPPluginTCFallbackRunsAheadOfCore \
 		TestKernelXDPPluginTCFallbackHotRestartHandsOffInPlace \
+		TestKernelXDPPluginTCEgressAttachesOnBoundInterfaces \
+		TestKernelXDPPluginTCEgressBesideNativeXDP \
+		TestKernelXDPPluginTCEgressHotRestartHandsOffInPlace \
 		TestPinKernelHotRestartTailCallsKeepsChainAfterLastFD \
 		TestSyncKernelPluginConfigsWriteBankBeforeHeader \
 		TestKernelNetfilterPluginPipelineIntegration \
@@ -386,12 +405,12 @@ run_privileged() {
 		sh "$ROOT_DIR/plugins/pppoe_client/test-blackbox-linux.sh"
 
 	# The firewall next to Veer forwards, the XDP engine, plugin disable and a
-	# broken object, and alongside pppoe_client and vpn_core.
+	# broken object, connection tracking, and alongside pppoe_client and vpn_core.
 	for command_name in wg ethtool unshare pppoe-server pppd; do
 		require_command "$command_name"
 	done
 	firewall_log="$TMP_DIR/firewall-system.log"
-	firewall_tests='TestFirewallSystemPortForwardAllowlist TestFirewallSystemFlowCacheUnaffected TestFirewallSystemXDPEnginePinning TestFirewallSystemDisableDetaches TestFirewallSystemBrokenObjectFailsOpen TestFirewallCoexistVPNCore TestFirewallCoexistPPPoE'
+	firewall_tests='TestFirewallSystemPortForwardAllowlist TestFirewallSystemFlowCacheUnaffected TestFirewallSystemXDPEnginePinning TestFirewallSystemDisableDetaches TestFirewallSystemBrokenObjectFailsOpen TestFirewallSystemConnectionTracking TestFirewallCoexistVPNCore TestFirewallCoexistPPPoE'
 	firewall_pattern=$(printf '%s' "$firewall_tests" | tr ' ' '|')
 	run_no_skips "firewall plugin system and coexistence" "$firewall_log" \
 		env FORWARD_RUN_PLUGIN_INTEGRATION_TEST=1 FORWARD_PERF_BINARY="$pppoe_blackbox_binary" \
@@ -446,6 +465,19 @@ run_flow_churn() {
 	do
 		require_test_pass "$flow_churn_log" "$required_test"
 	done
+
+	# A daemon under guest, rule and network churn with hot restarts, while
+	# the diagnostics page polls: no failed request, no stalled shutdown, no
+	# descriptor or goroutine growth.
+	churn_soak_log="$TMP_DIR/churn-soak.log"
+	run_no_skips "daemon churn soak" "$churn_soak_log" \
+		env \
+		FORWARD_RUN_CHURN_SOAK_TEST=1 \
+		FORWARD_CHURN_SOAK_RESTART_CYCLES=10 \
+		FORWARD_CHURN_SOAK_LEAK_CYCLES=10 \
+		"$flow_churn_binary" \
+		-test.v -test.run '^TestDaemonChurnSoak$' -test.count=1 -test.timeout=15m
+	require_test_pass "$churn_soak_log" TestDaemonChurnSoak
 }
 
 run_core_dataplane() {
@@ -462,7 +494,7 @@ run_core_dataplane() {
 		go test -c -o "$core_binary" ./internal/app
 	fi
 	plugin_log="$TMP_DIR/bundled-dataplane.log"
-	plugin_tests='TestPluginDirectTCIncrementalReconcile TestPluginDirectTCCleanupRetainsFailures TestPluginXDPDetachOwnershipLinuxIntegration TestPluginMapTransactionLinuxRejectsLRUBeforeMutation TestBundledPPPoEMSSClampLinux TestPluginControlNetEnsureVethRejectsMismatchedExistingPeersLinuxIntegration TestPluginControlNetOwnedLinkMACLinuxIntegration TestPluginWANCoreLinuxIntegration TestPluginNetPolicyTransactionsLinuxIntegration TestPluginNetRecoveryInterfaceFaultsLinuxIntegration TestPluginNetTransactionCrashRecoveryLinuxIntegration TestPluginControlNetAddrReplaceIdempotentLinuxIntegration TestFirewallMapKeysMatchCompiler TestFirewallProgramVerdicts TestFirewallProgramWithoutConfigPasses TestFirewallProgramSynLimit TestFirewallPluginLinuxIntegration'
+	plugin_tests='TestPluginDirectTCIncrementalReconcile TestPluginDirectTCCleanupRetainsFailures TestPluginXDPDetachOwnershipLinuxIntegration TestPluginMapTransactionLinuxRejectsLRUBeforeMutation TestBundledPPPoEMSSClampLinux TestPluginControlNetEnsureVethRejectsMismatchedExistingPeersLinuxIntegration TestPluginControlNetOwnedLinkMACLinuxIntegration TestPluginWANCoreLinuxIntegration TestPluginNetPolicyTransactionsLinuxIntegration TestPluginNetRecoveryInterfaceFaultsLinuxIntegration TestPluginNetTransactionCrashRecoveryLinuxIntegration TestPluginControlNetAddrReplaceIdempotentLinuxIntegration TestFirewallMapKeysMatchCompiler TestFirewallExtMapKeysMatchCompiler TestFirewallProgramVerdicts TestFirewallProgramWithoutConfigPasses TestFirewallProgramSynLimit TestFirewallProgramProtocolsAndCatchAll TestFirewallProgramBaseline TestFirewallProgramSets TestFirewallProgramNewOnly TestFirewallProgramConnectionTracking TestFirewallPluginLinuxIntegration'
 	plugin_pattern=$(printf '%s' "$plugin_tests" | tr ' ' '|')
 	run_no_skips "bundled plugin recovery, direct TC updates and PPPoE MSS handling" "$plugin_log" \
 		env FORWARD_RUN_PLUGIN_DATAPLANE_TEST=1 FORWARD_RUN_PLUGIN_INTEGRATION_TEST=1 \
@@ -659,14 +691,26 @@ run_xdp_performance() {
 	done
 
 	# -v makes a skipped benchmark print '--- SKIP:' for run_no_skips; a
-	# case that never ran also fails below for want of values.
+	# case that never ran also fails below for want of values. The stages
+	# benchmark runs in a scratch namespace with forwarding on and a default
+	# route through a dummy interface, where the reverse-path cases look
+	# routes up.
 	firewall_log="$TMP_DIR/xdp-firewall-benchmark.log"
+	firewall_bench_ns="veerfwbench$$"
+	ip netns add "$firewall_bench_ns"
+	ip -n "$firewall_bench_ns" link set lo up
+	ip -n "$firewall_bench_ns" link add fwbench0 type dummy
+	ip -n "$firewall_bench_ns" link set fwbench0 up
+	ip -n "$firewall_bench_ns" route add default dev fwbench0
+	ip netns exec "$firewall_bench_ns" sysctl -qw net.ipv4.ip_forward=1
+	firewall_bench_ifindex=$(ip netns exec "$firewall_bench_ns" cat /sys/class/net/fwbench0/ifindex)
 	run_no_skips "XDP firewall plugin per-packet benchmark" "$firewall_log" \
-		env VEER_RUN_XDP_PLUGIN_BENCH=1 \
-		go test -v ./internal/app -run '^$' -bench '^BenchmarkFirewallProgram$' -benchtime=1s -count=3 -timeout=10m
+		ip netns exec "$firewall_bench_ns" env VEER_RUN_XDP_PLUGIN_BENCH=1 VEER_FIREWALL_BENCH_IFINDEX="$firewall_bench_ifindex" \
+		go test -v ./internal/app -run '^$' -bench '^BenchmarkFirewallProgram(Stages)?$' -benchtime=1s -count=3 -timeout=10m
+	ip netns del "$firewall_bench_ns"
 
 	awk '
-		/^BenchmarkFirewallProgram\// {
+		/^BenchmarkFirewallProgram(Stages)?\// {
 			name = $1
 			sub(/^.*\//, "", name)
 			sub(/-[0-9]+$/, "", name)
@@ -676,7 +720,11 @@ run_xdp_performance() {
 
 	printf '\nXDP firewall per-packet medians (limit %s ns):\n' "$xdp_firewall_max_ns"
 	for case_name in not_loaded unprotected_port_v4 allowed_source_v4 dropped_source_v4 trusted_source_v4 \
-		allowed_source_v6 dropped_source_v6 vlan_allowed_source_v4 limited_established_v4 limited_syn_v4
+		allowed_source_v6 dropped_source_v6 vlan_allowed_source_v4 limited_established_v4 limited_syn_v4 \
+		base_unprotected_v4 ct_on_unprotected_v4 ct_established_v4 ct_established_v6 ct_untracked_drop_v4 catchall_no_ct_drop_v4 \
+		blocklist_pass_v4 blocklist_drop_v4 blocklist_pass_v6 bogon_pass_v4 bogon_drop_v4 bad_flags_pass_v4 \
+		urpf_strict_pass_v4 urpf_loose_pass_v4 icmp_allowed_v4 icmp_dropped_v4 source_set_allowed_v4 \
+		egress_ct_off egress_tracked_v4 egress_untracked_ack_v4
 	do
 		value=$(median_file "$TMP_DIR/xdp-firewall-${case_name}.values") || fail "missing XDP firewall ${case_name} benchmark"
 		printf '  %-22s median=%s ns/packet\n' "$case_name" "$value"
@@ -728,6 +776,13 @@ run_firewall_dataplane_performance() {
 		VEER_FIREWALL_PERF_ROUNDS="$perf_samples" \
 		go test -v ./internal/app -run '^TestFirewallPluginSYNFlood$' -count=1 -timeout=30m
 	require_test_pass "$firewall_flood_log" TestFirewallPluginSYNFlood
+	require_command nft
+	firewall_ct_flood_log="$TMP_DIR/firewall-established-flood.log"
+	run_no_skips "Firewall plugin established-connection flood" "$firewall_ct_flood_log" \
+		env VEER_RUN_FIREWALL_PERF=1 FORWARD_PERF_BINARY="$perf_binary" VEER_FIREWALL_PERF_PLUGIN_DIR="$ROOT_DIR/plugins/firewall" \
+		VEER_FIREWALL_PERF_ROUNDS="$perf_samples" \
+		go test -v ./internal/app -run '^TestFirewallPluginEstablishedFlood$' -count=1 -timeout=30m
+	require_test_pass "$firewall_ct_flood_log" TestFirewallPluginEstablishedFlood
 }
 
 run_performance() {

@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 	"io"
 	"os"
 	"os/exec"
@@ -14,7 +15,6 @@ import (
 	"time"
 
 	"github.com/Unicode01/veer/internal/store"
-	"github.com/dop251/goja"
 )
 
 func TestPluginManagedProcessHelper(t *testing.T) {
@@ -61,6 +61,7 @@ func TestPluginManagedProcessHelper(t *testing.T) {
 
 func managedTestRequest(t *testing.T, mode string) pluginProcessRequest {
 	t.Helper()
+	requirePluginProcessKeeper(t)
 	binary, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -323,9 +324,9 @@ func TestPluginManagedProcessGroupRunningIgnoresZombies(t *testing.T) {
 func TestPluginManagedProcessBrokerPolicy(t *testing.T) {
 	for _, mode := range []string{"remote", "permission", "registration", "worker", "upgrade"} {
 		t.Run(mode, func(t *testing.T) {
-			r := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+			r := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{}), nil).(*pluginControlManager)
 			defer r.Close()
-			h := &pluginControlHost{vm: goja.New(), cfg: &Config{}, runtime: r}
+			h := &pluginControlHost{vm: hv.New(), cfg: &Config{}, runtime: r}
 			h.plugin.ID = "one"
 			h.plugin.Control = &PluginControl{Permissions: []string{"exec"}}
 			switch mode {
@@ -471,7 +472,7 @@ func TestPluginManagedProcessThroughIsolatedAndInProcessRuntime(t *testing.T) {
 			}
 			plugin := loadTestPluginByID(t, cfg, "process_runtime")
 			db := openTestDB(t)
-			r := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+			r := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 			defer r.Close()
 			if err := r.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`)); err != nil {
 				t.Fatal(err)

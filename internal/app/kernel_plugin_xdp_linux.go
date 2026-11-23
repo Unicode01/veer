@@ -104,6 +104,8 @@ type kernelXDPPluginHookPlan struct {
 	ProgramSection   string                 `json:"program_section"`
 	TCFallbackRef    string                 `json:"tc_fallback_ref,omitempty"`
 	TCFallbackSect   string                 `json:"tc_fallback_section,omitempty"`
+	TCEgressRef      string                 `json:"tc_egress_ref,omitempty"`
+	TCEgressSect     string                 `json:"tc_egress_section,omitempty"`
 	Stage            string                 `json:"stage"`
 	Mode             string                 `json:"mode"`
 	Interfaces       []string               `json:"interfaces"`
@@ -125,6 +127,8 @@ type loadedKernelXDPPluginProgram struct {
 	prog *ebpf.Program
 	// tcProg is the hook's tc_fallback, from the same collection as prog.
 	tcProg *ebpf.Program
+	// egressProg is the hook's tc_egress program, from the same collection.
+	egressProg *ebpf.Program
 }
 
 type kernelXDPPluginPipelineRuntime struct {
@@ -132,7 +136,7 @@ type kernelXDPPluginPipelineRuntime struct {
 	cfg           *Config
 	dispatcher    *ebpf.Collection
 	attachments   []xdpAttachment
-	tcFallbacks   []kernelXDPPluginTCFallback // the hooks' tc programs where native XDP is missing
+	tcFallbacks   []kernelXDPPluginTCFallback // the hooks' tc programs where native XDP is missing, and their tc_egress programs
 	programID     uint32
 	loaded        []loadedPluginObjectRef
 	desired       []kernelXDPPluginDesiredPlugin
@@ -280,6 +284,10 @@ func (rt *kernelXDPPluginPipelineRuntime) Reconcile(catalog PluginCatalog) plugi
 	newAttachments, addedAttachments, adoptedAttachments, fallbackPlans, err := rt.reconcileAttachmentsLocked(desiredIfIndexes, pieces.dispatcher, programID, handoff, fallbackCandidates)
 	var newFallbacks, addedFallbacks []kernelXDPPluginTCFallback
 	if err == nil {
+		// Egress positions go in with the ingress ones: a hook that keeps
+		// state about what leaves (a firewall's connections) must never run
+		// at ingress without them.
+		fallbackPlans = append(fallbackPlans, kernelXDPPluginTCEgressPlans(programs)...)
 		newFallbacks, addedFallbacks, err = rt.reconcileTCFallbacksLocked(fallbackPlans, handoff)
 		if err != nil {
 			if _, detachErr := detachKernelXDPPluginTCFallbacks(addedFallbacks); detachErr != nil {
@@ -507,7 +515,7 @@ func kernelXDPPluginCanPreserveDesired(current, next []kernelXDPPluginDesiredPlu
 	}
 	for i := range currentHooks {
 		left, right := currentHooks[i], nextHooks[i]
-		if left.PluginID != right.PluginID || left.HookID != right.HookID || left.ObjectID != right.ObjectID || left.TCFallbackRef != right.TCFallbackRef ||
+		if left.PluginID != right.PluginID || left.HookID != right.HookID || left.ObjectID != right.ObjectID || left.TCFallbackRef != right.TCFallbackRef || left.TCEgressRef != right.TCEgressRef ||
 			left.Stage != right.Stage || left.Priority != right.Priority || left.Order != right.Order || left.Mode != right.Mode ||
 			!equalKernelXDPPluginStringSlices(left.Before, right.Before) || !equalKernelXDPPluginStringSlices(left.After, right.After) ||
 			!equalKernelXDPPluginStringSlices(left.Interfaces, right.Interfaces) || !equalUint32Slices(left.InterfaceIndexes, right.InterfaceIndexes) {
@@ -670,9 +678,15 @@ func buildKernelXDPPluginDesiredPlugin(plugin LoadedPlugin) (kernelXDPPluginDesi
 		if program.Type != kernelEngineXDP {
 			return item, pluginRuntimeErrorState(fmt.Sprintf("hook %s program %q type = %q, want xdp", hook.ID, programRef, program.Type))
 		}
-		var fallback PluginObjectProgram
+		var fallback, egress PluginObjectProgram
 		if hook.TCFallback != "" {
 			fallback, err = pluginHookTCFallbackProgram(hook, object, objects)
+			if err != nil {
+				return item, pluginRuntimeErrorState(fmt.Sprintf("hook %s: %v", hook.ID, err))
+			}
+		}
+		if hook.TCEgress != "" {
+			egress, err = pluginHookTCEgressProgram(hook, object, objects)
 			if err != nil {
 				return item, pluginRuntimeErrorState(fmt.Sprintf("hook %s: %v", hook.ID, err))
 			}
@@ -719,6 +733,8 @@ func buildKernelXDPPluginDesiredPlugin(plugin LoadedPlugin) (kernelXDPPluginDesi
 			ProgramSection:   program.Section,
 			TCFallbackRef:    fallback.ID,
 			TCFallbackSect:   fallback.Section,
+			TCEgressRef:      egress.ID,
+			TCEgressSect:     egress.Section,
 			Stage:            stage,
 			Mode:             hook.Mode,
 			Interfaces:       interfaces,
@@ -1036,6 +1052,13 @@ func (rt *kernelXDPPluginPipelineRuntime) loadProgramsLocked(desired []kernelXDP
 				return nil, nil, states, fmt.Errorf("load plugin %s hook %s tc fallback: %w", plan.PluginID, plan.HookID, err)
 			}
 		}
+		if plan.TCEgressRef != "" {
+			loadedProgram.egressProg, err = pluginProgramForAttach(object, plan.TCEgressSect, plan.TCEgressRef)
+			if err != nil {
+				cleanupLoadedPluginObjectCache(cache)
+				return nil, nil, states, fmt.Errorf("load plugin %s hook %s tc egress program: %w", plan.PluginID, plan.HookID, err)
+			}
+		}
 		programs = append(programs, loadedProgram)
 		refKey := plan.PluginID + "\x00" + plan.ObjectID + "\x00" + plan.ObjectPath
 		if _, ok := refSeen[refKey]; !ok {
@@ -1251,6 +1274,9 @@ func (rt *kernelXDPPluginPipelineRuntime) attachmentsHealthyLocked(desired []ker
 			return false
 		}
 	}
+	if kernelXDPPluginTCEgressCount(rt.tcFallbacks) != kernelXDPPluginTCEgressExpected(desired) {
+		return false
+	}
 	return kernelXDPPluginTCFallbacksPresent(rt.tcFallbacks)
 }
 
@@ -1434,6 +1460,42 @@ func kernelXDPPluginAttachmentStates(programs []loadedKernelXDPPluginProgram, ba
 				Status:    "attached",
 			})
 		}
+	}
+	// tc_egress programs: one more attachment per interface, at egress.
+	byHook := make(map[string]loadedKernelXDPPluginProgram, len(programs))
+	for _, item := range programs {
+		byHook[kernelXDPPluginTCFallbackHookKey(item.plan.PluginID, item.plan.HookID)] = item
+	}
+	for _, position := range fallbacks {
+		if !position.egress() {
+			continue
+		}
+		item, ok := byHook[kernelXDPPluginTCFallbackHookKey(position.pluginID, position.hookID)]
+		if !ok {
+			continue
+		}
+		name := ""
+		for i, ifindex := range item.plan.InterfaceIndexes {
+			if int(ifindex) == position.key.linkIndex && i < len(item.plan.Interfaces) {
+				name = item.plan.Interfaces[i]
+			}
+		}
+		if name == "" {
+			name = xdpInterfaceLabel(position.key.linkIndex)
+		}
+		result[item.plan.PluginID] = append(result[item.plan.PluginID], PluginAttachmentState{
+			HookID:    item.plan.HookID,
+			Engine:    kernelEngineXDP,
+			Attach:    "egress",
+			Stage:     item.plan.Stage,
+			Interface: name,
+			Program:   item.plan.ObjectID + ":" + item.plan.TCEgressRef,
+			Mode:      "observe",
+			Priority:  item.plan.Priority,
+			Order:     item.plan.Order,
+			XDPMode:   kernelXDPPluginTCFallbackMode,
+			Status:    "attached",
+		})
 	}
 	return result
 }

@@ -20,7 +20,7 @@ import (
 
 // Runs both entry points of plugins/firewall/firewall.o, xdp_firewall and
 // tc_firewall, with BPF_PROG_TEST_RUN against crafted frames. Map contents
-// follow the layouts plugins/firewall/lib/compile.js writes;
+// follow the layouts plugins/firewall/src/compile.rs writes;
 // TestFirewallMapKeysMatchCompiler pins both to the same bytes.
 
 const (
@@ -67,7 +67,7 @@ func fwAddrKey(gen uint8, id uint16, cidr string) []byte {
 }
 
 func TestFirewallMapKeysMatchCompiler(t *testing.T) {
-	// Literals from plugins/firewall/test-compile.test.js.
+	// Literals from plugins/firewall/src/tests.rs.
 	for _, tc := range []struct {
 		got  []byte
 		want string
@@ -533,7 +533,7 @@ const (
 	fwReasonRate = 3
 )
 
-// limitedPolicy writes a policy with a SYN limit the way compile.js does.
+// limitedPolicy writes a policy with a SYN limit the way compile.rs does.
 func (r *firewallTestRig) limitedPolicy(gen uint8, slot uint32, defaultDrop bool, maxNew, window, ban uint32, v6Prefix uint8) {
 	value := []byte{fwPolicyValid | fwPolicyLimit, 0, 0, 0}
 	if defaultDrop {

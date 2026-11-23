@@ -105,9 +105,13 @@ func (p *pluginLogPersistence) closeAndFlush(timeout time.Duration) bool {
 	}
 }
 
+// run writes queued entries in batches. The flush timer runs only while a
+// batch is waiting, so an idle plugin host wakes nothing.
 func (p *pluginLogPersistence) run() {
-	ticker := time.NewTicker(pluginLogPersistInterval)
-	defer ticker.Stop()
+	flushTimer := time.NewTimer(pluginLogPersistInterval)
+	flushTimer.Stop()
+	var flushDue <-chan time.Time
+	defer flushTimer.Stop()
 	batch := make([]PluginLogEntry, 0, pluginLogPersistBatchSize)
 	persist := func() {
 		if len(batch) == 0 {
@@ -161,7 +165,8 @@ func (p *pluginLogPersistence) run() {
 			if len(batch) >= pluginLogPersistBatchSize {
 				persist()
 			}
-		case <-ticker.C:
+		case <-flushDue:
+			flushDue = nil
 			persist()
 		case ack := <-p.flush:
 			drain()
@@ -170,6 +175,15 @@ func (p *pluginLogPersistence) run() {
 			drain()
 			close(ack)
 			return
+		}
+		switch {
+		case len(batch) == 0 && flushDue != nil:
+			flushTimer.Stop()
+			flushDue = nil
+		case len(batch) > 0 && flushDue == nil:
+			// Go 1.23 timers: Reset after Stop never delivers a stale tick.
+			flushTimer.Reset(pluginLogPersistInterval)
+			flushDue = flushTimer.C
 		}
 	}
 }

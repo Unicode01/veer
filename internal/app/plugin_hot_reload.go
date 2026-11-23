@@ -29,8 +29,24 @@ type pluginCatalogFingerprintCache struct {
 	fullScanAt time.Time
 }
 
-func (cache *pluginCatalogFingerprintCache) fingerprint(root string, now time.Time) (string, error) {
-	full := cache.fullScanAt.IsZero() || now.Sub(cache.fullScanAt) >= pluginCatalogFullScanEvery
+// How a catalog scan treats files whose size and mtime did not change.
+type pluginCatalogScanMode int
+
+const (
+	// pluginCatalogScanAuto trusts them, hashing everything every
+	// pluginCatalogFullScanEvery; used while the tree is not watched.
+	pluginCatalogScanAuto pluginCatalogScanMode = iota
+	// pluginCatalogScanFull hashes everything: a watched change may keep a
+	// file's size and mtime (cp -p).
+	pluginCatalogScanFull
+	// pluginCatalogScanTrustStat trusts them: the safety scan of a watched
+	// tree, whose content changes the watch reports.
+	pluginCatalogScanTrustStat
+)
+
+func (cache *pluginCatalogFingerprintCache) fingerprint(root string, now time.Time, mode pluginCatalogScanMode) (string, error) {
+	full := mode == pluginCatalogScanFull || cache.fullScanAt.IsZero() ||
+		(mode == pluginCatalogScanAuto && now.Sub(cache.fullScanAt) >= pluginCatalogFullScanEvery)
 	files := make(map[string]pluginCatalogCachedFile)
 	fingerprint, err := buildPluginDirectoryFingerprintWithHasher(root, nil, func(path string, info os.FileInfo) (string, error) {
 		if previous, ok := cache.files[path]; !full && ok && os.SameFile(previous.info, info) &&
@@ -602,6 +618,7 @@ func (pm *ProcessManager) initializePluginCatalogSnapshot() {
 		pm.pluginCatalogLastCheckError = err.Error()
 	}
 	pm.mu.Unlock()
+	pm.invalidatePluginCatalogCache()
 	if err != nil {
 		log.Printf("plugin update monitor: initialize applied snapshot failed; external plugins remain disabled until a manual reload succeeds: %v", err)
 	}
@@ -617,12 +634,32 @@ func (pm *ProcessManager) cleanupPluginCatalogSnapshot() {
 	dir := pm.pluginCatalogAppliedDir
 	pm.pluginCatalogAppliedDir = ""
 	pm.mu.Unlock()
+	pm.invalidatePluginCatalogCache()
 	if err := removePluginCatalogSnapshot(dir); err != nil {
 		log.Printf("plugin update monitor: clean applied snapshot: %v", err)
 	}
 }
 
 func (pm *ProcessManager) appliedPluginCatalogConfig(fallback *Config) (*Config, string) {
+	source := pm.appliedPluginCatalogSource(fallback)
+	return source.cfg, source.sourceDir
+}
+
+// pluginCatalogSource is where the running catalog is read from.
+type pluginCatalogSource struct {
+	// cfg is the configuration with plugins_dir pointing at the applied
+	// snapshot, when there is one.
+	cfg *Config
+	// sourceDir is the configured plugins directory the catalog reports.
+	sourceDir string
+	// fixed is set when nothing changes cfg's plugin directory under the
+	// process: it is the applied snapshot, which only the update monitor's
+	// apply replaces, or external plugins are off. A configured directory
+	// read in place (a process manager without a snapshot) is not.
+	fixed bool
+}
+
+func (pm *ProcessManager) appliedPluginCatalogSource(fallback *Config) pluginCatalogSource {
 	base := fallback
 	if pm != nil && pm.cfg != nil {
 		base = pm.cfg
@@ -631,15 +668,16 @@ func (pm *ProcessManager) appliedPluginCatalogConfig(fallback *Config) (*Config,
 		base = &Config{}
 	}
 	out := *base
-	sourceDir := normalizePluginsDir(out.PluginsDir)
+	source := pluginCatalogSource{sourceDir: normalizePluginsDir(out.PluginsDir)}
 	disableExternalPlugins := false
 	if pm != nil {
 		pm.mu.Lock()
 		if pm.pluginCatalogSourceDir != "" {
-			sourceDir = pm.pluginCatalogSourceDir
+			source.sourceDir = pm.pluginCatalogSourceDir
 		}
 		if pm.pluginCatalogAppliedDir != "" {
 			out.PluginsDir = pm.pluginCatalogAppliedDir
+			source.fixed = true
 		} else if out.PluginsEnabled() && pm.pluginCatalogLastCheckResult == pluginCatalogHotReloadResultError && pm.pluginCatalogLastCheckError != "" {
 			disableExternalPlugins = true
 		}
@@ -650,7 +688,11 @@ func (pm *ProcessManager) appliedPluginCatalogConfig(fallback *Config) (*Config,
 		out.PluginsEnabledSetting = &disabled
 		out.PluginsDataplaneSetting = &disabled
 	}
-	return &out, sourceDir
+	if !out.PluginsEnabled() {
+		source.fixed = true
+	}
+	source.cfg = &out
+	return source
 }
 
 func pluginCatalogConfigForProcess(pm *ProcessManager, fallback *Config) *Config {
@@ -661,6 +703,15 @@ func pluginCatalogConfigForProcess(pm *ProcessManager, fallback *Config) *Config
 	return cfg
 }
 
+// With a working directory watch the catalog is scanned after a change, at
+// most every pluginCatalogDriftCheckEvery, and otherwise only every
+// pluginCatalogDriftSafetyEvery. Without one it is scanned every
+// pluginCatalogDriftCheckEvery as before.
+const (
+	pluginCatalogDriftSafetyEvery = 5 * time.Minute
+	pluginCatalogWatchRetryEvery  = time.Minute
+)
+
 func (pm *ProcessManager) shouldCheckPluginCatalogDriftLocked(now time.Time) bool {
 	if pm == nil || pm.cfg == nil || !pm.cfg.PluginsEnabled() || pm.pluginCatalogScanRunning {
 		return false
@@ -668,7 +719,64 @@ func (pm *ProcessManager) shouldCheckPluginCatalogDriftLocked(now time.Time) boo
 	if now.IsZero() {
 		now = time.Now()
 	}
-	return pm.pluginCatalogCheckAt.IsZero() || now.Sub(pm.pluginCatalogCheckAt) >= pluginCatalogDriftCheckEvery
+	watch := pm.pluginCatalogWatchLocked(normalizePluginsDir(pm.cfg.PluginsDir), now)
+	if pm.pluginCatalogCheckAt.IsZero() {
+		_ = watch.takeChange()
+		return true
+	}
+	since := now.Sub(pm.pluginCatalogCheckAt)
+	if !watch.healthy() {
+		return since >= pluginCatalogDriftCheckEvery
+	}
+	if since < pluginCatalogDriftCheckEvery {
+		return false
+	}
+	if watch.takeChange() {
+		// A watched change may keep a file's size and mtime (cp -p), which
+		// the incremental fingerprint would trust: hash everything.
+		pm.pluginCatalogScanMode = pluginCatalogScanFull
+		return true
+	}
+	if since >= pluginCatalogDriftSafetyEvery {
+		pm.pluginCatalogScanMode = pluginCatalogScanTrustStat
+		return true
+	}
+	return false
+}
+
+// pluginCatalogWatchLocked returns the watch on root, opening it when there
+// is none, it follows another directory, or it stopped seeing changes. An
+// open that fails is retried after pluginCatalogWatchRetryEvery.
+func (pm *ProcessManager) pluginCatalogWatchLocked(root string, now time.Time) *pluginCatalogWatcher {
+	watch := pm.pluginCatalogWatch
+	if watch != nil && watch.root == root && watch.healthy() {
+		return watch
+	}
+	if !pm.pluginCatalogWatchOpenAt.IsZero() && now.Sub(pm.pluginCatalogWatchOpenAt) < pluginCatalogWatchRetryEvery {
+		return watch
+	}
+	pm.pluginCatalogWatchOpenAt = now
+	if watch != nil {
+		watch.Close()
+		pm.pluginCatalogWatch = nil
+	}
+	opened, err := openPluginCatalogWatcher(root)
+	if err != nil {
+		return nil
+	}
+	pm.pluginCatalogWatch = opened
+	return opened
+}
+
+func (pm *ProcessManager) closePluginCatalogWatch() {
+	if pm == nil {
+		return
+	}
+	pm.mu.Lock()
+	watch := pm.pluginCatalogWatch
+	pm.pluginCatalogWatch = nil
+	pm.mu.Unlock()
+	watch.Close()
 }
 
 func (pm *ProcessManager) startPluginCatalogDriftCheck() {
@@ -701,12 +809,16 @@ func (pm *ProcessManager) detectPluginCatalogDrift() bool {
 	if stopping {
 		return false
 	}
+	pm.mu.Lock()
+	mode := pm.pluginCatalogScanMode
+	pm.pluginCatalogScanMode = pluginCatalogScanAuto
+	pm.mu.Unlock()
 	var next string
 	var err error
 	if pm.cfg == nil || !pm.cfg.PluginsEnabled() {
 		next = "plugins-disabled"
 	} else {
-		next, err = pm.pluginCatalogScanCache.fingerprint(normalizePluginsDir(pm.cfg.PluginsDir), time.Now())
+		next, err = pm.pluginCatalogScanCache.fingerprint(normalizePluginsDir(pm.cfg.PluginsDir), time.Now(), mode)
 	}
 	now := time.Now()
 	checkResult := pluginCatalogHotReloadResultSuccess
@@ -851,6 +963,7 @@ func (pm *ProcessManager) applyPluginCatalogUpdateSelection(pluginIDs []string) 
 	pm.pluginCatalogAppliedDir = candidateDir
 	pm.pluginCatalogAppliedFingerprint = candidateFingerprint
 	pm.mu.Unlock()
+	pm.invalidatePluginCatalogCache()
 
 	_, applyErr := pm.reconcilePluginsForRuntimeWithError()
 	if applyErr != nil {
@@ -858,6 +971,7 @@ func (pm *ProcessManager) applyPluginCatalogUpdateSelection(pluginIDs []string) 
 		pm.pluginCatalogAppliedDir = previousDir
 		pm.pluginCatalogAppliedFingerprint = previousFingerprint
 		pm.mu.Unlock()
+		pm.invalidatePluginCatalogCache()
 		_, rollbackErr := pm.reconcilePluginsForRuntimeWithError()
 		if rollbackErr != nil {
 			applyErr = fmt.Errorf("%v; rollback previous plugin catalog: %w", applyErr, rollbackErr)

@@ -28,6 +28,8 @@ func TestPluginEventBusDeliversSystemEventToWorker(t *testing.T) {
 	writePluginControlScript(t, dir, "event_plugin", `
 events.subscribe({id: 'links', topic: 'net.link', worker: 'net_events', handler: 'onLink', queue_size: 4});
 exports.onLink = function (ctx) {
+  // A subscription starts with a resync; this test follows one link event.
+  if (ctx.event.payload.operation === 'resync') return;
   kv.set('last_link', {
     topic: ctx.event.topic,
     sequence: ctx.event.sequence,
@@ -40,7 +42,7 @@ exports.onLink = function (ctx) {
 
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	snapshot := rt.Reconcile(loadPluginCatalogWithControlRegistrationAndState(cfg, db))
 	state, ok := snapshot.Plugins["event_plugin"]
@@ -60,8 +62,9 @@ exports.onLink = function (ctx) {
 			t.Fatalf("last_link data = %s, want %s", record.DataJSON, want)
 		}
 	}
+	// The subscription also received the resync it gets when it starts.
 	stats := rt.pluginEventBusSnapshot("event_plugin")
-	if stats.SubscriptionCount != 1 || stats.Delivered != 1 || stats.Errors != 0 || stats.Dropped != 0 {
+	if stats.SubscriptionCount != 1 || stats.Delivered != 2 || stats.Errors != 0 || stats.Dropped != 0 {
 		t.Fatalf("event stats = %+v", stats)
 	}
 }
@@ -88,7 +91,7 @@ exports.onEvent = function () {
 `)
 
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
-	rt := newPluginControlRuntime(openTestDB(t), cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(openTestDB(t), cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	rt.Reconcile(loadPluginCatalogWithControlRegistration(cfg))
 
@@ -158,7 +161,7 @@ events.subscribe({id: 'own', topic: 'plugin.cleanup_events.test'});
 exports.onEvent = function () {};
 `)
 		cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
-		rt := newPluginControlRuntime(openTestDB(t), cfg, nil).(*gojaPluginControlRuntime)
+		rt := newPluginControlRuntime(openTestDB(t), cfg, nil).(*pluginControlManager)
 		t.Cleanup(func() { _ = rt.Close() })
 		rt.Reconcile(loadPluginCatalogWithControlRegistration(cfg))
 		if got := rt.pluginEventBusSnapshot("cleanup_events").SubscriptionCount; got != 1 {
@@ -225,7 +228,7 @@ exports.onEvent = function (ctx) {
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
 	catalog := loadPluginCatalogWithControlRegistrationAndState(cfg, db)
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	snapshot := rt.Reconcile(catalog)
 	for _, pluginID := range []string{"event_source", "event_sink"} {
@@ -370,7 +373,7 @@ func TestStoppedPluginEventSubscriptionDiscardsQueuedEvents(t *testing.T) {
 	sub.stopRuntime()
 	done := make(chan struct{})
 	go func() {
-		(&gojaPluginControlRuntime{}).runPluginEventSubscription(sub)
+		(&pluginControlManager{}).runPluginEventSubscription(sub)
 		close(done)
 	}()
 	select {
@@ -420,7 +423,7 @@ exports.onEvent = function (ctx) {
 
 	db := openTestDB(t)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	catalog := loadPluginCatalogWithControlRegistrationAndState(cfg, db)
 	snapshot := rt.Reconcile(catalog)
@@ -533,7 +536,7 @@ exports.onAction = function (ctx) {
 
 	db := openTestDB(t)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	catalog := loadPluginCatalogWithControlRegistrationAndState(cfg, db)
 	snapshot := rt.Reconcile(catalog)
@@ -651,7 +654,7 @@ exports.onEvent = function (ctx) {
 	}
 
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	snapshot := rt.Reconcile(loadPluginCatalogWithControlRegistrationAndState(cfg, db))
 	if state := snapshot.Plugins["durable_restart"]; state.Error != "" {
@@ -708,7 +711,7 @@ exports.onEvent = function () {
 
 	db := openTestDB(t)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	rt.Reconcile(loadPluginCatalogWithControlRegistrationAndState(cfg, db))
 	deferred := 0

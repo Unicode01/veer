@@ -28,7 +28,7 @@ exports.onAction = function () {
 };`)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{links: map[string]pluginControlNetLinkInfo{
 		"host0": {Name: "host0", IfIndex: 50, Kind: "device", MTU: 1500, Up: true, ARP: true},
 	}}
@@ -67,7 +67,7 @@ exports.onAction = function () {
 };`)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	runtime.netAdmin = &pluginControlNetAdminTest{links: map[string]pluginControlNetLinkInfo{
 		"host0": {Name: "host0", IfIndex: 50, Kind: "device", MTU: 1500, Up: true, ARP: true},
 	}}
@@ -135,7 +135,7 @@ func TestPluginControlNetTransactionsRollbackOnMutationFailure(t *testing.T) {
 			writeNetworkLeasePlugin(t, dir, pluginID, tt.handler)
 			cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 			db := openTestDB(t)
-			runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+			runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 			controller := &pluginControlNetBatchAdminTest{pluginControlNetAdminTest: &pluginControlNetAdminTest{links: map[string]pluginControlNetLinkInfo{
 				"host0": {Name: "host0", IfIndex: 50, Kind: "device", MTU: 1500, Up: true, ARP: true},
 			}}}
@@ -184,7 +184,7 @@ exports.onAction = function () {
 };`)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{links: map[string]pluginControlNetLinkInfo{
 		"host0": {Name: "host0", IfIndex: 50, Kind: "device", MTU: 1500, Up: true, ARP: true},
 	}}
@@ -233,7 +233,7 @@ func TestPluginControlNetTransactionValidationRejectsBeforeNetAdminCalls(t *test
 			writeNetworkLeasePlugin(t, dir, pluginID, tt.handler)
 			cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 			db := openTestDB(t)
-			runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+			runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 			controller := &pluginControlNetAdminTest{}
 			runtime.netAdmin = controller
 			defer runtime.Close()
@@ -268,7 +268,7 @@ exports.onAction = function () {
 };`)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	runtime.netAdmin = controller
 	defer runtime.Close()

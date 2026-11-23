@@ -461,7 +461,7 @@ func TestEgressNATTCFlowCacheSkipsPluginHookedInterface(t *testing.T) {
 	pluginsRoot := t.TempDir()
 	pluginDir := copyPacketObserverPluginForPipelineTest(t, pluginsRoot)
 	// The bridge serves no rule: the core runs there only for the hook.
-	setControlScriptInterfacesForPipelineTest(t, pluginDir, topology.ChildHostIF, topology.BridgeIF)
+	setPipelineAttachInterfacesForTest(t, pluginDir, topology.ChildHostIF, topology.BridgeIF)
 	compileBPFObjectFromSource(t, filepath.Join(pluginDir, "packet_observer.bpf.c"), filepath.Join(pluginDir, "packet_observer.o"))
 	enabled := true
 	rt := newTCKernelRuleRuntime(pluginsEnabledTestConfig(&Config{

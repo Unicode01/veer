@@ -1,0 +1,18 @@
+[package]
+name = "veer-plugin-router-wizard"
+version = "0.5.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Single WAN/LAN router configuration that orchestrates the WAN, PPPoE and LAN plugins"
+
+[lib]
+name = "router_wizard"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+veer-plugin = { path = "../../sdk/native/rust/veer-plugin" }
+
+[dev-dependencies]
+veer-plugin = { path = "../../sdk/native/rust/veer-plugin", features = ["testing"] }

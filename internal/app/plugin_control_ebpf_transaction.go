@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dop251/goja"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 )
 
-func (h *pluginControlHost) ebpfMapTransaction(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) ebpfMapTransaction(call hv.FunctionCall) hv.Value {
 	h.requirePermission("ebpf.map_write")
 	controller, ok := h.mapController.(pluginEBPFMapTransactionController)
 	if !ok || controller == nil {
@@ -24,10 +24,10 @@ func (h *pluginControlHost) ebpfMapTransaction(call goja.FunctionCall) goja.Valu
 	})
 }
 
-func (h *pluginControlHost) ebpfMapTransactionRequest(call goja.FunctionCall) pluginEBPFMapTransactionRequest {
+func (h *pluginControlHost) ebpfMapTransactionRequest(call hv.FunctionCall) pluginEBPFMapTransactionRequest {
 	requestObject := h.requiredObjectArg(call, 0, "request")
 	operationsValue := h.objectField(requestObject, "operations")
-	if goja.IsUndefined(operationsValue) || goja.IsNull(operationsValue) {
+	if hv.IsUndefined(operationsValue) || hv.IsNull(operationsValue) {
 		h.throwf("ebpf.mapTransaction: operations are required")
 	}
 	operationsObject := operationsValue.ToObject(h.vm)
@@ -44,7 +44,7 @@ func (h *pluginControlHost) ebpfMapTransactionRequest(call goja.FunctionCall) pl
 	totalBytes := 0
 	for index := 0; index < length; index++ {
 		value := operationsObject.Get(fmt.Sprint(index))
-		if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
+		if value == nil || hv.IsUndefined(value) || hv.IsNull(value) {
 			h.throwf("ebpf.mapTransaction: operation %d is missing", index)
 		}
 		mutation := h.ebpfMapMutationFromValue(value, false, fmt.Sprintf("operation %d", index))
@@ -57,7 +57,7 @@ func (h *pluginControlHost) ebpfMapTransactionRequest(call goja.FunctionCall) pl
 	}
 
 	commitValue := h.objectField(requestObject, "commit")
-	if !goja.IsUndefined(commitValue) && !goja.IsNull(commitValue) {
+	if !hv.IsUndefined(commitValue) && !hv.IsNull(commitValue) {
 		commit := h.ebpfMapMutationFromValue(commitValue, true, "commit")
 		totalBytes += len(commit.Key) + len(commit.Value)
 		if totalBytes > pluginControlMapTransactionMaxBytes {
@@ -69,7 +69,7 @@ func (h *pluginControlHost) ebpfMapTransactionRequest(call goja.FunctionCall) pl
 	return request
 }
 
-func (h *pluginControlHost) ebpfMapMutationFromValue(value goja.Value, commit bool, label string) pluginEBPFMapMutation {
+func (h *pluginControlHost) ebpfMapMutationFromValue(value hv.Value, commit bool, label string) pluginEBPFMapMutation {
 	obj := value.ToObject(h.vm)
 	if obj == nil || obj.ClassName() == "Array" {
 		h.throwf("ebpf.mapTransaction: %s must be an object", label)

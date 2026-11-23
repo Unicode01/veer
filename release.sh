@@ -13,6 +13,9 @@
 #   veer-plugins.tar.gz (VEER_BUILD_PLUGIN_BUNDLE=0 时不生成)
 #   veer-plugin-sdk.tar.gz (VEER_BUILD_PLUGIN_SDK=0 时不生成)
 #
+# 原生插件: 需要 Rust (cargo) 与 cargo-zigbuild + zig。每个架构编译 glibc/musl 两份
+# 插件 worker (embed 进对应架构的二进制) 和 bundled 插件的 lib/<triple>/*.so。
+#
 # 可选内核扩展:
 #   VEER_KFUNCS_SUPPORT=1      二进制带 veer_kfuncs 支持，不编译 .ko（发布构建使用）
 #   VEER_BUILD_KERNEL_MODULE=1 另外为本机内核编译 kernel/<release>/veer_kfuncs.ko
@@ -175,6 +178,14 @@ if ! command -v "${BPF_CLANG}" &>/dev/null; then
 fi
 ok "Clang: $("${BPF_CLANG}" --version | head -n 1)"
 
+HAVE_CARGO=0
+if command -v cargo &>/dev/null; then
+    HAVE_CARGO=1
+    ok "Cargo: $(cargo --version)"
+elif [[ "${BUILD_PLUGIN_BUNDLE}" == "1" ]]; then
+    fail "未找到 cargo，无法编译 bundled 原生插件与插件 worker (需要 Rust、cargo-zigbuild 与 zig)；只构建核心可设 VEER_BUILD_PLUGIN_BUNDLE=0"
+fi
+
 # ---------- 目标架构 ----------
 TARGETS=()
 if [[ $# -gt 0 ]]; then
@@ -270,6 +281,47 @@ info "校验 eBPF map ABI..."
 go test ./internal/app -run '^TestEmbeddedKernelMapABIs$' -count=1
 ok "eBPF map ABI 与 Go 编码一致"
 
+# ---------- native plugins ----------
+# Each binary embeds the plugin worker of its architecture (glibc and musl);
+# the plugin bundle carries every library build.
+native_triples_for_arch() {
+    case "$1" in
+        amd64) echo "x86_64-linux-gnu x86_64-linux-musl" ;;
+        arm64) echo "aarch64-linux-gnu aarch64-linux-musl" ;;
+    esac
+}
+NATIVE_TRIPLES=()
+if [[ "$HAVE_CARGO" == "1" ]] && command -v cargo-zigbuild &>/dev/null; then
+    for ARCH in "${TARGETS[@]}"; do
+        read -r -a arch_triples <<<"$(native_triples_for_arch "$ARCH")"
+        NATIVE_TRIPLES+=("${arch_triples[@]}")
+    done
+elif [[ "$HAVE_CARGO" == "1" ]]; then
+    # Without cargo-zigbuild only this host's glibc target builds.
+    case "$(uname -m)" in
+        x86_64) host_arch=amd64 ;;
+        aarch64) host_arch=arm64 ;;
+        *) host_arch= ;;
+    esac
+    for ARCH in "${TARGETS[@]}"; do
+        if [[ "$ARCH" == "$host_arch" ]]; then
+            read -r -a arch_triples <<<"$(native_triples_for_arch "$ARCH")"
+            NATIVE_TRIPLES+=("${arch_triples[0]}")
+        fi
+    done
+    if [[ "${BUILD_PLUGIN_BUNDLE}" == "1" ]]; then
+        fail "未找到 cargo-zigbuild，无法为 ${TARGETS[*]} 编译 glibc/musl 原生插件 (pip install ziglang cargo-zigbuild)；只构建核心可设 VEER_BUILD_PLUGIN_BUNDLE=0"
+    fi
+fi
+rm -rf "${PROJECT_DIR}"/internal/app/pluginworker/*/
+if [[ "${#NATIVE_TRIPLES[@]}" -gt 0 ]]; then
+    info "编译原生插件与插件 worker: ${NATIVE_TRIPLES[*]}"
+    bash "${PROJECT_DIR}/scripts/build-native-plugins.sh" "${NATIVE_TRIPLES[@]}"
+    ok "原生插件与插件 worker 已编译"
+else
+    info "跳过插件 worker: 没有能编译目标平台的 Rust 工具链，这个二进制不能运行任何插件 (需要 cargo、cargo-zigbuild 与 zig)"
+fi
+
 # ---------- bundled plugins ----------
 PLUGIN_BUNDLE="${PROJECT_DIR}/veer-plugins.tar.gz"
 rm -f "${PLUGIN_BUNDLE}"
@@ -300,9 +352,22 @@ for ARCH in "${TARGETS[@]}"; do
     OUT="${PROJECT_DIR}/veer-linux-${ARCH}"
     info "编译 linux/${ARCH}..."
 
+    # Embed only this architecture's plugin workers.
+    WORKER_STASH="$(mktemp -d)"
+    for worker_dir in "${PROJECT_DIR}"/internal/app/pluginworker/*/; do
+        [[ -d "$worker_dir" ]] || continue
+        case " $(native_triples_for_arch "$ARCH") " in
+            *" $(basename "$worker_dir") "*) ;;
+            *) mv "$worker_dir" "$WORKER_STASH/" ;;
+        esac
+    done
     NONCE=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
     CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" \
         go build "${GO_BUILD_TAGS[@]}" -ldflags="-s -w -X main.buildNonce=${NONCE}" -trimpath -o "$OUT" .
+    for worker_dir in "$WORKER_STASH"/*/; do
+        [[ -d "$worker_dir" ]] && mv "$worker_dir" "${PROJECT_DIR}/internal/app/pluginworker/"
+    done
+    rmdir "$WORKER_STASH"
 
     SIZE=$(du -h "$OUT" | cut -f1)
     ok "linux/${ARCH} => veer-linux-${ARCH} (${SIZE})"

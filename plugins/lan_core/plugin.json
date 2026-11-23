@@ -2,14 +2,22 @@
   "api_version": "v1",
   "id": "lan_core",
   "name": "LAN Core",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "kind": "control",
   "stability": "stable",
   "description": "Protocol-neutral LAN adapter with bridge, DHCPv4, inherited or manual DNS distribution, Egress NAT, and routed WAN IPv6 delegated-prefix support.",
   "compatibility": {
     "runtime": ">=1.0.0 <2.0.0",
     "control_api_abi": 1,
-    "features": ["control.net_admin", "control.typed_services.v1", "plans.core.v1", "ui.capabilities.v1"]
+    "features": [
+      "control.events.v1",
+      "control.native.v1",
+      "control.net_admin",
+      "control.net_events.v1",
+      "control.typed_services.v1",
+      "plans.core.v1",
+      "ui.capabilities.v1"
+    ]
   },
   "dependencies": [
     {
@@ -19,33 +27,302 @@
     }
   ],
   "control": {
-    "main": "control.js",
-    "sha256": "a1fad3c748260aead17b88f2bef2515666f0a7bab74e29c7d85be3a3d3d4994f",
-    "permissions": ["net.admin", "plugin.register", "plugin.resource", "resource", "timer", "ui"],
+    "library": {
+      "x86_64-linux-gnu": {
+        "path": "lib/x86_64-linux-gnu/liblan_core.so"
+      },
+      "x86_64-linux-musl": {
+        "path": "lib/x86_64-linux-musl/liblan_core.so"
+      },
+      "aarch64-linux-gnu": {
+        "path": "lib/aarch64-linux-gnu/liblan_core.so"
+      },
+      "aarch64-linux-musl": {
+        "path": "lib/aarch64-linux-musl/liblan_core.so"
+      }
+    },
+    "worker": "shared",
+    "permissions": [
+      "event",
+      "net.admin",
+      "plugin.register",
+      "plugin.resource",
+      "resource",
+      "timer",
+      "ui"
+    ],
     "net_access": [
       {
-        "interfaces": ["br*"],
-        "operations": ["addr.write", "link.create", "link.delete", "link.master", "link.read"]
+        "interfaces": [
+          "br*"
+        ],
+        "operations": [
+          "addr.write",
+          "link.create",
+          "link.delete",
+          "link.master",
+          "link.read"
+        ]
       },
       {
-        "interfaces": ["vmbr*"],
-        "operations": ["addr.write", "link.create", "link.master", "link.read"]
+        "interfaces": [
+          "vmbr*"
+        ],
+        "operations": [
+          "addr.write",
+          "link.create",
+          "link.master",
+          "link.read"
+        ]
       },
       {
-        "interfaces": ["en*", "eth*", "fw*", "lan*", "tap*", "veth*", "vmbr*"],
-        "operations": ["link.master", "link.offload", "link.read"]
+        "interfaces": [
+          "en*",
+          "eth*",
+          "fw*",
+          "lan*",
+          "tap*",
+          "veth*",
+          "vmbr*"
+        ],
+        "operations": [
+          "link.master",
+          "link.offload",
+          "link.read"
+        ]
       },
       {
-        "interfaces": ["veer*"],
-        "operations": ["link.read"]
+        "interfaces": [
+          "veer*"
+        ],
+        "operations": [
+          "link.read"
+        ]
       }
     ],
     "resource_access": [
       {
         "plugin": "wan_core",
         "resource": "status",
-        "methods": ["get", "list"]
+        "methods": [
+          "get",
+          "list"
+        ]
       }
-    ]
+    ],
+    "register": {
+      "capabilities": [
+        "lan",
+        "bridge",
+        "lan_ports",
+        "egress_nat_adapter",
+        "net_admin",
+        "control"
+      ],
+      "handoffs": [
+        {
+          "id": "lan0",
+          "type": "bridge",
+          "description": "Logical LAN endpoint backed by a Linux bridge such as br-lan."
+        }
+      ],
+      "resources": [
+        {
+          "id": "profiles",
+          "description": "LAN bridge defaults such as bridge name, member ports, gateway addresses, selected WAN egress, and whether to preserve the bridge on teardown.",
+          "methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "manual",
+          "max_records": 32,
+          "max_record_bytes": 16384
+        },
+        {
+          "id": "status",
+          "description": "Last applied LAN bridge state and member port details.",
+          "methods": [
+            "list",
+            "get"
+          ],
+          "control_methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "manual",
+          "max_records": 32,
+          "max_record_bytes": 32768
+        },
+        {
+          "id": "egress_nat_plans",
+          "description": "Core outbound NAT config generated from LAN bridge and WAN egress metadata.",
+          "methods": [
+            "list",
+            "get"
+          ],
+          "control_methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "manual",
+          "max_records": 32,
+          "max_record_bytes": 16384
+        },
+        {
+          "id": "ipv6_assignment_plans",
+          "description": "IPv6 delegated-prefix assignments generated from WAN Core PD metadata for the selected LAN bridge.",
+          "methods": [
+            "list",
+            "get"
+          ],
+          "control_methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "manual",
+          "max_records": 32,
+          "max_record_bytes": 16384
+        },
+        {
+          "id": "dhcpv4_plans",
+          "description": "DHCPv4 listener config generated for the LAN bridge without taking ownership of the bridge gateway address.",
+          "methods": [
+            "list",
+            "get"
+          ],
+          "control_methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "manual",
+          "max_records": 32,
+          "max_record_bytes": 16384
+        }
+      ],
+      "actions": [
+        {
+          "id": "apply_network",
+          "description": "Create or update the configured LAN bridge and publish the generated outbound NAT config.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 32768
+        },
+        {
+          "id": "teardown",
+          "description": "Detach plugin-managed member ports, delete an unprotected configured bridge, preserve protected vmbr* bridges and pre-existing bridge members, and mark the LAN adapter down.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 8192
+        },
+        {
+          "id": "traffic_stats",
+          "description": "Read bridge and actual bridge-member link counters without persisting a snapshot.",
+          "runtime_update": "runtime_query",
+          "max_payload_bytes": 2048
+        }
+      ],
+      "services": [
+        {
+          "id": "lan.adapter",
+          "version": "1.0.0",
+          "description": "LAN bridge, addressing, DHCP and routed egress service.",
+          "actions": [
+            "apply_network",
+            "teardown",
+            "traffic_stats"
+          ],
+          "resources": [
+            "profiles",
+            "status",
+            "egress_nat_plans",
+            "ipv6_assignment_plans",
+            "dhcpv4_plans"
+          ]
+        }
+      ],
+      "subscriptions": [
+        {
+          "id": "lan_net",
+          "topic": "net",
+          "match": "prefix",
+          "handler": "onNetEvent",
+          "queue_size": 64
+        },
+        {
+          "id": "lan_wan_status",
+          "topic": "resource.changed",
+          "handler": "onRecordEvent",
+          "queue_size": 16
+        }
+      ],
+      "ui": {
+        "static_dir": "ui",
+        "entry": "index.html",
+        "sha256": "732bce635a9ed2eee176007daeba9bfdb5c57d33b6fdaf75e605e6a67d990639",
+        "page": "lan",
+        "page_title": "LAN",
+        "resources": [
+          {
+            "resource": "profiles",
+            "methods": [
+              "list",
+              "create",
+              "update"
+            ]
+          },
+          {
+            "resource": "status",
+            "methods": [
+              "list"
+            ]
+          },
+          {
+            "resource": "egress_nat_plans",
+            "methods": [
+              "list"
+            ]
+          },
+          {
+            "resource": "ipv6_assignment_plans",
+            "methods": [
+              "list"
+            ]
+          },
+          {
+            "resource": "dhcpv4_plans",
+            "methods": [
+              "list"
+            ]
+          }
+        ],
+        "actions": [
+          "apply_network",
+          "teardown",
+          "traffic_stats"
+        ],
+        "resource_access": [
+          {
+            "plugin": "wan_core",
+            "resource": "status",
+            "methods": [
+              "list"
+            ]
+          }
+        ]
+      }
+    }
   }
 }

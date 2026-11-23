@@ -133,7 +133,7 @@ exports.onAction = function (ctx) {
 	}
 	db := openTestDB(t)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	runtime.networkBroker = broker
 	t.Cleanup(func() { _ = runtime.Close() })
 
@@ -214,7 +214,7 @@ exports.onAction = function () {
 `)
 	db := openTestDB(t)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	broker := &pluginControlNetworkBrokerTest{}
 	runtime.networkBroker = broker
 	t.Cleanup(func() { _ = runtime.Close() })

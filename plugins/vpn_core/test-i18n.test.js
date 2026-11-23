@@ -57,7 +57,9 @@ test('VPN UI only references message keys that exist', () => {
   const jobs = JSON.parse(app.match(/const jobPhases=(\[[^\]]*\])/)[1].replace(/'/g, '"'));
   jobs.forEach((state) => { if (!pageKeys.has('core.job.' + state)) missing.push('core.job.' + state); });
   Object.keys(M.drivers).forEach((id) => { if (!pageKeys.has('driver.' + id + '.description')) missing.push('driver.' + id + '.description'); });
-  const reasons = new Set([...fs.readFileSync(path.join(uiDir, '..', 'health-check.js'), 'utf8').matchAll(/reason: '([a-z_]+)'/g)].map((m) => m[1]));
+  // Probe reasons of the native control side (src/health.rs).
+  const health = fs.readFileSync(path.join(uiDir, '..', 'src', 'health.rs'), 'utf8');
+  const reasons = new Set([...health.matchAll(/\("([a-z_]+)", "|"reason": "([a-z_]+)"|"reason": if good \{ "" \} else \{ "([a-z_]+)" \}/g)].map((m) => m[1] || m[2] || m[3]));
   assert.ok(reasons.size >= 5);
   reasons.forEach((reason) => { if (!pageKeys.has('health.reason.' + reason)) missing.push('health.reason.' + reason); });
 
@@ -80,3 +82,17 @@ test('VPN form and share errors follow the page locale and default to Chinese', 
   inLocale('zh-CN', () => assert.throws(() => S.parse('hy2://@192.0.2.1:443', 'sing_box'), /^Error: 第 1 个节点：Hysteria2 密码无效$/));
   assert.equal(M.drivers.tun.name, '外部 TUN');
 });
+
+test('VPN page explains every error code the plugin runtime raises', () => {
+  // Error codes of the native control side (src/lib.rs, src/drivers.rs).
+  const runtime = ['lib.rs', 'drivers.rs'].map((name) => fs.readFileSync(path.join(uiDir, '..', 'src', name), 'utf8')).join('\n');
+  const codes = new Set([...runtime.matchAll(/fail\("([a-z_]+)"/g)].map((m) => m[1]));
+  for (const match of runtime.matchAll(/\["error_code"\] = json!\("([a-z_]+)"\)/g)) codes.add(match[1]);
+  assert.ok(codes.size >= 25, [...codes].join(','));
+  assert.ok(codes.has('core_exited'));
+  const missing = [];
+  for (const code of codes) for (const key of ['err.' + code, 'err.' + code + '.hint'])
+    for (const locale of ['zh-CN', 'en-US']) if (!Object.prototype.hasOwnProperty.call(I.messages[locale], key)) missing.push(locale + ' ' + key);
+  assert.deepEqual(missing, []);
+});
+

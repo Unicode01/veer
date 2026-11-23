@@ -1,5 +1,5 @@
 {
-  "version": 16,
+  "version": 20,
   "runtime": {
     "api_version": "v1",
     "runtime_version": "1.0.0",
@@ -35,8 +35,7 @@
       "control_cpu_percent": 200
     },
     "features": [
-      "control.goja.v1",
-      "control.modules.v1",
+      "control.native.v1",
       "control.action_schema.v1",
       "control.attachment_status.v1",
       "control.blobs.v1",
@@ -51,6 +50,7 @@
       "control.net_offloads.v1",
       "control.dns_client.v1",
       "control.net_events.v1",
+      "control.net_policy_events.v1",
       "control.net_leases.v1",
       "control.net_multipath.v1",
       "control.netns_provider.v1",
@@ -64,6 +64,7 @@
       "control.process_isolation.v1",
       "control.exec.v1",
       "control.process.v1",
+      "control.process_events.v1",
       "control.process_binaries.v1",
       "control.raw_l2",
       "control.resource_schema.v1",
@@ -82,6 +83,7 @@
       "dataplane.hook_bindings.v1",
       "dataplane.xdp_pipeline.v1",
       "dataplane.xdp_tc_fallback.v1",
+      "dataplane.xdp_tc_egress.v1",
       "dataplane.netfilter_pipeline.v1",
       "dataplane.netfilter_skb_dynptr.v1",
       "ebpf.bounded_reads.v1",
@@ -197,6 +199,9 @@
       "net.addr",
       "net.neigh",
       "net.route",
+      "net.rule",
+      "net.offload",
+      "process.state",
       "resource.changed",
       "plugin.lifecycle"
     ]
@@ -3255,6 +3260,21 @@
     "worker.dispatch",
     "worker.list",
     "worker.stats"
+  ],
+  "worker_methods": [
+    "crypto.md5",
+    "crypto.randomBytes",
+    "net.l2.exchange",
+    "net.l2.exchangeMany",
+    "net.l2.recv",
+    "net.l2.recvMany",
+    "net.l2.send",
+    "net.link.get",
+    "net.link.getOffloads",
+    "net.link.list",
+    "net.udp.exchange",
+    "net.udp.recv",
+    "net.udp.send"
   ],
   "webui": {
     "version": 1,

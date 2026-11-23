@@ -246,7 +246,12 @@ func runVPNWireGuardTopology(t *testing.T) {
 				"tls": map[string]any{"enabled": true,
 					"certificate": []string{string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]}))},
 					"key":         []string{string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))}}},
-		}, "outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}}}
+			// The exit of the proxy-chain test: only the remote host itself can
+			// reach it, and it sends from an address the other nodes never use.
+			map[string]any{"type": "shadowsocks", "tag": "chain-exit", "listen": "127.0.0.1", "listen_port": 8390, "method": "aes-128-gcm", "password": "veer-chain-exit-only"},
+		}, "outbounds": []any{map[string]any{"type": "direct", "tag": "direct"},
+			map[string]any{"type": "direct", "tag": "chain-exit", "inet4_bind_address": "198.51.100.1"}},
+			"route": map[string]any{"rules": []any{map[string]any{"inbound": []string{"chain-exit"}, "outbound": "chain-exit"}}}}
 		data, _ := json.Marshal(serverConfig)
 		path := filepath.Join(t.TempDir(), "server.json")
 		if err := os.WriteFile(path, data, 0600); err != nil {
@@ -267,7 +272,7 @@ func runVPNWireGuardTopology(t *testing.T) {
 	cfg := Config{WebBind: "127.0.0.1", WebPort: freeTCPPort(t), WebToken: egressNATTestToken,
 		PluginAdminToken: "wireguard-integration-admin", MaxWorkers: 1, DefaultEngine: ruleEngineKernel,
 		KernelEngineOrder: []string{kernelEngineTC}, PluginsDir: filepath.Join(work, "plugins"),
-		PluginsEnabledSetting: &enabled, PluginsDataplaneSetting: &enabled, PluginsIsolationSetting: &disabled,
+		PluginsEnabledSetting: &enabled, PluginsDataplaneSetting: &enabled,
 		PluginsMinSandboxLevel: pluginSandboxLevelNone, PluginsRequireSigned: &disabled,
 		Experimental: map[string]bool{experimentalFeatureKernelTCPreparedL2: true}}
 	data, _ := json.Marshal(cfg)
@@ -459,7 +464,11 @@ func runVPNWireGuardTopology(t *testing.T) {
 	probe(direct, "192.0.2.1")
 	t.Log("fresh VPN plugin without bindings: ordinary TC TCP/UDP/ICMP passed")
 	api("POST", "/api/plugins/vpn_core/actions/set_key", map[string]any{"payload": map[string]any{"key": "default", "value": localPrivate}})
-	profile := map[string]any{"slot": 1, "listen_port": 51821, "addresses": []string{"10.77.0.1/32"},
+	// remoteRoute is a WireGuard remote route: WAN Core installs it in the main
+	// table, outside the adapter's fail-closed path, so a lost one must come
+	// back quickly.
+	const remoteRoute = "100.64.77.0/24"
+	profile := map[string]any{"slot": 1, "listen_port": 51821, "addresses": []string{"10.77.0.1/32"}, "remote_routes": []string{remoteRoute},
 		"peers": []any{map[string]any{"public_key": remotePublic, "endpoint": "192.0.2.2:51820", "allowed_ips": []string{"0.0.0.0/0"}}}}
 	if driver != "" {
 		core := os.Getenv("VEER_TEST_MIHOMO")
@@ -548,7 +557,7 @@ func runVPNWireGuardTopology(t *testing.T) {
 			t.Fatalf("cannot read real TUN capabilities: %v", err)
 		}
 		features := parsePluginControlOffloadFeatures(run("", "ethtool", "-k", tunnelInterface))
-		want := driver == "sing_box" && links[0].LinkInfo.InfoData.VNetHeader && features["tx"] && features["sg"] && features["tso"] && features["gso"]
+		want := (driver == "sing_box" || driver == "mihomo") && links[0].LinkInfo.InfoData.VNetHeader && features["tx"] && features["sg"] && features["tso"] && features["gso"]
 		var response struct {
 			Result struct {
 				TUNGSO bool `json:"tun_gso"`
@@ -698,7 +707,23 @@ func runVPNWireGuardTopology(t *testing.T) {
 		}
 		routesBefore := ip("-j", "route", "show", "table", "all")
 		interfacesBefore := ip("-o", "link", "show")
-		coreBefore := api("POST", "/api/plugins/vpn_core/actions/inspect", map[string]any{"payload": map[string]any{"key": "default"}})
+		// Traffic counters move with every probe: the core generation is its
+		// process and TUN, not the whole inspect view.
+		coreGeneration := func() string {
+			var view struct {
+				Result struct {
+					Phase     string          `json:"phase"`
+					Interface string          `json:"interface"`
+					Process   json.RawMessage `json:"process"`
+				} `json:"result"`
+			}
+			body := api("POST", "/api/plugins/vpn_core/actions/inspect", map[string]any{"payload": map[string]any{"key": "default"}})
+			if err := json.Unmarshal(body, &view); err != nil {
+				t.Fatalf("inspect: %v: %s", err, body)
+			}
+			return view.Result.Phase + " " + view.Result.Interface + " " + string(view.Result.Process)
+		}
+		coreBefore := coreGeneration()
 		probeHealth("/", "healthy", "")
 		seen, err := os.ReadFile(observed)
 		if err != nil || strings.TrimSpace(string(seen)) != selectedSource {
@@ -799,6 +824,55 @@ func runVPNWireGuardTopology(t *testing.T) {
 		probe(selected, selectedSource)
 		probe(direct, "192.0.2.1")
 		t.Log("ordinary NAT updates preserve adapter maps; injected map loss recovers without core/interface changes")
+		if driver == "" {
+			routeMissing := func() bool { return !strings.Contains(ip("route", "show", remoteRoute), wanInterface) }
+			waitRoute := func(after string) {
+				t.Helper()
+				deadline := time.Now().Add(5 * time.Second)
+				for routeMissing() {
+					if time.Now().After(deadline) {
+						t.Fatalf("WireGuard remote route %s was not restored after %s", remoteRoute, after)
+					}
+					time.Sleep(50 * time.Millisecond)
+				}
+			}
+			if routeMissing() {
+				t.Fatalf("WireGuard remote route %s was not installed: %s", remoteRoute, ip("route", "show"))
+			}
+			// Deleted while the daemon is stopped: the route event waits in
+			// the socket and is handled on resume.
+			if err := cmd.Process.Signal(syscall.SIGSTOP); err != nil {
+				t.Fatal(err)
+			}
+			ip("route", "del", remoteRoute, "dev", wanInterface)
+			if err := cmd.Process.Signal(syscall.SIGCONT); err != nil {
+				t.Fatal(err)
+			}
+			waitRoute("a deletion while the daemon was stopped")
+			// A boundary that goes down and up within 100 ms loses its IPv4
+			// routes without a route event; only the link events tell.
+			ip("link", "set", wanInterface, "down")
+			time.Sleep(50 * time.Millisecond)
+			ip("link", "set", wanInterface, "up")
+			waitRoute("a boundary flap")
+			probe(selected, selectedSource)
+			probe(direct, "192.0.2.1")
+			t.Log("a WireGuard remote route came back after a deletion while stopped and after a boundary flap")
+			// The flap re-added the boundary's routes (IPv6 link-local ones
+			// after DAD): take the snapshot the health check is compared
+			// with again once the table has settled.
+			for settle := time.Now().Add(10 * time.Second); ; {
+				routes, links := ip("-j", "route", "show", "table", "all"), ip("-o", "link", "show")
+				time.Sleep(500 * time.Millisecond)
+				if routes == ip("-j", "route", "show", "table", "all") && links == ip("-o", "link", "show") {
+					routesBefore, interfacesBefore = routes, links
+					break
+				}
+				if time.Now().After(settle) {
+					t.Fatal("routes or links kept changing after the boundary flap")
+				}
+			}
+		}
 		probeHealth("/status", "unhealthy", "http_status")
 		configureHealth("/slow", false, 3000)
 		started := time.Now()
@@ -813,8 +887,7 @@ func runVPNWireGuardTopology(t *testing.T) {
 			t.Fatal("health checks mutated host routes or interface topology")
 		}
 		if driver != "" {
-			coreAfter := api("POST", "/api/plugins/vpn_core/actions/inspect", map[string]any{"payload": map[string]any{"key": "default"}})
-			if !bytes.Equal(coreBefore, coreAfter) {
+			if coreAfter := coreGeneration(); coreBefore != coreAfter {
 				t.Fatalf("health failure changed the core generation: %s -> %s", coreBefore, coreAfter)
 			}
 			// Local readiness cannot detect a wrong proxy password. The actual
@@ -850,6 +923,46 @@ func runVPNWireGuardTopology(t *testing.T) {
 		t.Log("WAN-bound health: real VPN source, HTTP failure, timeout, async control, stale generation and ordinary TC traffic passed")
 	}
 	if driver != "" {
+		// A front-node chain: the exit node listens only on the remote host's
+		// loopback, so the core reaches it only through the front node, and the
+		// target sees the exit's own source address. TCP and UDP cross both nodes.
+		credential := func(password string) string {
+			return base64.RawURLEncoding.EncodeToString([]byte("aes-128-gcm:" + password))
+		}
+		chain := "ss://" + credential("wrong-password") + "@192.0.2.2:8388#unused\n" +
+			"ss://" + credential("veer-integration-only") + "@192.0.2.2:8388#front\n" +
+			"ss://" + credential("veer-chain-exit-only") + "@127.0.0.1:8390#exit"
+		api("POST", "/api/plugins/vpn_core/actions/set_core_config", map[string]any{"payload": map[string]any{
+			"key": "default", "format": "links", "driver": driver, "value": base64.StdEncoding.EncodeToString([]byte(chain)),
+			"selected": 2, "via": []int{1},
+		}})
+		action("apply")
+		probe(selected, "198.51.100.1")
+		probe(direct, "192.0.2.1")
+		type chainNode struct {
+			Name string      `json:"name"`
+			Type string      `json:"type"`
+			Via  []chainNode `json:"via,omitempty"`
+		}
+		var statuses struct {
+			Records []struct {
+				Key  string `json:"key"`
+				Data struct {
+					Node *chainNode `json:"node"`
+				} `json:"data"`
+			} `json:"records"`
+		}
+		body := api("GET", "/api/plugins/vpn_core/resources/status", nil)
+		if err := json.Unmarshal(body, &statuses); err != nil || len(statuses.Records) != 1 || statuses.Records[0].Data.Node == nil {
+			t.Fatalf("chain status: %s %v", body, err)
+		}
+		if got, _ := json.Marshal(statuses.Records[0].Data.Node); string(got) != `{"name":"exit","type":"ss","via":[{"name":"front","type":"ss"}]}` {
+			t.Fatalf("status does not show the applied chain: %s", got)
+		}
+		if bytes.Contains(body, []byte("veer-chain-exit-only")) || bytes.Contains(body, []byte("127.0.0.1:8390")) {
+			t.Fatalf("status leaks chain credentials or addresses: %s", body)
+		}
+		t.Log("front-node chain carried TCP/UDP through both nodes; status shows the chain")
 		// Replace the SS import with AnyTLS through the same public action.
 		// Both cores must carry TCP/UDP before and after supervised recovery.
 		api("POST", "/api/plugins/vpn_core/actions/set_core_config", map[string]any{"payload": map[string]any{

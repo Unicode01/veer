@@ -291,7 +291,7 @@ func (m *pluginPackageManager) beginPackageResourceMigration(tx pluginPackageTra
 	if !ok {
 		return nil
 	}
-	return runtime.BeginPluginResourceMigrationTransactionWithID(tx.ResourceMigrationID)
+	return m.pm.beginPluginResourceMigrationAfterPass(runtime, tx.ResourceMigrationID)
 }
 
 func (m *pluginPackageManager) commitPackageResourceMigration(tx pluginPackageTransaction) error {

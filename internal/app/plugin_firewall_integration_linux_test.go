@@ -119,7 +119,7 @@ func TestFirewallPluginLinuxIntegration(t *testing.T) {
 	cfg := Config{WebBind: "127.0.0.1", WebPort: freeTCPPort(t), WebToken: egressNATTestToken,
 		PluginAdminToken: "firewall-integration-admin", MaxWorkers: 1, DefaultEngine: ruleEngineKernel,
 		KernelEngineOrder: []string{kernelEngineTC}, PluginsDir: filepath.Join(work, "plugins"),
-		PluginsEnabledSetting: &enabled, PluginsDataplaneSetting: &enabled, PluginsIsolationSetting: &disabled,
+		PluginsEnabledSetting: &enabled, PluginsDataplaneSetting: &enabled,
 		PluginsMinSandboxLevel: pluginSandboxLevelNone, PluginsRequireSigned: &disabled}
 	data, _ := json.Marshal(cfg)
 	configPath := filepath.Join(work, "config.json")

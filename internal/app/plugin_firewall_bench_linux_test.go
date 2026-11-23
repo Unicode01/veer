@@ -19,7 +19,7 @@ import (
 // including the empty tail call to the next plugin. The active generation
 // holds a deployment-sized rule set (see installFirewallBenchRules); map
 // contents use the layouts plugin_firewall_prog_linux_test.go pins against
-// plugins/firewall/lib/compile.js. scripts/verify-plugin-release.sh
+// plugins/firewall/src/compile.rs. scripts/verify-plugin-release.sh
 // (performance) gates the medians.
 func BenchmarkFirewallProgram(b *testing.B) {
 	if os.Getenv("VEER_RUN_XDP_PLUGIN_BENCH") != "1" {
@@ -193,7 +193,7 @@ type firewallBenchPolicy struct {
 	random6     int      // generated IPv6 source prefixes, mostly allowed
 }
 
-// installRules writes one generation the way compile.js would for a busy
+// installRules writes one generation the way the plugin's compile.rs would for a busy
 // host: 32 policies over 35 single ports and 7 ranges (tcp, udp, tcp+udp,
 // two scoped to destinations), 1534 IPv4 and 90 IPv6 source prefixes, 1002
 // and 66 of them on policy 1 (tcp 22), and six trusted sources. The
@@ -354,7 +354,7 @@ type firewallBenchPortPrefix struct {
 }
 
 // firewallBenchPortPrefixes splits [lo, hi] into aligned power-of-two
-// blocks, as portPrefixes in compile.js does.
+// blocks, as port_prefixes in the plugin's compile.rs does.
 func firewallBenchPortPrefixes(lo, hi uint16) []firewallBenchPortPrefix {
 	var out []firewallBenchPortPrefix
 	for a, b := uint32(lo), uint32(hi); a <= b; {

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 	"github.com/Unicode01/veer/internal/store"
-	"github.com/dop251/goja"
 )
 
 const (
@@ -54,7 +54,7 @@ type pluginLogsResponse struct {
 	State    PluginLogState   `json:"state"`
 }
 
-func (h *pluginControlHost) writePluginLog(level string, call goja.FunctionCall) {
+func (h *pluginControlHost) writePluginLog(level string, call hv.FunctionCall) {
 	message, fields := h.structuredPluginLogMessage(call)
 	entry := PluginLogEntry{
 		PluginID: h.plugin.ID,
@@ -77,7 +77,7 @@ func (h *pluginControlHost) writePluginLog(level string, call goja.FunctionCall)
 	log.Printf("plugin %s %s: %s fields=%s", h.plugin.ID, level, message, raw)
 }
 
-func (h *pluginControlHost) structuredPluginLogMessage(call goja.FunctionCall) (string, map[string]any) {
+func (h *pluginControlHost) structuredPluginLogMessage(call hv.FunctionCall) (string, map[string]any) {
 	arguments := call.Arguments
 	var fields map[string]any
 	if len(arguments) > 1 {
@@ -88,7 +88,7 @@ func (h *pluginControlHost) structuredPluginLogMessage(call goja.FunctionCall) (
 	}
 	parts := make([]string, 0, len(arguments))
 	for _, arg := range arguments {
-		if goja.IsUndefined(arg) {
+		if hv.IsUndefined(arg) {
 			continue
 		}
 		parts = append(parts, arg.String())
@@ -150,7 +150,7 @@ func pluginLogSensitiveField(key string) bool {
 	}
 }
 
-func (rt *gojaPluginControlRuntime) appendPluginLog(entry PluginLogEntry) bool {
+func (rt *pluginControlManager) appendPluginLog(entry PluginLogEntry) bool {
 	if rt == nil || entry.PluginID == "" {
 		return false
 	}
@@ -219,7 +219,7 @@ func normalizePluginLogLevel(level string) string {
 	}
 }
 
-func (rt *gojaPluginControlRuntime) pluginLogEntries(pluginID, level string, limit int) ([]PluginLogEntry, PluginLogState) {
+func (rt *pluginControlManager) pluginLogEntries(pluginID, level string, limit int) ([]PluginLogEntry, PluginLogState) {
 	if limit <= 0 || limit > pluginLogMaxListLimit {
 		limit = pluginLogDefaultListLimit
 	}
@@ -261,7 +261,7 @@ func clonePluginLogFields(fields map[string]any) map[string]any {
 	return out
 }
 
-func (rt *gojaPluginControlRuntime) pluginLogState(pluginID string) PluginLogState {
+func (rt *pluginControlManager) pluginLogState(pluginID string) PluginLogState {
 	if rt == nil {
 		return PluginLogState{}
 	}
@@ -278,7 +278,7 @@ func (rt *gojaPluginControlRuntime) pluginLogState(pluginID string) PluginLogSta
 	return state
 }
 
-func (rt *gojaPluginControlRuntime) clearAllPluginLogs() {
+func (rt *pluginControlManager) clearAllPluginLogs() {
 	if rt == nil {
 		return
 	}
@@ -327,7 +327,7 @@ func handlePluginLogsAPI(w http.ResponseWriter, r *http.Request, cfg *Config, db
 	logs := []PluginLogEntry{}
 	state := PluginLogState{}
 	if pm != nil {
-		if rt, ok := pm.pluginControlRuntime.(*gojaPluginControlRuntime); ok {
+		if rt, ok := pm.pluginControlRuntime.(*pluginControlManager); ok {
 			state = rt.pluginLogState(pluginID)
 			if db == nil {
 				logs, state = rt.pluginLogEntries(pluginID, level, limit)

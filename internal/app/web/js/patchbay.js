@@ -90,14 +90,14 @@
     if (list.length > TRAFFIC_SLOTS) list.shift();
   }
   async function sampleTraffic(cfg) {
-    if (!cfg || !cfg.stats || !app.getToken() || document.hidden) return;
+    if (!cfg || !cfg.stats || !app.isAuthenticated() || document.hidden) return;
     const store = trafficFor(cfg);
     if (store.busy || Date.now() - store.at < 4000) return;
     store.busy = true;
     store.at = Date.now();
     try {
       const query = cfg.state === 'sites' ? '' : '?page=1&page_size=500';
-      const response = await fetch(cfg.stats + query, { headers: { Authorization: 'Bearer ' + app.getToken() }, cache: 'no-store' });
+      const response = await app.authFetch(cfg.stats + query, { cache: 'no-store' }, { background: true });
       if (!response.ok) return;
       const payload = await response.json();
       const items = Array.isArray(payload) ? payload : (payload && payload.items) || [];
@@ -281,7 +281,13 @@
     actions.className = 'sidebar-settings';
     actions.querySelectorAll('.toolbar-field').forEach((label) => { label.hidden = true; });
     shell.themeLabel = node('span');
-    shell.themeButton = node('button', { className: 'sidebar-tool', attrs: { type: 'button', id: 'themeMenuButton', 'aria-haspopup': 'menu', 'aria-controls': 'themeMenu', 'aria-expanded': 'false' }, children: [icon('M12 3a9 9 0 1 0 0 18V3Z M12 3a9 9 0 0 1 0 18'), shell.themeLabel] });
+    // Light and dark: a circle with its left half filled.
+    const themeIcon = icon('M12 3a9 9 0 1 1 0 18a9 9 0 1 1 0-18Z');
+    const themeHalf = document.createElementNS(themeIcon.namespaceURI, 'path');
+    themeHalf.setAttribute('d', 'M12 3a9 9 0 0 0 0 18Z');
+    themeHalf.setAttribute('fill', 'currentColor');
+    themeIcon.appendChild(themeHalf);
+    shell.themeButton = node('button', { className: 'sidebar-tool', attrs: { type: 'button', id: 'themeMenuButton', 'aria-haspopup': 'menu', 'aria-controls': 'themeMenu', 'aria-expanded': 'false' }, children: [themeIcon, shell.themeLabel] });
     shell.themeMenu = node('div', { className: 'theme-menu', attrs: { id: 'themeMenu', role: 'menu', hidden: '' } });
     ['system', 'light', 'dark'].forEach((theme) => {
       const button = node('button', { attrs: { type: 'button', role: 'menuitemradio', tabindex: '-1' }, dataset: { theme } });
@@ -314,10 +320,14 @@
     });
     shell.localeButton = node('button', { className: 'sidebar-tool locale-tool', attrs: { type: 'button', id: 'localeToggle' } });
     shell.localeButton.addEventListener('click', () => { closeThemeMenu(false); app.setLocale(app.state.locale === 'en-US' ? 'zh-CN' : 'en-US'); });
+    // Footer: theme and language on one row, then who is signed in with the
+    // sign-out button beside the name.
     const logout = actions.querySelector('#logoutBtn');
-    logout.className = 'sidebar-tool';
+    logout.className = 'sidebar-tool sidebar-logout';
     logout.addEventListener('click', () => closeThemeMenu(false));
-    actions.append(shell.themeMenu, shell.themeButton, shell.localeButton, logout);
+    const tools = node('div', { className: 'sidebar-tools', children: [shell.themeButton, shell.localeButton] });
+    const account = node('div', { className: 'sidebar-account', children: [actions.querySelector('#sessionIdentity'), logout] });
+    actions.append(shell.themeMenu, tools, account);
     document.addEventListener('pointerdown', (event) => { if (!actions.contains(event.target)) closeThemeMenu(false); });
     document.addEventListener('focusin', (event) => { if (!actions.contains(event.target)) closeThemeMenu(false); });
     renderSettings();

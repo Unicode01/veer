@@ -278,6 +278,7 @@ func (pm *ProcessManager) ApplyPluginResourceRuntimeUpdate(plugin LoadedPlugin, 
 	if pm == nil || pm.db == nil {
 		return fmt.Errorf("plugin process manager is unavailable")
 	}
+	defer pm.noteManagedRuntimeInputsChanged()
 	return applyPluginResourceRuntimeUpdate(pm.db, pm, plugin, resource)
 }
 
@@ -285,6 +286,7 @@ func (pm *ProcessManager) ApplyPluginActionRuntimeUpdate(plugin LoadedPlugin, ac
 	if pm == nil || pm.db == nil {
 		return fmt.Errorf("plugin process manager is unavailable")
 	}
+	defer pm.noteManagedRuntimeInputsChanged()
 	return applyPluginActionRuntimeUpdate(pm.db, pm, plugin, action, payload)
 }
 

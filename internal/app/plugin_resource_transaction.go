@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"strings"
 
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 	"github.com/Unicode01/veer/internal/store"
-	"github.com/dop251/goja"
 )
 
 const (
@@ -46,17 +46,17 @@ type pluginResourceTransactionTarget struct {
 	resource PluginResource
 }
 
-func (h *pluginControlHost) resourceTransaction(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) resourceTransaction(call hv.FunctionCall) hv.Value {
 	h.requirePermission("resource")
 	return h.executePluginResourceTransaction(call, false)
 }
 
-func (h *pluginControlHost) pluginResourceTransaction(call goja.FunctionCall) goja.Value {
+func (h *pluginControlHost) pluginResourceTransaction(call hv.FunctionCall) hv.Value {
 	h.requirePermission("plugin.resource")
 	return h.executePluginResourceTransaction(call, true)
 }
 
-func (h *pluginControlHost) executePluginResourceTransaction(call goja.FunctionCall, crossPlugin bool) goja.Value {
+func (h *pluginControlHost) executePluginResourceTransaction(call hv.FunctionCall, crossPlugin bool) hv.Value {
 	operations, options := h.parsePluginResourceTransaction(call, crossPlugin)
 	prepared := make([]preparedPluginResourceTransactionOperation, 0, len(operations))
 	seen := make(map[string]struct{}, len(operations))
@@ -222,12 +222,12 @@ func (h *pluginControlHost) executePluginResourceTransaction(call goja.FunctionC
 	})
 }
 
-func (h *pluginControlHost) parsePluginResourceTransaction(call goja.FunctionCall, crossPlugin bool) ([]pluginResourceTransactionOperation, pluginResourceTransactionOptions) {
+func (h *pluginControlHost) parsePluginResourceTransaction(call hv.FunctionCall, crossPlugin bool) ([]pluginResourceTransactionOperation, pluginResourceTransactionOptions) {
 	api := "resources.transaction"
 	if crossPlugin {
 		api = "plugins.resources.transaction"
 	}
-	if len(call.Arguments) == 0 || goja.IsUndefined(call.Arguments[0]) || goja.IsNull(call.Arguments[0]) {
+	if len(call.Arguments) == 0 || hv.IsUndefined(call.Arguments[0]) || hv.IsNull(call.Arguments[0]) {
 		h.throwf("%s: operations are required", api)
 	}
 	raw, err := json.Marshal(call.Arguments[0].Export())
@@ -244,7 +244,7 @@ func (h *pluginControlHost) parsePluginResourceTransaction(call goja.FunctionCal
 		h.throwf("%s: operation count must be between 1 and %d", api, pluginResourceTransactionMaxOperations)
 	}
 	var options pluginResourceTransactionOptions
-	if len(call.Arguments) > 1 && !goja.IsUndefined(call.Arguments[1]) && !goja.IsNull(call.Arguments[1]) {
+	if len(call.Arguments) > 1 && !hv.IsUndefined(call.Arguments[1]) && !hv.IsNull(call.Arguments[1]) {
 		raw, err := json.Marshal(call.Arguments[1].Export())
 		if err != nil {
 			h.throwf("%s: options are not serializable", api)

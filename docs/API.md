@@ -22,7 +22,7 @@ Veer 当前不只是规则转发 API，还包含：
 - Base URL: `http://<host>:<web_port>`
 - 默认端口: `8080`
 - API 前缀: `/api`
-- 认证方式: `Authorization: Bearer <web_token>`
+- 认证方式: `Authorization: Bearer <web_token>`（脚本与集成）；WebUI 用登录换来的会话 Cookie，见[网页登录与会话](#网页登录与会话)
 - 插件高权限操作额外要求: `X-Veer-Plugin-Admin: <plugin_admin_token>`
 - 写操作默认使用 `application/json`
 - 探活端点: `/healthz`、`/readyz` 不使用 `/api` 前缀
@@ -51,9 +51,9 @@ Veer 当前不只是规则转发 API，还包含：
 
 ## 认证与错误约定
 
-所有 `/api/*` 端点以及 `/metrics`、`/debug/pprof/` 都需要 Bearer Token。`/healthz` 和 `/readyz` 用于本机或负载均衡探活，不需要 Bearer Token。
+所有 `/api/*` 端点以及 `/metrics`、`/debug/pprof/` 都需要 Bearer Token 或有效的网页会话；`/api/auth/session`、`/api/auth/login`、`/api/auth/logout` 例外（见[网页登录与会话](#网页登录与会话)）。`/healthz` 和 `/readyz` 用于本机或负载均衡探活，不需要 Bearer Token。脚本和集成照旧只用 Bearer Token，不需要 Cookie，也不需要 CSRF 头。
 
-Bearer Token 认证失败按客户端地址限流：1 分钟窗口内允许 10 次失败，之后返回 `429 Too Many Requests`，并通过 `Retry-After` 告知剩余等待秒数。一次成功的 Bearer Token 认证会清除该客户端的失败记录；插件管理员 Token 错误返回 `403`，不单独计入这组 `401` 限流。
+认证失败按客户端限流：IPv4 按地址，IPv6 按 /64 前缀（一台主机通常拥有整个 /64），1 分钟窗口内允许 10 次失败，之后返回 `429 Too Many Requests`，并通过 `Retry-After` 告知剩余等待秒数。错误的 Bearer Token 和失败的网页登录（系统账户或访问令牌）计入同一组；网页登录在校验凭据之前就先占用一次额度、成功后清零，所以并发请求也只能校验 10 次；在校验前就被拒绝的登录（请求体错误、登录方式未启用、连接不安全、账户文件读不到）不占额度；没有凭据的请求和过期的会话 Cookie 不计入，以免页面开着过期后把自己的地址锁住。一次成功的认证会清除该客户端的失败记录；插件管理员 Token 错误返回 `403`，不单独计入这组限流。配置了 `web_trusted_proxies` 时，经可信代理的请求按代理报告的客户端地址计数。失败记录最多保存 4096 个客户端；记满时遗忘窗口开始最早的那个，不会因此拒绝新的客户端。日志里的 `client=` 始终是完整地址。
 
 请求头示例：
 
@@ -72,8 +72,8 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 
 - `200 OK`: 成功
 - `400 Bad Request`: 参数错误或请求体非法
-- `401 Unauthorized`: Token 错误或缺失
-- `403 Forbidden`: 插件管理员 Token 缺失、错误或该 API 未配置启用
+- `401 Unauthorized`: Token 错误或缺失，或会话已失效（响应头 `X-Veer-Auth-Reason` 说明原因）
+- `403 Forbidden`: 插件管理员 Token 缺失、错误或该 API 未配置启用；会话请求缺少或带错 `X-Veer-CSRF`、来源不符（`code` 为 `csrf` / `cross_origin`）
 - `404 Not Found`: 资源不存在
 - `405 Method Not Allowed`: 请求方法不支持
 - `429 Too Many Requests`: 同一客户端的认证失败次数超过限制
@@ -116,7 +116,110 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - `401` 和部分 `405` 仍可能是纯文本响应
 - `Kernel Runtime` 的调试字段会随版本演进增加，外部解析时应按“已知字段尽量读取，未知字段忽略”处理
 
+## 网页登录与会话
+
+WebUI 不再保存 `web_token`：登录时把凭据交给服务端，换一个会话 Cookie。登录方式由 `config.json` 的 `web_auth_realms` 决定：
+
+- `token`（访问令牌）：输入 `web_token` 登录，身份显示为 `token`。明文 HTTP 下照常可用，但日志和登录页会提示令牌以明文传输。
+- `system`（系统账户）：输入宿主机账户和密码，身份显示为 `root@system`、`alice@system`。只接受 uid 0 账户（`web_root_login: false` 时不接受）和 `web_admin_groups`（默认 `sudo`、`wheel`）的成员。连接必须是 TLS（`web_tls`）、本机回环，或来自 `web_trusted_proxies` 且代理声明客户端使用 HTTPS；否则返回 `403`、`code: insecure_channel`。
+
+老配置没有 `web_auth_realms` 时只启用 `token`，行为不变。
+
+系统账户由守护进程直接读 `/etc/passwd`、`/etc/shadow`、`/etc/group` 校验（发布版是不链接 libpam 的静态二进制）：支持 yescrypt（`$y$`）、sha512-crypt（`$6$`）、sha256-crypt（`$5$`）、md5-crypt（`$1$`）和 bcrypt（`$2a$`、`$2b$`、`$2y$`）；锁定（`!`、`*`）、空密码、按 shadow 字段已过期的账户和密码一律拒绝。LDAP、SSSD 等 NSS 账户和 PAM 里配置的策略（faillock、二次验证、pam_access 等）都不生效。
+
+### 会话
+
+- Cookie `veer_session`：HttpOnly、SameSite=Strict、`Path=/`，TLS 下（含可信代理声明的 HTTPS）带 Secure；不设过期时间，关闭浏览器即丢弃。
+- 内容是用 `auth/session.key`（安装目录下，0600，首次启动生成）签名的票据，所以重启和热重启后会话仍然有效。删除该文件并重启会让所有会话失效。
+- 空闲 `web_session_idle_minutes`（默认 30）分钟没有用户操作、或登录满 `web_session_max_hours`（默认 12）小时，会话结束。带 `X-Veer-Background: 1` 的请求（WebUI 的自动刷新）不算操作，不延长空闲时间；其他请求每分钟最多刷新一次 Cookie。
+- 每个请求都重新检查：登出的会话被撤销（记录在数据库，重启后仍有效）；系统账户被锁定、过期、移出管理组或改了密码，访问令牌会话在 `web_token` 轮换后，都立即失效；从 `web_auth_realms` 去掉某种登录方式，该方式的会话也失效。系统账户的会话同样只在安全连接上有效。
+
+会话失效时，需要认证的接口返回 `401`，并在 `X-Veer-Auth-Reason` 说明原因：`session_idle`、`session_expired`、`session_revoked`、`session_credentials_changed`、`session_account_refused`、`session_realm_disabled`、`session_insecure_channel`、`session_invalid`。
+
+### CSRF
+
+带会话 Cookie 的 `POST`、`PUT`、`PATCH`、`DELETE` 请求必须带 `X-Veer-CSRF: <csrf_token>`（登录响应和 `GET /api/auth/session` 返回，用途与 PVE 的 `CSRFPreventionToken` 相同），否则返回 `403`、`code: csrf`。浏览器发了 `Origin` 时，它的主机和端口必须与请求的 `Host` 一致（经可信代理时与 `X-Forwarded-Host` 一致）；`Sec-Fetch-Site` 为 `cross-site` 或 `same-site` 的请求也被拒绝（`code: cross_origin`）。反向代理请保留 `Host` 或设置 `X-Forwarded-Host`。Bearer 请求不受这些限制。
+
+### `GET /api/auth/session`
+
+不需要凭据。返回当前身份（若有）、可用的登录方式和本次连接的情况：
+
+```json
+{
+  "authenticated": true,
+  "identity": { "realm": "system", "user": "root", "name": "root@system", "via": "session" },
+  "csrf_token": "q0bY…",
+  "session": { "issued_at": "2026-11-20T08:00:00Z", "expires_at": "2026-11-20T20:00:00Z", "idle_timeout_seconds": 1800 },
+  "methods": {
+    "realms": ["system", "token"],
+    "system": { "enabled": true, "available": true, "default_user": "root" },
+    "token": { "enabled": true, "available": true }
+  },
+  "transport": { "secure": true, "loopback": false }
+}
+```
+
+- 未登录时 `authenticated` 为 `false`，没有 `identity`、`csrf_token`、`session`；带着失效 Cookie 访问时 `refused` 给出上面的原因。
+- `methods.system.available` 为 `false` 时 `reason` 是 `disabled`（未在 `web_auth_realms` 启用）、`insecure_channel`（需要 HTTPS 或本机访问）或 `accounts_unreadable`（读不到账户文件）。`default_user` 在禁止 root 登录时为空。
+- 用 Bearer Token 调用时 `identity.via` 为 `bearer`，没有 `csrf_token`。
+
+### `POST /api/auth/login`
+
+请求体必须是 `application/json`；浏览器带 `Origin` 时须与本面板同源。
+
+```json
+{ "realm": "system", "username": "root", "password": "…" }
+```
+
+```json
+{ "realm": "token", "token": "<web_token>" }
+```
+
+成功返回 `200`、设置 `veer_session`，响应体同 `GET /api/auth/session`。失败：
+
+| 状态 | `code` | 含义 |
+| --- | --- | --- |
+| `400` | `bad_request` | 请求体不合法或 `realm` 未知 |
+| `401` | `invalid_credentials` | 用户名、密码或令牌不对。账户不存在、不是管理员、被锁定、已过期都返回同样的结果，原因只写进日志 |
+| `403` | `realm_disabled` | 该登录方式没有在 `web_auth_realms` 启用 |
+| `403` | `insecure_channel` | 系统账户登录需要 TLS、本机回环或可信代理的 HTTPS |
+| `403` | `cross_origin` | `Origin` 与面板不一致 |
+| `415` | `bad_request` | 不是 JSON 请求体 |
+| `429` | — | 失败次数超过限制，见 `Retry-After` |
+| `503` | `unavailable` | 读不到账户文件，或同时校验的系统账户登录过多 |
+
+### `POST /api/auth/logout`
+
+带会话 Cookie 和 `X-Veer-CSRF`。撤销当前会话并清除 Cookie，返回 `{"ok": true}`。没有有效会话时只清除 Cookie。
+
+### 日志
+
+登录结果写入服务日志，不含密码和令牌，用户名中空格、引号等字符替换为 `?`：
+
+```text
+auth: login accepted client=203.0.113.9 realm=system user=root session=Zk3x9Q2a
+auth: login failed client=203.0.113.9 realm=system user=root reason=bad_password
+auth: login refused client=203.0.113.9 realm=system user=root reason=insecure_channel (plain HTTP from a remote client)
+auth: bearer token rejected client=203.0.113.9
+auth: logout client=203.0.113.9 realm=system user=root session=Zk3x9Q2a
+```
+
+fail2ban 过滤规则示例（`client=` 写在用户名之前，用户名无法伪造它）：
+
+```ini
+[Definition]
+failregex = auth: (?:login failed|bearer token rejected) client=<HOST>\b
+```
+
+经 `web_trusted_proxies` 中的代理访问时，`client=` 是代理报告的客户端地址；fail2ban 需要在代理所在主机上封禁。
+
 ## 接口总览
+
+### 登录与会话
+
+- `GET /api/auth/session`（无需凭据）
+- `POST /api/auth/login`（无需凭据）
+- `POST /api/auth/logout`（会话 + `X-Veer-CSRF`）
 
 ### 健康检查
 
@@ -319,7 +422,7 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
     "runtime_version": "1.0.0",
     "tc_pipeline_abi": 2,
     "core_priority": 1000,
-    "available_features": ["control.goja.v1", "dataplane.tc_pipeline.v2"],
+    "available_features": ["control.native.v1", "dataplane.tc_pipeline.v2"],
     "feature_status": {
       "dataplane.tc_pipeline.v2": {"available": true}
     },
@@ -382,8 +485,8 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - `enabled`: 插件级开关状态。内置 `veer_core` 固定为 `true`；只有全局 `plugins_enabled=true` 后才会发现外部插件，已发现外部插件的插件级状态默认 `true`
 - `status`: `builtin` / `active` / `disabled` / `error`
 - `stability`: 插件稳定性等级；`lab` 只适合实验/示例，`preview` 适合受控环境试用，`stable` 表示预期生产可用，`deprecated` 表示不建议新部署。未声明时默认为 `lab`
-- `runtime`: 插件运行时状态；内置 `veer_core` 为 `mode=builtin` 且已挂载。全局默认 `plugins_enabled=false`，此时不会扫描外部插件，也不会暴露 resource/action/UI/assets/hook/object surface 或保留 Goja VM、timer、worker。手动启用外部插件但保持 `plugins_dataplane_enabled=false` 时，外部插件为 `mode=registered`；再启用插件数据面且存在可链入的 TC `stage=forward/reply` hook 后，会变为 `mode=dataplane` 并返回 `attachments`
-- `runtime.isolation`: 外部控制插件的宿主隔离状态；包含 `enabled`、`platform`、`process_count`、`pids`、`restart_count`、`rss_bytes`、`resource_limit_mode`，以及可选的 `restart_backoff_until`、`last_error`、`resource_limit_degraded`。该对象只描述 Goja 控制面，不表示 TC/XDP 数据面进入用户态
+- `runtime`: 插件运行时状态；内置 `veer_core` 为 `mode=builtin` 且已挂载。全局默认 `plugins_enabled=false`，此时不会扫描外部插件，也不会暴露 resource/action/UI/assets/hook/object surface，也不启动插件 worker 或保留 timer。手动启用外部插件但保持 `plugins_dataplane_enabled=false` 时，外部插件为 `mode=registered`；再启用插件数据面且存在可链入的 TC `stage=forward/reply` hook 后，会变为 `mode=dataplane` 并返回 `attachments`
+- `runtime.isolation`: 运行外部插件实例的 worker 进程；包含 `enabled`、`platform`、`process_count`、`pids`、`restart_count`、`rss_bytes`，以及可选的 `restart_backoff_until`、`last_error`。共享 worker 的内存计入其中每个插件。该对象只描述控制面，不表示 TC/XDP 数据面进入用户态
 - `runtime.core_priority`: 内置 `Veer Core` 的排序锚点，当前固定为 `1000`
 - `runtime.features`: 当前二进制实现的插件 API feature 集合；不代表当前宿主一定具备对应内核能力
 - `runtime.available_features` / `runtime.feature_status`: 当前宿主实际可用 feature 及逐项状态。TC/eBPF 由 verifier、map type、clsact/netlink 探测决定，raw L2 会验证 AF_PACKET 权限；不可用项通过 `feature_status.<name>.reason` 返回原因
@@ -394,18 +497,18 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - `runtime.tc_pipeline`: 当前 TC ABI 的机器可读契约。ABI v2 使用 111-entry prog-array。`stage_hook_limit`/`direction_hook_limit` 是一个包在单个接口和挂载方向上的上限（每个 concrete stage 8 个、每个方向合计 14 个），`stage_hook_capacity` 是每个 stage 的整机容量（32），`hook_limit_scope` 为 `interface`
 - `runtime.xdp_pipeline`: XDP 前置链契约。使用 24-entry prog-array，`hook_limit` 是单个接口上的上限（14），`hook_capacity` 是整机容量（32），仅支持显式接口上的 ingress `pre_forward`/pre-core `forward`
 - `actions[].request_schema_version/request_schema/request_schema_digest`：Action 请求的 Draft 2020-12 JSON Schema 契约；HTTP 和插件间调用会在执行 handler 前校验。未声明 Schema 时版本默认为 `1`
-- `actions[].response_schema_version/response_schema/response_schema_digest`：`runtime_query` 返回值契约；结果离开 Goja VM 前校验。同一版本下 Schema 摘要变化会在包 stage 时被拒绝
-- `services[]`：`control.js` 通过 `plugin.service()` 注册的 typed service；包含独立 SemVer、调用方实际获权后可见的 `actions/resources` 端点及对应完整契约。`plugins.services.list/resolve/call` 不绕过 `action_access/resource_access`，多个提供方匹配时必须显式选择
+- `actions[].response_schema_version/response_schema/response_schema_digest`：`runtime_query` 返回值契约；结果离开插件实例时校验。同一版本下 Schema 摘要变化会在包 stage 时被拒绝
+- `services[]`：插件在 manifest `control.register.services` 中注册的 typed service；包含独立 SemVer、调用方实际获权后可见的 `actions/resources` 端点及对应完整契约。`plugins.services.list/resolve/call` 不绕过 `action_access/resource_access`，多个提供方匹配时必须显式选择
 - `event_subscriptions[].schema_version/schema/schema_digest`：事件 payload 契约。发布版本不匹配或 payload 不符合 Schema 时不会入队，并计入 `runtime.event_bus.rejected`
-- `objects`: `control.js` 通过 `ebpf.loadObject()` 注册的 eBPF 对象或内置对象；外部对象路径必须留在插件目录内，单个对象最大 16 MiB。`stable` / `preview` 外部对象的 fallback 和每个 `variants[]` artifact 都必须分别注册正确 `sha256`。服务会逐项检查路径、大小、hash、ELF、program section/type 和 state map，不会只检查当前宿主架构；`lab` 可省略 hash，但仍会计算并校验内容
+- `objects`: 插件在 manifest `control.register.ebpf_objects`（`ebpf.loadObject()`）中注册的 eBPF 对象或内置对象；外部对象路径必须留在插件目录内，单个对象最大 16 MiB。`stable` / `preview` 外部对象的 fallback 和每个 `variants[]` artifact 都必须分别注册正确 `sha256`。服务会逐项检查路径、大小、hash、ELF、program section/type 和 state map，不会只检查当前宿主架构；`lab` 可省略 hash，但仍会计算并校验内容
 - `objects[].state_maps`: 私有 map 热升级契约。`preserve` 要求同名、同 `schema_version` 且内核 map spec 兼容并复用原 FD；`reset` 明确确认丢弃旧状态；`migrate` 必须用 `migrate_from` 指向同 object 中较低版本的 `preserve` map。迁移版本必须同时保留旧/新 map，并由新数据面读旧兜底和双写；控制脚本通过 `onEBPFStateMigrate(ctx)` 分批执行 `ebpf.mapScan/mapTransaction`，返回 `{done,cursor,processed}`。任一批次或 reconcile 提交失败会保留 pending 并触发候选更新回滚。对应 feature 为 `ebpf.map_state.v1` 和 `ebpf.map_migration.v1`
-- `control.sha256`: Goja 控制脚本完整性声明。`stable` / `preview` 控制脚本必须声明该字段且匹配 `control.main` 文件内容；`lab` 可省略，但服务仍会计算并返回 `control.resolved_sha256` 供审计
-- `ui.sha256`: `control.js` 通过 `ui.register()` 注册的 UI 入口完整性值。`stable` / `preview` 插件注册 `ui.entry` 时必须提供该字段且匹配入口文件内容；`lab` 可省略，但服务仍会计算并返回 `ui.resolved_sha256` 供审计
+- `control.library.<triple>.sha256`: 原生插件库完整性声明，声明时必须匹配该目标的库文件；省略时服务在建立已应用快照时计算摘要并在加载前复核。`control.resolved_sha256` 汇总 manifest 与各库摘要，供审计
+- `ui.sha256`: manifest `control.register.ui`（`ui.register()`）注册的 UI 入口完整性值。`stable` / `preview` 插件注册 `ui.entry` 时必须提供该字段且匹配入口文件内容；`lab` 可省略，但服务仍会计算并返回 `ui.resolved_sha256` 供审计
 - `asset_base_path`: 插件注册 `ui.static_dir` 后生成的静态资源路径，需要 Bearer Token
 - `ui.page` / `ui.page_title`: 可选的 Web UI 顶部分页 ID 和标题，由 `ui.register({page, page_title})` 注册；前端会自动创建插件页并内嵌加载 `ui.entry`
-- `hooks`: `control.js` 通过 `hooks.attach()` 注册的 dataplane hook。开启外部数据面后，`engine=tc` 的 `stage=forward/reply` 逻辑 Hook，或显式 concrete stage Hook，会被加载到 `tc_prog_chain_v4`。`priority < runtime.core_priority` 进入 core 前链，`priority > runtime.core_priority` 进入 core 后链，等于 core priority 会被拒绝；`pipeline.attach({phase:"after_apply"})` 映射到 `post_apply/post_reply_apply`。插件程序执行后必须 tail-call 到对应 stage 的内置 continue slot，除非它明确返回最终 TC action。`engine=xdp` 只接受显式接口上的 ingress `pre_forward`/pre-core Hook，每个接口最多 14 个、整机最多 32 个，使用独立双 bank Dispatcher 和共享 `xdp_prog_chain`；插件调用 XDP continue slot 后进入下一 Hook，链尾 `XDP_PASS` 继续进入 TC。目标接口已有 XDP 程序时拒绝挂载，不会替换第三方或现有 Veer XDP Core。`engine=netfilter` 使用 `family/hook/phase/namespace` 声明原生 Netfilter placement，宿主自动持有 `bpf_link`；`family=inet` 展开成 IPv4/IPv6 两条 link，接口范围由插件程序和私有 ifindex map 判断，不接受 `interfaces` 或 TC `stage/attach`
+- `hooks`: manifest `control.register.hooks`/`pipeline_attach`（`hooks.attach()`/`pipeline.attach()`）注册的 dataplane hook。开启外部数据面后，`engine=tc` 的 `stage=forward/reply` 逻辑 Hook，或显式 concrete stage Hook，会被加载到 `tc_prog_chain_v4`。`priority < runtime.core_priority` 进入 core 前链，`priority > runtime.core_priority` 进入 core 后链，等于 core priority 会被拒绝；`pipeline.attach({phase:"after_apply"})` 映射到 `post_apply/post_reply_apply`。插件程序执行后必须 tail-call 到对应 stage 的内置 continue slot，除非它明确返回最终 TC action。`engine=xdp` 只接受显式接口上的 ingress `pre_forward`/pre-core Hook，每个接口最多 14 个、整机最多 32 个，使用独立双 bank Dispatcher 和共享 `xdp_prog_chain`；插件调用 XDP continue slot 后进入下一 Hook，链尾 `XDP_PASS` 继续进入 TC。目标接口已有 XDP 程序时拒绝挂载，不会替换第三方或现有 Veer XDP Core。`engine=netfilter` 使用 `family/hook/phase/namespace` 声明原生 Netfilter placement，宿主自动持有 `bpf_link`；`family=inet` 展开成 IPv4/IPv6 两条 link，接口范围由插件程序和私有 ifindex map 判断，不接受 `interfaces` 或 TC `stage/attach`
 - `hooks[].interfaces`: 可选的真实 Linux 接口名列表。留空或省略时，插件只随已有 forward/egress 规则触发的 `veer` attachment 运行；填写后，即使没有转发规则，TC runtime 也会把 pipeline 挂到这些接口上。无规则模式会禁用内置 forward/reply core，把 pipeline 作为纯插件高速链运行；core 后 Hook 仍可运行，但只能拿到按当前地址族清空的 `tc_plugin_ctx_v4/tc_plugin_ctx_v6`，不会有规则或 flow 匹配上下文。不会自动挂载所有接口；接口不存在会让该插件本轮进入 error。程序排序使用全局 chain，但运行时会按 ifindex 和 attach 方向生成阶段掩码；声明 `interfaces` 的 Hook 只会在对应白名单内执行
-- `runtime.attachments[].priority`: 插件注册 Hook 的排序优先级。TC attachment 的 `stage` 是 `pre_forward/post_lookup/post_apply/pre_reply/post_reply/post_reply_apply` 之一，`chain_slot` 是实际写入 `tc_prog_chain_v4` 的 slot；Netfilter attachment 通过 `family/netfilter_hook/phase/namespace` 和 `filter_handle=bpf_link:priority=...` 描述原生 link；XDP attachment 的 `xdp_mode` 是该接口上的实际运行方式：Dispatcher 的 `driver` 或 `generic` 模式，或者 `tc`（没有原生 XDP 的接口上运行 Hook 的 `tc_fallback` 程序，排在核心之前）
+- `runtime.attachments[].priority`: 插件注册 Hook 的排序优先级。TC attachment 的 `stage` 是 `pre_forward/post_lookup/post_apply/pre_reply/post_reply/post_reply_apply` 之一，`chain_slot` 是实际写入 `tc_prog_chain_v4` 的 slot；Netfilter attachment 通过 `family/netfilter_hook/phase/namespace` 和 `filter_handle=bpf_link:priority=...` 描述原生 link；XDP attachment 的 `xdp_mode` 是该接口上的实际运行方式：Dispatcher 的 `driver` 或 `generic` 模式，或者 `tc`（没有原生 XDP 的接口上运行 Hook 的 `tc_fallback` 程序，排在核心之前）；XDP Hook 的 `tc_egress` 程序另报一条 `attach: "egress"`、`xdp_mode: "tc"` 的 attachment
 - `hooks[].before/hooks[].after`：同一 concrete stage 内的全限定 `plugin_id/hook_id` 拓扑约束。运行时在 reconcile 阶段检测缺失目标、跨 stage 引用和循环，并把最终顺序反映到 `runtime.attachments[].order/chain_slot`；该能力不增加每包热路径开销
 - `hooks[].packet_metadata[]`：可选 TC packet metadata ABI v1 binding。字段为 `slot`（object 本地 `0..15`）、`namespace`（`owner_plugin/name`）、`schema_version`、`max_bytes`（最多 64）和 `access=read|read_write`。只有 namespace owner 可写；所有读写方必须声明相同 schema/长度。宿主最多编排 32 个 namespace，并用双栈 per-CPU generation 阻止跨包陈旧读取。解析后的 binding 会同步到 `runtime.attachments[].packet_metadata`
 - core 后插件如需读取规则匹配上下文，必须在对象里同时声明共享 `tc_plugin_ctx_v4` 和 `tc_plugin_ctx_v6` per-CPU array map；服务会替换为内置稳定 map，并只让插件读取当前包地址族对应的上下文
@@ -417,17 +520,17 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 
 插件控制面数据接口：
 
-- `POST /api/plugins/reload`：手动应用插件源目录的当前候选版本，要求插件管理员权限。服务每 2 秒检查目录内容指纹，变化只会在 `GET /api/plugins` 的 `hot_reload.update_available` 中标记待更新，不会自动执行候选 control.js 或改动数据面。手动应用会先复制稳定快照并校验 manifest、control、UI 和 eBPF object，再执行 reconcile 和数据面分发；失败返回 `5xx` 并保留上一份已应用快照。`hot_reload.applied_fingerprint*` 和 `detected_fingerprint*` 分别表示运行中版本与源目录候选版本，二者不同即存在待更新。常规文件使用受限 SHA256 内容 hash，超大文件只纳入路径、大小和 mtime 等元数据
+- `POST /api/plugins/reload`：手动应用插件源目录的当前候选版本，要求插件管理员权限。服务每 2 秒检查目录内容指纹，变化只会在 `GET /api/plugins` 的 `hot_reload.update_available` 中标记待更新，不会自动加载候选插件库或改动数据面。手动应用会先复制稳定快照并校验 manifest、插件库、UI 和 eBPF object，再执行 reconcile 和数据面分发；失败返回 `5xx` 并保留上一份已应用快照。`hot_reload.applied_fingerprint*` 和 `detected_fingerprint*` 分别表示运行中版本与源目录候选版本，二者不同即存在待更新。常规文件使用受限 SHA256 内容 hash，超大文件只纳入路径、大小和 mtime 等元数据
 - `GET /api/plugins/<id>/state`：读取外部插件的持久启用状态和当前 catalog 中的插件视图。内置 `veer_core` 不支持该接口
-- `POST|PUT /api/plugins/<id>/state`：设置外部插件启用状态，两个方法语义相同且都要求插件管理员权限。请求体为 `{"enabled":true}` 或 `{"enabled":false}`。禁用会热卸载该插件 runtime surface，停止 Goja control VM、timer、worker，移除 TC pipeline hook，并停止该插件贡献的 `forward_rule_plans`、`egress_nat_plans`、`dhcpv4_plans` 和 `ipv6_assignment_plans` synthetic runtime；插件自身资源记录会保留，重新启用后继续使用
+- `POST|PUT /api/plugins/<id>/state`：设置外部插件启用状态，两个方法语义相同且都要求插件管理员权限。请求体为 `{"enabled":true}` 或 `{"enabled":false}`。禁用会热卸载该插件 runtime surface，停止插件实例和 timer，移除 TC pipeline hook，并停止该插件贡献的 `forward_rule_plans`、`egress_nat_plans`、`dhcpv4_plans` 和 `ipv6_assignment_plans` synthetic runtime；插件自身资源记录会保留，重新启用后继续使用
 - `GET|HEAD /api/plugins/<id>/assets/<path>`：读取已启用插件注册的静态资源；两个方法都只要求普通 Bearer Token
-- `GET /api/plugins/<id>/resources/<resource>`：列出 `control.js` 注册且允许 `list` 的资源记录，并返回该资源的 `runtime_status`。支持 `limit` 和 `offset` 查询参数，默认 `limit=1000`，最大 `limit=5000`；响应包含 `total/limit/offset/has_more`
-- `GET /api/plugins/<id>/resources/<resource>/<key>`：读取 `control.js` 注册且允许 `get` 的单条记录
-- `POST /api/plugins/<id>/resources/<resource>`：创建 `control.js` 注册且允许 `create` 的记录，请求体为 `{"key":"optional","data":{...},"enabled":true}`；未提供 `key` 时由服务生成。成功响应包含记录本身和该资源的 `runtime_status`
-- `PUT /api/plugins/<id>/resources/<resource>/<key>`：更新 `control.js` 注册且允许 `update` 的记录。成功响应包含记录本身和该资源的 `runtime_status`。资源数据会按 canonical JSON 存储，字段顺序不构成变更；资源注册了 `secret_fields` 时，更新请求中缺省的 secret 字段或值为 `__redacted__` 的 secret 字段会保留旧值，显式传入空字符串才会清空该字段；如果 `data/enabled` 语义不变且当前 runtime status 不是 `error`，该请求是 no-op，不会 bump revision 或重复 runtime apply；如果当前 runtime status 是 `error`，相同 payload 仍会重试 runtime apply
-- `DELETE /api/plugins/<id>/resources/<resource>/<key>`：删除 `control.js` 注册且允许 `delete` 的记录。成功响应包含 `status=deleted` 和该资源的 `runtime_status`
-- `control_methods`：资源可选字段，只影响本插件 Goja 控制脚本的 `resources.*` 权限校验；HTTP/UI 资源 API 和跨插件 `plugins.resources.*` 都只看目标资源的 `methods`。未声明 `control_methods` 时按 `methods` 处理。生产插件可用它把 `status`、`egress_nat_plans` 等派生资源对外和对其他插件设为只读，同时允许自身控制脚本维护。
-- `POST /api/plugins/<id>/actions/<action>`：执行 `control.js` 注册的动作，请求体为 `{"payload":{...}}`。请求会先按 Action 的 `request_schema` 校验；`runtime_update=runtime_query` 的动作会把通过 `response_schema` 校验的 `exports.onAction(ctx)` JSON 返回值放入响应 `result`，且不写 action runtime status、不触发 core 重分发
+- `GET /api/plugins/<id>/resources/<resource>`：列出插件注册且允许 `list` 的资源记录，并返回该资源的 `runtime_status`。支持 `limit` 和 `offset` 查询参数，默认 `limit=1000`，最大 `limit=5000`；响应包含 `total/limit/offset/has_more`
+- `GET /api/plugins/<id>/resources/<resource>/<key>`：读取插件注册且允许 `get` 的单条记录
+- `POST /api/plugins/<id>/resources/<resource>`：创建插件注册且允许 `create` 的记录，请求体为 `{"key":"optional","data":{...},"enabled":true}`；未提供 `key` 时由服务生成。成功响应包含记录本身和该资源的 `runtime_status`
+- `PUT /api/plugins/<id>/resources/<resource>/<key>`：更新插件注册且允许 `update` 的记录。成功响应包含记录本身和该资源的 `runtime_status`。资源数据会按 canonical JSON 存储，字段顺序不构成变更；资源注册了 `secret_fields` 时，更新请求中缺省的 secret 字段或值为 `__redacted__` 的 secret 字段会保留旧值，显式传入空字符串才会清空该字段；如果 `data/enabled` 语义不变且当前 runtime status 不是 `error`，该请求是 no-op，不会 bump revision 或重复 runtime apply；如果当前 runtime status 是 `error`，相同 payload 仍会重试 runtime apply
+- `DELETE /api/plugins/<id>/resources/<resource>/<key>`：删除插件注册且允许 `delete` 的记录。成功响应包含 `status=deleted` 和该资源的 `runtime_status`
+- `control_methods`：资源可选字段，只影响本插件控制面的 `resources.*` 权限校验；HTTP/UI 资源 API 和跨插件 `plugins.resources.*` 都只看目标资源的 `methods`。未声明 `control_methods` 时按 `methods` 处理。生产插件可用它把 `status`、`egress_nat_plans` 等派生资源对外和对其他插件设为只读，同时允许自身控制脚本维护。
+- `POST /api/plugins/<id>/actions/<action>`：执行插件注册的动作，请求体为 `{"payload":{...}}`。请求会先按 Action 的 `request_schema` 校验；`runtime_update=runtime_query` 的动作会把通过 `response_schema` 校验的 `onAction` handler JSON 返回值放入响应 `result`，且不写 action runtime status、不触发 core 重分发
 - 上述资源 CRUD 和 Action 接口只要求普通 Bearer Token，并由目标资源的 `methods` 或 Action 注册 surface 决定是否允许；它们不要求 `X-Veer-Plugin-Admin`
 - `GET /api/plugins/<id>/logs?level=<level>&limit=<n>&before_id=<id>`：读取该插件持久化的结构化日志，最新记录优先。`level` 可选 `debug/info/warn/error`，`limit` 为 `1..500`；`before_id` 是正整数游标，用当前页最后一项的 `sequence` 读取更早记录。正常持久化部署中，响应的 `state.entries` 是当前保留记录数，`state.dropped` 是运行时速率限制丢弃量，`state.persistence_dropped` 是异步持久化队列丢弃量。日志字段会递归脱敏，异步批量写入 SQLite，服务重启后仍可查询已提交记录
 
@@ -438,7 +541,7 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - 其余混合读写路由按方法校验：`POST|DELETE /api/plugin-trust`、`POST|DELETE /api/plugin-repositories`、`PUT|DELETE /api/plugin-repository-policies`、`POST /api/plugin-secrets` 和 `POST|PUT /api/plugins/<id>/state` 要求插件管理员权限；这些路由的 `GET` 只要求普通 Bearer Token
 - 包 history/provenance/probation、仓库 catalog/updates、audit、dead-letter 列表和插件 logs 也只要求普通 Bearer Token
 
-- `POST /api/plugin-packages/stage`：上传由 `veer plugin sign` 生成的单文件 `.veerpkg`，或未签名的 `.tar.gz`，并执行有界解包、manifest/control/UI/object、兼容性、依赖、签名和权限差异预检。请求体是原始包字节，不是 JSON；payload 最大 32 MiB，`.veerpkg` 只允许固定的 `package.tar.gz` 与 `signature.json` 成员。服务端从容器内验证 payload SHA256、Ed25519 签名、signer ID 和公钥，外置的 `X-Veer-Plugin-Signer`、`X-Veer-Plugin-Public-Key`、`X-Veer-Plugin-Signature` 会被拒绝。未知、已撤销或超出授权范围的发布者不会阻止预检，但应用时需要明确批准。成功返回一次性 `stage.id`、候选版本、`signed/trusted/publisher_status`、发布者指纹、权限摘要、新增权限、依赖/冲突和运行时表面；stage 24 小时后过期，预检本身不会替换运行中插件。联合升级时传 `?defer_relationships=true`，仍会执行包、签名、权限、Goja surface 和宿主兼容性校验，但把依赖/冲突的最终判断延迟到批量应用
+- `POST /api/plugin-packages/stage`：上传由 `veer plugin sign` 生成的单文件 `.veerpkg`，或未签名的 `.tar.gz`，并执行有界解包、manifest/control/UI/object、兼容性、依赖、签名和权限差异预检。请求体是原始包字节，不是 JSON；payload 最大 32 MiB，`.veerpkg` 只允许固定的 `package.tar.gz` 与 `signature.json` 成员。服务端从容器内验证 payload SHA256、Ed25519 签名、signer ID 和公钥，外置的 `X-Veer-Plugin-Signer`、`X-Veer-Plugin-Public-Key`、`X-Veer-Plugin-Signature` 会被拒绝。未知、已撤销或超出授权范围的发布者不会阻止预检，但应用时需要明确批准。成功返回一次性 `stage.id`、候选版本、`signed/trusted/publisher_status`、发布者指纹、权限摘要、新增权限、依赖/冲突和运行时表面；stage 24 小时后过期，预检本身不会替换运行中插件。联合升级时传 `?defer_relationships=true`，仍会执行包、签名、权限、注册 surface 和宿主兼容性校验，但把依赖/冲突的最终判断延迟到批量应用
 - `POST /api/plugin-packages/apply`：应用已预检候选，请求体为 `{"stage_id":"...","approved_privilege_digest":"...","approve_unsigned":false,"approve_publisher":false,"remember_publisher":false}`。允许未签名包的开发策略下，未签名候选必须设置 `approve_unsigned=true`；有效签名但发布者未知、已撤销或超出授权范围时必须设置 `approve_publisher=true`。`remember_publisher=true` 仅适用于首次出现且签名有效的发布者，会在同一安装操作中按当前插件 ID、权限、执行层级和稳定级别创建最小信任范围；应用失败会移除该新建记录。存在新增权限时必须原样回传本次 stage 的 `privilege_digest`。服务会再次校验源版本、候选指纹、签名和权限表面，避免 stage 后被替换
 - `POST /api/plugin-packages/apply-batch`：原子应用 1 至 16 个候选，请求体为 `{"stages":[<apply request>,...]}`。服务拒绝重复插件，统一解析最终 catalog 的版本依赖、冲突、循环和宿主兼容性，再通过持久 batch journal 切换全部目录；整批只执行一次 runtime reconcile 和一次 Worker 分发。运行时、资源 migration 或任一目录切换失败会恢复整批旧版本；重启恢复会依据 journal 阶段整批回滚或完成提交。`defer_relationships` stage 不能通过单包 `/apply` 应用
 - `GET /api/plugin-packages/history?plugin_id=<id>`：读取某插件最多 10 项本地包历史，用于审计和回滚
@@ -462,9 +565,9 @@ X-Veer-Plugin-Admin: your-separate-plugin-admin-token
 - `plugins_enabled=true` 且 `plugins_remote_install_enabled=true` 时宿主每 `plugins_repository_refresh_minutes` 分钟在独立后台循环刷新所有 TUF 仓库，默认 360、范围 15 至 10080。刷新只更新 metadata/catalog/撤销状态，不创建 stage；任一开关关闭时不刷新
 - 包管理全局数量和磁盘配额由 `plugins_max_installed`、`plugins_max_staged`、`plugins_storage_limit_mb` 控制。超限前会清理最旧且未被 probation 引用的历史；仍不足时写接口返回冲突/参数错误，不影响运行中的插件
 
-资源和动作都必须先由 `control.js` 注册。资源数据以 canonical JSON 存储在 SQLite，`max_record_bytes` 按 canonical 后的存储大小计算，`secret_fields` 会在 API 返回时脱敏，并在 HTTP update 时支持“保留脱敏旧值”的表单语义；`runtime_update=manual` 只标记 pending，`plugin_reconcile` 触发插件运行时重算，`runtime_apply` 调用宿主数据面实现的运行时更新接口。动作还可声明 `runtime_query`，用于不落 action runtime status 的瞬时结果，返回 JSON 上限为 64 KiB；它不会额外限制控制脚本原有权限，插件仍应自行保证查询动作无副作用。运行时更新失败会写入 `runtime_status.status=error` 和 `last_error`，不会让插件 UI 直接拿到 Web Token。资源写接口会先提交 SQLite；如果随后的运行时应用失败，响应会使用 `5xx` 并返回已落库记录、`error`、`runtime_error` 和 `runtime_status`，调用方应按“配置已保存但运行时未生效”处理，避免盲目重试创建导致 key 冲突。动作执行失败同样返回 `5xx`、`error`、`runtime_error` 和 `runtime_status`，用于插件 UI 展示具体失败状态。
+资源和动作都必须先由插件注册。资源数据以 canonical JSON 存储在 SQLite，`max_record_bytes` 按 canonical 后的存储大小计算，`secret_fields` 会在 API 返回时脱敏，并在 HTTP update 时支持“保留脱敏旧值”的表单语义；`runtime_update=manual` 只标记 pending，`plugin_reconcile` 触发插件运行时重算，`runtime_apply` 调用宿主数据面实现的运行时更新接口。动作还可声明 `runtime_query`，用于不落 action runtime status 的瞬时结果，返回 JSON 上限为 64 KiB；它不会额外限制插件原有权限，插件仍应自行保证查询动作无副作用。运行时更新失败会写入 `runtime_status.status=error` 和 `last_error`，不会让插件 UI 直接拿到 Web Token。资源写接口会先提交 SQLite；如果随后的运行时应用失败，响应会使用 `5xx` 并返回已落库记录、`error`、`runtime_error` 和 `runtime_status`，调用方应按“配置已保存但运行时未生效”处理，避免盲目重试创建导致 key 冲突。动作执行失败同样返回 `5xx`、`error`、`runtime_error` 和 `runtime_status`，用于插件 UI 展示具体失败状态。
 
-Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一个持久 Goja VM，`control.js` 顶层只在注册/初始化时执行一次，顶层变量会在 `onReconcile/onResourceApply/onAction/onTimer` 之间保留；同一插件主控制事件仍串行执行，避免并发改写 KV、netlink 或 runtime status。`onEBPFStateMigrate` 也在主 VM 串行执行，但进入独立 `dataplane_migration` phase，仅允许本插件 `ebpf.map_read/map_write`、日志和只读 Host 信息。声明 `control.permissions=["worker"]` 后，可用 `worker.call(name, handler, payload)` 同步调用命名 worker VM，或用 `worker.dispatch(name, handler, payload)` 异步投递长任务；worker VM 同样保留顶层变量，但只在控制面执行，不进入 TC/XDP 包热路径。声明 `control.permissions=["resource"]` 后，可用 `resources.set(resourceID, key, data, enabled, apply)` 和 `resources.delete(resourceID, key, apply)` 写入/删除本插件已注册资源；本插件资源访问会校验 `control_methods`（未声明则按 `methods` 处理），写入/删除会更新该资源的 `runtime_status`，`apply=true` 时会按该资源的 `runtime_update` 立即应用。声明 `control.permissions=["plugin.resource"]` 后，还必须在 `control.resource_access` 中逐项声明允许访问的目标插件、资源和方法，才可使用 `plugins.resources.get(pluginID, resourceID, key)`、`plugins.resources.list(pluginID, resourceID, options)`、`plugins.resources.set(pluginID, resourceID, key, data, enabled, apply)` 和 `plugins.resources.delete(pluginID, resourceID, key, apply)` 读取、写入或删除其他插件已注册资源；跨插件访问仍会校验目标资源的公开 `methods`、`max_records` 和 `max_record_bytes`，不会因为目标资源声明了 `control_methods` 而获得额外写权限。`resources.list(resourceID, options)`、`plugins.resources.list(..., options)` 和 `kv.list(options)` 的 `options` 支持 `{limit, offset}`，默认 `limit=1000`，最大 `limit=5000`；需要全量处理大量记录时应按页循环读取。`get/list` 返回的记录结构和本插件 `resources.get/list` 一致，且跨插件目标资源必须在 `methods` 中允许对应操作；跨插件 `get/list/set` 的返回值会按目标资源 `secret_fields` 脱敏，不会把目标插件密钥原文返回给调用方；`set` 是 upsert，调用方白名单和目标资源 `methods` 都必须同时允许 `create` 与 `update`；`delete` 要求目标资源 `methods` 允许 `delete`。`plugins.services.list/resolve/call` 在这些白名单之上提供带版本的服务发现和动作调用，只返回已授权端点；服务发现本身不会产生新的权限。`apply=true` 时，会按目标资源的 `runtime_update` 使用和 HTTP API 一致的应用流程并更新目标资源的 `runtime_status`；运行时失败会写入目标资源 `runtime_status.status=error` 和 `last_error`。`apply=false` 时，相同 `data/enabled` 的 set 和缺失 key 的 delete 是 no-op，不会重复 bump record revision 或 runtime status。未声明对应权限或白名单时调用会被拒绝。声明 `crypto` 后可使用 `crypto.md5()`、`crypto.randomBytes()` 和 `crypto.sha256File(relativePath)`；`sha256File` 只能读取本插件目录内文件，适合 stable/preview 插件在注册 eBPF object 或 UI 入口时声明当前构建产物 hash。声明 `blob` 后可使用私有、原子、受配额且纳入 backup/restore 的二进制对象存储；它不跨插件共享，也不替代加密 Secret。声明 `net.admin` 后可使用 `net.link.ensureVeth/ensureBridge/setMaster/clearMaster/delete/setUp/setMTU/getOffloads/setOffloads`、`net.addr.replace/delete`、`net.route.replace/delete`、`net.neigh.list` 和 `net.bridge.fdb.list` 管理或读取受控 Linux 网络状态；后两项分别要求 `neigh.read` 与 `bridge.fdb.read`，只返回显式接口下的有界快照。声明 `net.namespace/net.tuntap` 后可经父进程 broker 管理命名 namespace 与 TUN/TAP，但不会获得 `setns`、`/dev/net/tun` 或 FD。非 Linux 平台会返回不支持错误。每个插件最多保留 64 个命名 timer 和 16 个命名 worker，超限时本批 timer 更新或 worker 启动会被拒绝。
+插件控制面默认只能访问本插件资源。每个插件在 worker 进程中持有一个实例，实例状态在 `onReconcile/onResourceApply/onAction/onTimer` 等 handler 之间保留；同一插件主控制事件串行执行，避免并发改写 KV、netlink 或 runtime status。`onEBPFStateMigrate` 也在主实例串行执行，但进入独立 `dataplane_migration` phase，仅允许本插件 `ebpf.map_read/map_write`、日志和只读 Host 信息。声明 `control.permissions=["worker"]` 后，可用 `worker.call(name, handler, payload)` 同步调用一个 handler，或用 `worker.dispatch(name, handler, payload)` 把长任务异步投递到该插件的另一个实例；它们只在控制面执行，不进入 TC/XDP 包热路径。声明 `control.permissions=["resource"]` 后，可用 `resources.set(resourceID, key, data, enabled, apply)` 和 `resources.delete(resourceID, key, apply)` 写入/删除本插件已注册资源；本插件资源访问会校验 `control_methods`（未声明则按 `methods` 处理），写入/删除会更新该资源的 `runtime_status`，`apply=true` 时会按该资源的 `runtime_update` 立即应用。声明 `control.permissions=["plugin.resource"]` 后，还必须在 `control.resource_access` 中逐项声明允许访问的目标插件、资源和方法，才可使用 `plugins.resources.get(pluginID, resourceID, key)`、`plugins.resources.list(pluginID, resourceID, options)`、`plugins.resources.set(pluginID, resourceID, key, data, enabled, apply)` 和 `plugins.resources.delete(pluginID, resourceID, key, apply)` 读取、写入或删除其他插件已注册资源；跨插件访问仍会校验目标资源的公开 `methods`、`max_records` 和 `max_record_bytes`，不会因为目标资源声明了 `control_methods` 而获得额外写权限。`resources.list(resourceID, options)`、`plugins.resources.list(..., options)` 和 `kv.list(options)` 的 `options` 支持 `{limit, offset}`，默认 `limit=1000`，最大 `limit=5000`；需要全量处理大量记录时应按页循环读取。`get/list` 返回的记录结构和本插件 `resources.get/list` 一致，且跨插件目标资源必须在 `methods` 中允许对应操作；跨插件 `get/list/set` 的返回值会按目标资源 `secret_fields` 脱敏，不会把目标插件密钥原文返回给调用方；`set` 是 upsert，调用方白名单和目标资源 `methods` 都必须同时允许 `create` 与 `update`；`delete` 要求目标资源 `methods` 允许 `delete`。`plugins.services.list/resolve/call` 在这些白名单之上提供带版本的服务发现和动作调用，只返回已授权端点；服务发现本身不会产生新的权限。`apply=true` 时，会按目标资源的 `runtime_update` 使用和 HTTP API 一致的应用流程并更新目标资源的 `runtime_status`；运行时失败会写入目标资源 `runtime_status.status=error` 和 `last_error`。`apply=false` 时，相同 `data/enabled` 的 set 和缺失 key 的 delete 是 no-op，不会重复 bump record revision 或 runtime status。未声明对应权限或白名单时调用会被拒绝。声明 `crypto` 后可使用 `crypto.md5()`、`crypto.randomBytes()` 和 `crypto.sha256File(relativePath)`；`sha256File` 只能读取本插件目录内文件，适合插件校验自己随附的文件。声明 `blob` 后可使用私有、原子、受配额且纳入 backup/restore 的二进制对象存储；它不跨插件共享，也不替代加密 Secret。声明 `net.admin` 后可使用 `net.link.ensureVeth/ensureBridge/setMaster/clearMaster/delete/setUp/setMTU/getOffloads/setOffloads`、`net.addr.replace/delete`、`net.route.replace/delete`、`net.neigh.list` 和 `net.bridge.fdb.list` 管理或读取受控 Linux 网络状态；后两项分别要求 `neigh.read` 与 `bridge.fdb.read`，只返回显式接口下的有界快照。声明 `net.namespace/net.tuntap` 后可经主进程管理命名 namespace 与 TUN/TAP，但不会获得 `setns`、`/dev/net/tun` 或 FD。非 Linux 平台会返回不支持错误。每个插件最多保留 64 个命名 timer 和 16 个命名 worker，超限时本批 timer 更新或 worker 启动会被拒绝。
 
 事件 API 使用 `event` 权限；订阅必须同时有 `worker`。自定义发布 topic 被固定为 `plugin.<本插件 ID>.*`。跨插件订阅还必须声明 `plugin.event` 和 `control.event_access=[{"plugin":"source","topic_prefixes":["plugin.source.topic"]}]`，运行时同时校验来源插件与 topic 前缀。`events.publish()` 返回 `{matched,enqueued,persisted,deferred,dropped,rejected}`；投递异步执行，`enqueued/persisted` 不等于 handler 已完成。订阅默认是进程内 `volatile`；设置 `delivery="durable"` 后会先写 SQLite，失败按 `retry_delay_ms` 指数退避，达到 `max_attempts` 后转为死信。插件只能管理自己的死信且不能丢弃 pending；管理员接口可跨插件查询、重试和确认丢弃并记录审计。系统事件包括 `net.link`、`net.addr`、`net.neigh`、`net.route`、`resource.changed` 和 `plugin.lifecycle`。网络事件复用 `net.admin + net_access(link.read)` 过滤；多路径路由要求所有相关接口均被授权。
 
@@ -480,7 +583,7 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
 
 控制面内置存储有固定或可配置配额：每个插件最多 1024 条 `kv` 记录，单条 KV canonical JSON 最大 64 KiB；每个插件最多 128 条 `secret` 记录，单条 secret 最大 4 KiB；Blob 默认每对象 64 MiB、每插件 1024 个/256 MiB、全局 2 GiB，单次 IPC 分块最大 1 MiB；插件日志单行会截断到 4 KiB；每个插件最多 64 个命名 timer 和 16 个命名 worker，单个 timer payload 最大 16 KiB，单次 worker payload/result 最大 1 MiB。
 
-`__kv` 和 `__secret` 是 Goja 控制面内部资源名，插件不能通过 `plugin.resource()` 或 `control.resource_access` 声明它们；HTTP 插件资源 API 和插件 UI RPC 只暴露 `control.js` 显式注册的业务资源。
+`__kv` 和 `__secret` 是控制面内部资源名，插件不能通过 `plugin.resource()` 或 `control.resource_access` 声明它们；HTTP 插件资源 API 和插件 UI RPC 只暴露插件显式注册的业务资源。
 
 `ebpf.mapPut/mapDelete/mapClear` 只能写插件自己的配置 map。共享运行时 map（包括 `tc_prog_chain_v4`、`tc_plugin_ctx_v4`、`tc_plugin_ctx_v6`、`tc_plugin_metrics`、`xdp_prog_chain`）被保留，即使插件声明了 `ebpf.map_write` 也不能写入、删除或清空。`mapClear` 只允许清空 `max_entries <= 16384` 的 map；array/per-CPU array 会原位清零，其他 map 删除现有 key。更大的配置表应由插件按 key 分批删除。`ebpf.mapGetPerCPU` 返回按 possible CPU 排列且移除对齐 padding 的十六进制 value 数组，供插件聚合 per-CPU 统计。`ebpf.mapScan(object, map, {cursor,limit,max_bytes})` 对普通 key/value map 提供 best-effort 游标读取，单次 `limit <= 256`、原始 key/value 合计不超过 1 MiB；完成时 `done=true` 且 `cursor=""`。
 
@@ -764,6 +867,12 @@ Goja 控制脚本默认只能访问本插件资源。每个插件默认持有一
   "available": true,
   "available_reason": "selected tc kernel engine",
   "kernel_capabilities": {},
+  "kernel_xdp_native": {
+    "available": true,
+    "devices": [
+      {"name": "eno1", "ifindex": 3, "type": "device", "native": true, "redirect_target": false, "features": ["basic", "redirect", "xsk-zerocopy"]}
+    ]
+  },
   "default_engine": "auto",
   "configured_order": ["tc", "xdp"],
   "traffic_stats": true,
@@ -808,6 +917,10 @@ TC 连接缓存的字段同样分两层：顶层 `kernel_tc_flow_cache` 是配�
 - 占用率达到 50%、70%、85% 时依次进入 `moderate/high/critical`；回落到 45%、65%、80% 以下才退出对应档位，避免阈值附近抖动
 
 `kernel_helper_module` 描述可选的 `veer_kfuncs` 模块：`compiled`、`loaded`、`available`、`reason`，以及安装状态 `kernel_release`（运行中内核）、`module_path`（该内核的模块路径）、`module_installed`、`other_module_releases`（已有模块但未运行的内核，通常是升级前的版本）。二进制带模块支持、模块未加载且当前内核没有模块文件时：若已为其他内核安装过模块（通常是内核升级后），`reason` 说明缺少哪个版本，`rebuild_command` 给出主机上的 `veer kfuncs build` 命令，WebUI 内核运行时页显示可关闭的提示；从未安装过模块时 `reason` 为 `not installed`，不给重建命令也不提示。两种情况数据面都使用基础路径。模块已加载且当前内核有模块文件时，`loaded_srcversion` 与 `installed_srcversion` 是两者的 srcversion，`loaded_matches_installed` 表示是否同一份源码（任一方缺少 srcversion 时省略）；不一致时 `reload_hint` 说明热更新会保留已加载模块，需要完整重启才加载新文件。
+
+`kernel_capabilities` 是进程启动时探测一次的主机能力，其中 `tc` 是 clsact + cls_bpf 挂载，`tcx_attach` 是 Linux 6.6 起的 tcx 挂载（可用时 TC 引擎优先用它，实际用的是哪种见 TC 引擎的 `attachment_api`），`xdp_generic` 是在 `lo` 上以 generic 模式试挂的结果。
+
+native XDP 取决于每块网卡的驱动，单独放在 `kernel_xdp_native`：Linux 6.3 起通过 netdev netlink 只读获取每个接口（不含 `lo`）的 XDP 特性，不挂任何程序。`native` 表示驱动能直接运行 XDP 程序；`redirect_target` 表示其他接口上的 XDP 程序能把包重定向到它，Intel igb/ixgbe/i40e 等驱动只在自身挂上 XDP 程序后才报告这一项；`features` 是内核报告的全部标志。更早的内核 `available` 为 `false`，`reason` 说明原因，XDP 引擎仍在挂载时先试 native。XDP 引擎的 `attachment_mode` 是实际挂载结果：`driver`、`generic` 或 `mixed`。
 
 它还会包含大量调试字段，例如：
 
@@ -964,7 +1077,7 @@ curl -fsS -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8080/debug/pprof/g
 用途：
 
 - 枚举内置 `veer_core` 插件及 `veer` pipeline 描述
-- 枚举 `plugins_dir` 下外部插件 slim manifest 和 `control.js` 注册 surface
+- 枚举 `plugins_dir` 下外部插件 slim manifest 和注册 surface
 - 暴露插件 manifest / 注册 surface 校验错误，避免启动失败
 - 给后续插件管理 UI 或外部控制台做能力发现
 
@@ -974,12 +1087,11 @@ curl -fsS -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8080/debug/pprof/g
 - 外部插件目录缺失不会报错
 - `plugins_enabled = false` 是默认值，只关闭外部插件扫描和运行，不隐藏内置 `veer_core`；必须手动设为 `true` 才会启动外部插件控制面
 - `plugins_dataplane_enabled = false` 是默认值；同时将 `plugins_enabled` 和该项设为 `true` 后，才允许外部 TC/XDP 插件进入接口 pipeline，或由宿主加载 Netfilter 原生 Hook link
-- `plugins_isolation = true` 是默认值；主控制 VM 与每个命名 Worker 使用独立持久子进程。仅受信任的本地调试才应关闭该项
-- `plugins_min_sandbox_level = "full"` 是默认值；Host 或硬资源限制达不到要求时会在执行控制脚本前拒绝插件。旧内核/Windows 调试必须显式降低该值
+- `plugins_min_sandbox_level = "full"` 是默认值；插件托管进程（`process.start`）无法建立 cgroup 资源限制时拒绝启动。旧内核调试可显式降低该值
 - `plugins_require_signed_packages = true` 是默认值；包管理器不会接受 `approve_unsigned` 覆盖，但任何携带自包含公钥且签名有效的 v2 包都可在审核发布者状态后应用，不要求预先写入 trust store；受校验历史和 TUF target 同样可应用
 - `plugins_remote_install_enabled = false` 是默认值；WebUI 隐藏添加插件、代码更新、回滚、卸载、仓库和发布者管理入口。`runtime.remote_install_enabled`、`runtime.exec_enabled` 以及 `GET /api/plugin-admin/status` 中的同名字段用于发现当前策略。远程安装开启时 `exec_enabled=false`；不提供切换模式的 WebUI 或插件 API
-- 外部插件可通过 `POST|PUT /api/plugins/<id>/state` 热启用/禁用，这两个写方法都要求插件管理员权限；禁用状态会持久化，重启后仍生效。禁用不会删除插件资源记录，但会停止 Goja VM、timer、worker、UI/assets/API surface、TC/XDP/Netfilter Hook，以及插件生成的 synthetic forward、Egress NAT、DHCPv4 和 IPv6 assignment plan
-- 插件源目录每 2 秒扫描一次，变化只标记待更新；远程安装开启时可通过 `POST /api/plugins/reload` 校验并应用候选快照。关闭时请在本机部署并重启服务加载更新。应用失败时旧 control VM、静态资源和数据面保持运行。常规文件使用受限 SHA256 内容 hash，超大文件只纳入元数据
+- 外部插件可通过 `POST|PUT /api/plugins/<id>/state` 热启用/禁用，这两个写方法都要求插件管理员权限；禁用状态会持久化，重启后仍生效。禁用不会删除插件资源记录，但会停止插件实例、timer、UI/assets/API surface、TC/XDP/Netfilter Hook，以及插件生成的 synthetic forward、Egress NAT、DHCPv4 和 IPv6 assignment plan
+- 插件源目录每 2 秒扫描一次，变化只标记待更新；远程安装开启时可通过 `POST /api/plugins/reload` 校验并应用候选快照。关闭时请在本机部署并重启服务加载更新。应用失败时旧插件实例、静态资源和数据面保持运行。常规文件使用受限 SHA256 内容 hash，超大文件只纳入元数据
 - 通过 `ebpf.loadObject()` 注册对象的外部插件会校验对象存在性、路径边界、可选 sha256、program section/type 和 hook 引用；校验失败时该插件返回 `status=error`
 - 插件静态资源路径为 `/api/plugins/<id>/assets/`，同样需要 Bearer Token
 - `runtime.external_dataplane_attach=false` 表示外部插件不会被加载进数据面；`true` 表示允许可信 TC/XDP/Netfilter object 按各自 placement 契约加载。TC ABI v2 对象必须声明共享 `tc_prog_chain_v4`，Netfilter object 则直接挂原生 `bpf_link`，不使用 TC prog-array。不会自动挂载未声明的接口、Hook 或 namespace，生产环境应只对可信对象启用

@@ -41,6 +41,7 @@ def run_scenario(
     plugin_admin_token: str = STRONG_ADMIN_TOKEN,
     plugin_admin_token_explicit: bool = False,
     web_tls: Optional[bool] = None,
+    web_auth_realms: Optional[str] = None,
     expected_exit: int = 0,
     expected_error_field: str = "",
 ) -> Optional[dict]:
@@ -69,6 +70,8 @@ def run_scenario(
             "FORWARD_DEPLOY_PLUGIN_ADMIN_TOKEN": plugin_admin_token,
             "FORWARD_DEPLOY_EXPLICIT_WEB_TLS": "0" if web_tls is None else "1",
             "FORWARD_DEPLOY_WEB_TLS": "false" if web_tls is False else "true",
+            "FORWARD_DEPLOY_EXPLICIT_WEB_AUTH_REALMS": "0" if web_auth_realms is None else "1",
+            "FORWARD_DEPLOY_WEB_AUTH_REALMS": "system,token" if web_auth_realms is None else web_auth_realms,
             "PYTHONUTF8": "1",
         }
     )
@@ -139,6 +142,30 @@ def main() -> None:
             dict(local, web_tls="yes"),
             expected_exit=1,
             expected_error_field="web_tls",
+        )
+
+        # Web login realms follow the web_tls policy: a new install signs in
+        # with system accounts or the token, a config from before the setting
+        # keeps token sign-in only, and WEB_AUTH_REALMS overrides both.
+        result = run_scenario(script, root, "new-realms-default", None)
+        assert result is not None and result["web_auth_realms"] == ["system", "token"], result
+        result = run_scenario(script, root, "legacy-realms-token-only", legacy)
+        assert result is not None and result["web_auth_realms"] == ["token"], result.get("web_auth_realms")
+        result = run_scenario(script, root, "existing-realms-kept", dict(local, web_auth_realms=["system"]))
+        assert result is not None and result["web_auth_realms"] == ["system"], result.get("web_auth_realms")
+        result = run_scenario(script, root, "existing-opts-into-system", local, web_auth_realms="System, token")
+        assert result is not None and result["web_auth_realms"] == ["system", "token"], result.get("web_auth_realms")
+        result = run_scenario(script, root, "new-token-only", None, web_auth_realms="token")
+        assert result is not None and result["web_auth_realms"] == ["token"], result.get("web_auth_realms")
+        run_scenario(script, root, "realms-unknown", None, web_auth_realms="pam", expected_exit=1, expected_error_field="WEB_AUTH_REALMS")
+        run_scenario(script, root, "realms-empty", None, web_auth_realms=" , ", expected_exit=1, expected_error_field="WEB_AUTH_REALMS")
+        run_scenario(
+            script,
+            root,
+            "existing-realms-invalid",
+            dict(local, web_auth_realms="system"),
+            expected_exit=1,
+            expected_error_field="web_auth_realms",
         )
 
         result = run_scenario(

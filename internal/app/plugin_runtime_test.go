@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	hv "github.com/Unicode01/veer/internal/hostvalue"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,8 +22,6 @@ import (
 	"time"
 
 	"github.com/Unicode01/veer/internal/store"
-
-	"github.com/dop251/goja"
 )
 
 func TestLoadPluginCatalogDefaultsToBuiltinVeerOnly(t *testing.T) {
@@ -114,33 +113,6 @@ func TestBundledStablePluginCatalogIsValid(t *testing.T) {
 		if plugin.Status != pluginStatusActive || plugin.Error != "" || plugin.Runtime.Mode == pluginRuntimeModeInvalid || plugin.Runtime.Mode == pluginRuntimeModeError {
 			t.Errorf("stable bundled plugin %q is not loadable: status=%s mode=%s error=%q reason=%q", plugin.ID, plugin.Status, plugin.Runtime.Mode, plugin.Error, plugin.Runtime.Reason)
 		}
-	}
-}
-
-func TestPluginControlRejectsInProcessRuntimeWhenSandboxIsRequired(t *testing.T) {
-	dir := t.TempDir()
-	writeTestPlugin(t, dir, "sandbox_required", `{
-  "api_version":"v1",
-  "id":"sandbox_required",
-  "name":"Sandbox Required",
-  "version":"1.0.0",
-  "kind":"control",
-  "stability":"lab",
-  "control":{"main":"control.js","permissions":["plugin.register"]}
-}`)
-	writePluginControlScript(t, dir, "sandbox_required", `throw new Error("control script must not execute");`)
-	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
-	cfg.PluginsMinSandboxLevel = pluginSandboxLevelFull
-	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
-	t.Cleanup(func() { _ = runtime.Close() })
-	snapshot := runtime.Reconcile(loadPluginCatalogWithState(cfg, db))
-	state, ok := snapshot.Plugins["sandbox_required"]
-	if !ok || state.Mode != pluginRuntimeModeError || state.Reason != "plugin sandbox admission failed" {
-		t.Fatalf("sandbox admission state = %+v", state)
-	}
-	if !strings.Contains(state.Error, "plugins_isolation=false") || strings.Contains(state.Error, "control script must not execute") {
-		t.Fatalf("sandbox admission error = %q", state.Error)
 	}
 }
 
@@ -2291,7 +2263,7 @@ exports.onTimer = function () {
 		PluginsDir: dir})
 
 	pm := &ProcessManager{db: db, cfg: cfg}
-	rt := newPluginControlRuntime(db, cfg, pm).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, pm).(*pluginControlManager)
 	pm.pluginControlRuntime = rt
 	defer rt.Close()
 	handler := buildAPIHandler(cfg, db, pm)
@@ -2461,7 +2433,7 @@ exports.onTimer = function () {
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	plugin := loadTestPluginByID(t, cfg, "control_plugin")
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	rt.Reconcile(loadPluginCatalogWithControlRegistrationAndState(cfg, db))
 	if !pluginControlVMExistsForTest(rt, "control_plugin") {
@@ -2586,7 +2558,7 @@ func TestPluginGojaControlRegistrationRejectsSideEffectAPIs(t *testing.T) {
 
 			db := openTestDB(t)
 			controller := &pluginControlMapControllerTest{}
-			rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), controller).(*gojaPluginControlRuntime)
+			rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), controller).(*pluginControlManager)
 			rt.netAdmin = &pluginControlNetAdminTest{}
 			t.Cleanup(func() { _ = rt.Close() })
 
@@ -2647,7 +2619,7 @@ exports.onAction = function () {
 
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 
 	catalog := loadPluginCatalogWithControlRegistrationAndState(cfg, db)
@@ -2715,7 +2687,7 @@ exports.onDeactivate = function (ctx) {
 
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	rt.Reconcile(loadPluginCatalogWithState(cfg, db))
 	if err := store.SetPluginEnabled(db, "control_plugin", false); err != nil {
@@ -2946,7 +2918,7 @@ func TestPluginCatalogDriftWaitsForManualApply(t *testing.T) {
 	}
 	pm.initializePluginCatalogSnapshot()
 	t.Cleanup(pm.cleanupPluginCatalogSnapshot)
-	rt := newPluginControlRuntime(db, cfg, pm).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, pm).(*pluginControlManager)
 	pm.pluginControlRuntime = rt
 	t.Cleanup(func() { _ = rt.Close() })
 
@@ -3061,7 +3033,7 @@ func TestPluginCatalogManualApplyRejectsBrokenCandidateAndKeepsAppliedSnapshot(t
 	pm := &ProcessManager{db: db, cfg: cfg, redistributeWake: make(chan struct{}, 1)}
 	pm.initializePluginCatalogSnapshot()
 	t.Cleanup(pm.cleanupPluginCatalogSnapshot)
-	rt := newPluginControlRuntime(db, cfg, pm).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, pm).(*pluginControlManager)
 	pm.pluginControlRuntime = rt
 	t.Cleanup(func() { _ = rt.Close() })
 	pm.reconcilePluginsForRuntime()
@@ -3126,7 +3098,7 @@ func TestPluginCatalogManualApplyKeepsUnchangedControlVM(t *testing.T) {
 	pm := &ProcessManager{db: db, cfg: cfg, redistributeWake: make(chan struct{}, 1)}
 	pm.initializePluginCatalogSnapshot()
 	t.Cleanup(pm.cleanupPluginCatalogSnapshot)
-	rt := newPluginControlRuntime(db, cfg, pm).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, pm).(*pluginControlManager)
 	pm.pluginControlRuntime = rt
 	t.Cleanup(func() { _ = rt.Close() })
 	pm.reconcilePluginsForRuntime()
@@ -3182,7 +3154,7 @@ func TestPluginCatalogManualApplySelectionLeavesOtherUpdatesPending(t *testing.T
 	pm := &ProcessManager{db: db, cfg: cfg, redistributeWake: make(chan struct{}, 1)}
 	pm.initializePluginCatalogSnapshot()
 	t.Cleanup(pm.cleanupPluginCatalogSnapshot)
-	rt := newPluginControlRuntime(db, cfg, pm).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, pm).(*pluginControlManager)
 	pm.pluginControlRuntime = rt
 	t.Cleanup(func() { _ = rt.Close() })
 	pm.reconcilePluginsForRuntime()
@@ -3582,7 +3554,7 @@ exports.onAction = function () {
 
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	catalog := loadPluginCatalogWithState(cfg, db)
 	applyPluginRuntimeSnapshot(&catalog, rt.Reconcile(catalog))
@@ -3672,7 +3644,7 @@ exports.onUpgradeRestore = function (ctx) {
 
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	catalog := loadPluginCatalogWithState(cfg, db)
 	applyPluginRuntimeSnapshot(&catalog, rt.Reconcile(catalog))
@@ -3792,7 +3764,7 @@ exports.onUpgradeRestore = function () {};
 `)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	catalog := loadPluginCatalogWithState(cfg, db)
 	applyPluginRuntimeSnapshot(&catalog, rt.Reconcile(catalog))
@@ -3873,7 +3845,7 @@ exports.onUpgradeRestore = function (ctx) { calls = (ctx.upgrade.state || {}).ca
 	writeVersion(1)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	catalog := loadPluginCatalogWithState(cfg, db)
 	applyPluginRuntimeSnapshot(&catalog, rt.Reconcile(catalog))
@@ -3950,7 +3922,7 @@ exports.onUpgradeRestore = function () {};
 `)
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	catalog := loadPluginCatalogWithState(cfg, db)
 	applyPluginRuntimeSnapshot(&catalog, rt.Reconcile(catalog))
@@ -4020,7 +3992,7 @@ exports.onAction = function () {
 
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	catalog := loadPluginCatalogWithState(cfg, db)
 	applyPluginRuntimeSnapshot(&catalog, rt.Reconcile(catalog))
@@ -4076,7 +4048,7 @@ exports.onAction = function () {
 
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	catalog := loadPluginCatalogWithState(cfg, db)
 	applyPluginRuntimeSnapshot(&catalog, rt.Reconcile(catalog))
@@ -4130,7 +4102,7 @@ exports.onReconcile = function () {
 
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	rt.Reconcile(loadPluginCatalogWithState(cfg, db))
 	if timers := rt.pluginTimerList("control_plugin"); len(timers) != 1 || timers[0]["name"] != "stale_timer" {
@@ -4281,7 +4253,7 @@ exports.onWorker = function () {
 }
 
 func TestPluginGojaWorkerQueueEnforcesPerPluginByteBudget(t *testing.T) {
-	rt := newPluginControlRuntime(nil, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(nil, pluginsEnabledTestConfig(&Config{}), nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 
 	reservations := make([]*pluginControlWorkerQueueReservation, 0, pluginControlWorkerMaxPendingBytes/pluginControlWorkerMaxPayloadBytes)
@@ -4344,7 +4316,7 @@ func TestPluginGojaWorkerQueueEnforcesPerPluginByteBudget(t *testing.T) {
 }
 
 func TestPluginGojaWorkerQueueEnforcesPerPluginRequestBudget(t *testing.T) {
-	rt := newPluginControlRuntime(nil, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(nil, pluginsEnabledTestConfig(&Config{}), nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 
 	reservations := make([]*pluginControlWorkerQueueReservation, 0, pluginControlWorkerMaxPending)
@@ -4371,7 +4343,7 @@ func TestPluginGojaWorkerQueueEnforcesPerPluginRequestBudget(t *testing.T) {
 }
 
 func TestPluginGojaWorkerQueueReservationReleasedWhenVMStops(t *testing.T) {
-	rt := newPluginControlRuntime(nil, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(nil, pluginsEnabledTestConfig(&Config{}), nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	vm := newPluginControlVM(rt, "stop_plugin", "test", "worker", "bg")
 	state := newPluginControlRequestState(time.Second)
@@ -4471,7 +4443,7 @@ exports.onWorker = function () {
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	plugin := loadTestPluginByID(t, cfg, "control_plugin")
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	enteredRecv := make(chan struct{}, 1)
 	releaseRecv := make(chan struct{})
 	var releaseOnce sync.Once
@@ -4579,7 +4551,7 @@ exports.onAction = function () {
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	plugin := loadTestPluginByID(t, cfg, "control_plugin")
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	enteredRecv := make(chan struct{}, 2)
 	releaseRecv := make(chan struct{})
 	var closeRelease sync.Once
@@ -4899,7 +4871,7 @@ exports.onResourceApply = function (ctx) {
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	runtime := newPluginControlRuntime(db, cfg, nil)
 	t.Cleanup(func() { _ = runtime.Close() })
-	controlRuntime, ok := runtime.(*gojaPluginControlRuntime)
+	controlRuntime, ok := runtime.(*pluginControlManager)
 	if !ok {
 		t.Fatal("plugin control runtime is not Goja-backed")
 	}
@@ -8031,7 +8003,7 @@ exports.onAction = function () {
 
 	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
 	controller := &pluginControlMapControllerTest{perCPUValues: [][]byte{{0x01, 0x02}, {0xa0, 0xb0}}}
-	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), controller).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), controller).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	result, err := rt.QueryPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`))
 	if err != nil {
@@ -8084,7 +8056,7 @@ exports.onAction = function () {
 			DroppedRecords: 1,
 		},
 	}
-	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), controller).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), controller).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	result, err := rt.QueryPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`))
 	if err != nil {
@@ -8135,7 +8107,7 @@ exports.onAction = function (ctx) {
 `)
 	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
 	controller := &pluginControlMapControllerTest{}
-	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), controller).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), controller).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	for _, test := range []struct {
 		payload string
@@ -8225,7 +8197,7 @@ exports.onAction = function () {
 
 func TestPluginGojaControlEBPFMapAPIRejectsUndeclaredObject(t *testing.T) {
 	host := &pluginControlHost{
-		vm: goja.New(),
+		vm: hv.New(),
 		plugin: LoadedPlugin{PluginManifest: PluginManifest{
 			ID: "control_plugin",
 		}, Objects: []PluginObject{{ID: "declared"}}},
@@ -8244,7 +8216,7 @@ func TestPluginGojaControlEBPFMapAPIRejectsUndeclaredObject(t *testing.T) {
 
 func TestPluginGojaControlEBPFMapAPIRejectsExplicitObjectWithoutRegisteredObjects(t *testing.T) {
 	host := &pluginControlHost{
-		vm: goja.New(),
+		vm: hv.New(),
 		plugin: LoadedPlugin{PluginManifest: PluginManifest{
 			ID: "control_plugin",
 		}},
@@ -8506,7 +8478,7 @@ exports.onAction = function () {
 `)
 
 	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
-	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*pluginControlManager)
 	err := rt.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`))
 	if err == nil || !strings.Contains(err.Error(), "permission crypto is required") {
 		t.Fatalf("ApplyPluginAction() error = %v, want crypto permission error", err)
@@ -8691,7 +8663,7 @@ exports.onAction = function () {
 `, pluginControlMaxTimersPerPlugin+1))
 
 	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
-	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	err := rt.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`))
 	if err == nil || !strings.Contains(err.Error(), "plugin timer limit reached") {
@@ -8805,7 +8777,7 @@ exports.onTimer = function () {
 
 	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	if err := rt.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("ApplyPluginAction() error = %v", err)
@@ -8877,7 +8849,7 @@ exports.onAction = function () {
 
 	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*pluginControlManager)
 	rt.l2Transport = &pluginControlL2TransportTest{
 		recvFrame: pluginControlL2Frame{
 			Interface: "eth0",
@@ -8975,7 +8947,7 @@ exports.onAction = function () {
 
 	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*pluginControlManager)
 	rt.l2Transport = &pluginControlL2TransportTest{
 		recvFrame: pluginControlL2Frame{
 			Interface: "eth0",
@@ -9075,7 +9047,7 @@ exports.onAction = function (ctx) {
 	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "stateful_l2_plugin")
 	db := openTestDB(t)
 	controller := &pluginControlMapControllerTest{}
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), controller).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), controller).(*pluginControlManager)
 	rt.l2Transport = &pluginControlL2TransportTest{
 		recvFrame: pluginControlL2Frame{
 			Interface: "eth0",
@@ -9139,7 +9111,7 @@ exports.onAction = function () {
 
 	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*pluginControlManager)
 	rt.l2Transport = &pluginControlL2TransportTest{recvErr: errPluginControlL2Timeout}
 	t.Cleanup(func() { _ = rt.Close() })
 	if err := rt.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`)); err != nil {
@@ -9182,7 +9154,7 @@ exports.onAction = function () {
 `)
 
 	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
-	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*pluginControlManager)
 	rt.l2Transport = &pluginControlL2TransportTest{}
 	t.Cleanup(func() { _ = rt.Close() })
 	err := rt.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`))
@@ -9301,7 +9273,7 @@ exports.onAction = function () {
 
 	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -9411,7 +9383,7 @@ exports.onAction = function () {
 `)
 
 	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
-	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*pluginControlManager)
 	rt.netAdmin = &pluginControlNetAdminTest{}
 	t.Cleanup(func() { _ = rt.Close() })
 	err := rt.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`))
@@ -9448,7 +9420,7 @@ exports.onAction = function () {
 `)
 
 	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
-	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*pluginControlManager)
 	rt.netAdmin = &pluginControlNetAdminTest{}
 	t.Cleanup(func() { _ = rt.Close() })
 	err := rt.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`))
@@ -9491,7 +9463,7 @@ exports.onAction = function () {
 
 	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*pluginControlManager)
 	rt.netAdmin = &pluginControlNetAdminTest{}
 	t.Cleanup(func() { _ = rt.Close() })
 	if err := rt.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`)); err != nil {
@@ -9556,7 +9528,7 @@ exports.onAction = function () {
 			{Interface: "tap2", Bridge: "br-test", MAC: "02:00:00:00:00:02", State: "stale"},
 		},
 	}
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*pluginControlManager)
 	rt.netAdmin = admin
 	t.Cleanup(func() { _ = rt.Close() })
 	if err := rt.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`)); err != nil {
@@ -9636,7 +9608,7 @@ exports.onAction = function () {
 `)
 
 	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
-	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*pluginControlManager)
 	rt.netAdmin = &pluginControlNetAdminTest{}
 	t.Cleanup(func() { _ = rt.Close() })
 	err := rt.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`))
@@ -9684,7 +9656,7 @@ exports.onAction = function () {
 			writePluginControlScript(t, dir, "control_plugin", script)
 
 			plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
-			rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*gojaPluginControlRuntime)
+			rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*pluginControlManager)
 			rt.netAdmin = &pluginControlNetAdminTest{}
 			t.Cleanup(func() { _ = rt.Close() })
 			err := rt.ApplyPluginAction(plugin, plugin.Actions[0], json.RawMessage(`{}`))
@@ -9758,7 +9730,7 @@ exports.onAction = function () {
 `)
 
 	plugin := loadTestPluginByID(t, pluginsEnabledTestConfig(&Config{PluginsDir: dir}), "control_plugin")
-	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: dir}), nil).(*pluginControlManager)
 	rt.executionTimeout = 100 * time.Millisecond
 	t.Cleanup(func() { _ = rt.Close() })
 	startedAt := time.Now()
@@ -9772,7 +9744,7 @@ exports.onAction = function () {
 }
 
 func TestPluginGojaControlDiscardsCanceledQueuedRequest(t *testing.T) {
-	rt := newPluginControlRuntime(nil, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(nil, pluginsEnabledTestConfig(&Config{}), nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	vm := newPluginControlVM(rt, "expired_plugin", "test", "control", "")
 	t.Cleanup(vm.stopVM)
@@ -9817,7 +9789,7 @@ exports.onAction = function () {
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
 	plugin := loadTestPluginByID(t, cfg, "deadline_plugin")
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	vm, err := rt.getPluginControlVM(plugin, "", "")
 	if err != nil {
@@ -10169,12 +10141,7 @@ func TestBundledVToLocalPluginManifest(t *testing.T) {
 	if plugin.Stability != pluginStabilityStable {
 		t.Fatalf("vtolocal stability = %q, want stable", plugin.Stability)
 	}
-	if plugin.Control == nil || plugin.Control.Main != "control.js" {
-		t.Fatalf("vtolocal control = %+v, want control.js", plugin.Control)
-	}
-	if plugin.Control.SHA256 == "" || plugin.Control.ResolvedSHA256 == "" || plugin.Control.SHA256 != plugin.Control.ResolvedSHA256 {
-		t.Fatalf("vtolocal control hashes = declared %q resolved %q, want matching non-empty hashes", plugin.Control.SHA256, plugin.Control.ResolvedSHA256)
-	}
+	requireBundledNativeControlForTest(t, plugin)
 	if plugin.UI == nil || plugin.UI.SHA256 == "" || plugin.UI.ResolvedSHA256 == "" || plugin.UI.SHA256 != plugin.UI.ResolvedSHA256 {
 		t.Fatalf("vtolocal ui hashes = %+v, want matching non-empty hashes", plugin.UI)
 	}
@@ -10182,8 +10149,8 @@ func TestBundledVToLocalPluginManifest(t *testing.T) {
 		t.Fatalf("vtolocal resources/actions/ui = %d/%d/%+v, want complete example surface", len(plugin.Resources), len(plugin.Actions), plugin.UI)
 	}
 	assertPluginResourceMethodsForTest(t, plugin, "status", "get,list", "create,delete,get,list,update")
-	if len(plugin.Control.Permissions) != 5 || strings.Join(plugin.Control.Permissions, ",") != "net.admin,plugin.register,resource,timer,ui" {
-		t.Fatalf("vtolocal permissions = %+v, want net.admin,plugin.register,resource,timer,ui", plugin.Control.Permissions)
+	if strings.Join(plugin.Control.Permissions, ",") != "event,net.admin,plugin.register,resource,timer,ui" {
+		t.Fatalf("vtolocal permissions = %+v, want event,net.admin,plugin.register,resource,timer,ui", plugin.Control.Permissions)
 	}
 	if !pluginControlHasNetAccess(plugin, "link.create", "veerlocal0") || !pluginControlHasNetAccess(plugin, "addr.write", "vtolocal0") || !pluginControlHasNetAccess(plugin, "route.write", "veerlocal0") {
 		t.Fatalf("vtolocal net access = %+v, want veer*/vtolocal* create/address/route access", plugin.Control.NetAccess)
@@ -10194,6 +10161,7 @@ func TestBundledVToLocalPluginManifest(t *testing.T) {
 }
 
 func TestBundledVToLocalApplyActionPersistsLinkAndArmsRepairTimer(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "vtolocal")
 	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -10204,7 +10172,7 @@ func TestBundledVToLocalApplyActionPersistsLinkAndArmsRepairTimer(t *testing.T) 
 	action := pluginActionByIDForTest(t, plugin, "apply")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{
 		getErrors: map[string]error{"brlan0": fmt.Errorf("link not found")},
 	}
@@ -10266,12 +10234,7 @@ func TestBundledWANCorePluginManifest(t *testing.T) {
 	if plugin.Stability != pluginStabilityStable {
 		t.Fatalf("wan_core stability = %q, want stable", plugin.Stability)
 	}
-	if plugin.Control == nil || plugin.Control.Main != "control.js" {
-		t.Fatalf("wan_core control = %+v, want control.js", plugin.Control)
-	}
-	if plugin.Control.SHA256 == "" || plugin.Control.ResolvedSHA256 == "" || plugin.Control.SHA256 != plugin.Control.ResolvedSHA256 {
-		t.Fatalf("wan_core control hashes = declared %q resolved %q, want matching non-empty hashes", plugin.Control.SHA256, plugin.Control.ResolvedSHA256)
-	}
+	requireBundledNativeControlForTest(t, plugin)
 	if plugin.UI == nil || plugin.UI.SHA256 == "" || plugin.UI.ResolvedSHA256 == "" || plugin.UI.SHA256 != plugin.UI.ResolvedSHA256 {
 		t.Fatalf("wan_core ui hashes = %+v, want matching non-empty hashes", plugin.UI)
 	}
@@ -10279,8 +10242,8 @@ func TestBundledWANCorePluginManifest(t *testing.T) {
 		t.Fatalf("wan_core resources/actions/ui = %d/%d/%+v, want complete example surface", len(plugin.Resources), len(plugin.Actions), plugin.UI)
 	}
 	assertPluginResourceMethodsForTest(t, plugin, "status", "get,list", "create,delete,get,list,update")
-	if len(plugin.Control.Permissions) != 5 || strings.Join(plugin.Control.Permissions, ",") != "net.admin,plugin.register,resource,timer,ui" {
-		t.Fatalf("wan_core permissions = %+v, want net.admin,plugin.register,resource,timer,ui", plugin.Control.Permissions)
+	if strings.Join(plugin.Control.Permissions, ",") != "event,net.admin,plugin.register,resource,timer,ui" {
+		t.Fatalf("wan_core permissions = %+v, want event,net.admin,plugin.register,resource,timer,ui", plugin.Control.Permissions)
 	}
 	if !pluginControlHasNetAccess(plugin, "link.create", "veerwan0") || !pluginControlHasNetAccess(plugin, "addr.write", "veerwan0") || !pluginControlHasNetAccess(plugin, "route.write", "veerwan0") || !pluginControlHasNetAccess(plugin, "link.delete", "veerwan0") || !pluginControlHasNetAccess(plugin, "link.state", "veerwan0") {
 		t.Fatalf("wan_core net access = %+v, want veer* create/address/route/delete/state access", plugin.Control.NetAccess)
@@ -10309,12 +10272,7 @@ func TestBundledLANCorePluginManifest(t *testing.T) {
 	if plugin.Stability != pluginStabilityStable {
 		t.Fatalf("lan_core stability = %q, want stable", plugin.Stability)
 	}
-	if plugin.Control == nil || plugin.Control.Main != "control.js" {
-		t.Fatalf("lan_core control = %+v, want control.js", plugin.Control)
-	}
-	if plugin.Control.SHA256 == "" || plugin.Control.ResolvedSHA256 == "" || plugin.Control.SHA256 != plugin.Control.ResolvedSHA256 {
-		t.Fatalf("lan_core control hashes = declared %q resolved %q, want matching non-empty hashes", plugin.Control.SHA256, plugin.Control.ResolvedSHA256)
-	}
+	requireBundledNativeControlForTest(t, plugin)
 	if plugin.UI == nil || plugin.UI.SHA256 == "" || plugin.UI.ResolvedSHA256 == "" || plugin.UI.SHA256 != plugin.UI.ResolvedSHA256 {
 		t.Fatalf("lan_core ui hashes = %+v, want matching non-empty hashes", plugin.UI)
 	}
@@ -10325,8 +10283,8 @@ func TestBundledLANCorePluginManifest(t *testing.T) {
 	assertPluginResourceMethodsForTest(t, plugin, "egress_nat_plans", "get,list", "create,delete,get,list,update")
 	assertPluginResourceMethodsForTest(t, plugin, "ipv6_assignment_plans", "get,list", "create,delete,get,list,update")
 	assertPluginResourceMethodsForTest(t, plugin, "dhcpv4_plans", "get,list", "create,delete,get,list,update")
-	if len(plugin.Control.Permissions) != 6 || strings.Join(plugin.Control.Permissions, ",") != "net.admin,plugin.register,plugin.resource,resource,timer,ui" {
-		t.Fatalf("lan_core permissions = %+v, want net.admin,plugin.register,plugin.resource,resource,timer,ui", plugin.Control.Permissions)
+	if strings.Join(plugin.Control.Permissions, ",") != "event,net.admin,plugin.register,plugin.resource,resource,timer,ui" {
+		t.Fatalf("lan_core permissions = %+v, want event,net.admin,plugin.register,plugin.resource,resource,timer,ui", plugin.Control.Permissions)
 	}
 	if len(plugin.Control.ResourceAccess) != 1 || plugin.Control.ResourceAccess[0].Plugin != "wan_core" || plugin.Control.ResourceAccess[0].Resource != "status" || strings.Join(plugin.Control.ResourceAccess[0].Methods, ",") != "get,list" {
 		t.Fatalf("lan_core resource access = %+v, want wan_core/status get,list", plugin.Control.ResourceAccess)
@@ -10340,6 +10298,7 @@ func TestBundledLANCorePluginManifest(t *testing.T) {
 }
 
 func TestBundledLANCoreTrafficStatsQuery(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -10382,7 +10341,7 @@ func TestBundledLANCoreTrafficStatsQuery(t *testing.T) {
 			Statistics: &pluginControlNetLinkStatistics{RXPackets: 50, TXPackets: 60, RXBytes: 5000, TXBytes: 6000},
 		},
 	}}
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
 	result, err := rt.QueryPluginAction(plugin, action, json.RawMessage(`{"profile_key":"default"}`))
@@ -10419,9 +10378,7 @@ func TestBundledRouterWizardPluginManifest(t *testing.T) {
 	if plugin.Kind != "control" {
 		t.Fatalf("router_wizard kind = %q, want control", plugin.Kind)
 	}
-	if plugin.Control == nil || plugin.Control.Main != "control.js" {
-		t.Fatalf("router_wizard control = %+v, want control.js", plugin.Control)
-	}
+	requireBundledNativeControlForTest(t, plugin)
 	if plugin.UI == nil || plugin.UI.Page != "router" || plugin.UI.Entry != "index.html" {
 		t.Fatalf("router_wizard ui = %+v, want router/index.html", plugin.UI)
 	}
@@ -10450,6 +10407,7 @@ func TestBundledRouterWizardPluginManifest(t *testing.T) {
 }
 
 func TestBundledRouterWizardFailedUpdateRollsBackAndRestoresPreviousConfig(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "router_wizard")
 	pluginsDir := t.TempDir()
 	routerDir := filepath.Join(pluginsDir, "router_wizard")
 	copyDirForTest(t, filepath.Join("..", "..", "plugins", "router_wizard"), routerDir)
@@ -10487,7 +10445,7 @@ exports.onAction = function (ctx) {
 
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: pluginsDir})
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	catalog := loadPluginCatalogWithState(cfg, db)
 	applyPluginRuntimeSnapshot(&catalog, rt.Reconcile(catalog))
@@ -10537,6 +10495,7 @@ exports.onAction = function (ctx) {
 }
 
 func TestBundledLANCoreApplyNetworkCreatesBridgeAndEgressPlan(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -10557,7 +10516,7 @@ func TestBundledLANCoreApplyNetworkCreatesBridgeAndEgressPlan(t *testing.T) {
 	}
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{
 		listNames: []string{"brlan0", "lanp0", "lanp1"},
 		getErrors: map[string]error{"brlan0": fmt.Errorf("link not found")},
@@ -10672,6 +10631,7 @@ func TestBundledLANCoreApplyNetworkCreatesBridgeAndEgressPlan(t *testing.T) {
 }
 
 func TestBundledLANCoreRestoresLegacyGROAfterSegmentedWANAppears(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -10708,7 +10668,7 @@ func TestBundledLANCoreRestoresLegacyGROAfterSegmentedWANAppears(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AddPluginRecord(lan_core status/default) error = %v", err)
 	}
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{
 		listNames: []string{"vmbr0", "lanp0"},
 		offloads:  map[string]map[string]bool{"lanp0": {"gro": false}},
@@ -10805,6 +10765,7 @@ func TestBundledLANCoreRestoresLegacyGROAfterSegmentedWANAppears(t *testing.T) {
 }
 
 func TestBundledLANCoreApplyNetworkDeletesRemovedManagedBridgeAddress(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -10815,7 +10776,7 @@ func TestBundledLANCoreApplyNetworkDeletesRemovedManagedBridgeAddress(t *testing
 	action := pluginActionByIDForTest(t, plugin, "apply_network")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -10857,6 +10818,7 @@ func TestBundledLANCoreApplyNetworkDeletesRemovedManagedBridgeAddress(t *testing
 }
 
 func TestBundledLANCoreApplyNetworkDeletesManagedBridgeAddressWhenBridgeChanges(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -10867,7 +10829,7 @@ func TestBundledLANCoreApplyNetworkDeletesManagedBridgeAddressWhenBridgeChanges(
 	action := pluginActionByIDForTest(t, plugin, "apply_network")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -10900,6 +10862,7 @@ func TestBundledLANCoreApplyNetworkDeletesManagedBridgeAddressWhenBridgeChanges(
 }
 
 func TestBundledLANCoreApplyNetworkDetachesRemovedManagedPort(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -10910,7 +10873,7 @@ func TestBundledLANCoreApplyNetworkDetachesRemovedManagedPort(t *testing.T) {
 	action := pluginActionByIDForTest(t, plugin, "apply_network")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -10955,6 +10918,7 @@ func TestBundledLANCoreApplyNetworkDetachesRemovedManagedPort(t *testing.T) {
 }
 
 func TestBundledLANCorePlanStaysDisabledWithoutWANEgress(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -10975,7 +10939,7 @@ func TestBundledLANCorePlanStaysDisabledWithoutWANEgress(t *testing.T) {
 	}
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -11005,6 +10969,7 @@ func TestBundledLANCorePlanStaysDisabledWithoutWANEgress(t *testing.T) {
 }
 
 func TestBundledLANCoreApplyNetworkAcceptsNestedProfileKey(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -11025,7 +10990,7 @@ func TestBundledLANCoreApplyNetworkAcceptsNestedProfileKey(t *testing.T) {
 	}
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -11058,6 +11023,7 @@ func TestBundledLANCoreApplyNetworkAcceptsNestedProfileKey(t *testing.T) {
 }
 
 func TestBundledLANCoreResourceApplyIsolatesInvalidProfile(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -11068,7 +11034,7 @@ func TestBundledLANCoreResourceApplyIsolatesInvalidProfile(t *testing.T) {
 	resource := pluginResourceByIDForTest(t, plugin, "profiles")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -11119,6 +11085,7 @@ func TestBundledLANCoreResourceApplyIsolatesInvalidProfile(t *testing.T) {
 }
 
 func TestBundledLANCoreDisabledProfileResourceDisablesEgressPlan(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -11139,7 +11106,7 @@ func TestBundledLANCoreDisabledProfileResourceDisablesEgressPlan(t *testing.T) {
 		t.Fatalf("AddPluginRecord(lan_core egress_nat_plans/default) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	rt.netAdmin = &pluginControlNetAdminTest{}
 	t.Cleanup(func() { _ = rt.Close() })
 
@@ -11178,6 +11145,7 @@ func TestBundledLANCoreDisabledProfileResourceDisablesEgressPlan(t *testing.T) {
 }
 
 func TestBundledLANCoreDisabledProfileKeepsRepairTimerForOtherEnabledProfiles(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -11198,7 +11166,7 @@ func TestBundledLANCoreDisabledProfileKeepsRepairTimerForOtherEnabledProfiles(t 
 		t.Fatalf("AddPluginRecord(lan_core profiles/other) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	rt.netAdmin = &pluginControlNetAdminTest{}
 	t.Cleanup(func() { _ = rt.Close() })
 
@@ -11215,6 +11183,7 @@ func TestBundledLANCoreDisabledProfileKeepsRepairTimerForOtherEnabledProfiles(t 
 }
 
 func TestBundledLANCoreRepairTimerRecoversMissingPort(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -11236,7 +11205,7 @@ func TestBundledLANCoreRepairTimerRecoversMissingPort(t *testing.T) {
 		t.Fatalf("AddPluginRecord(lan_core profiles/default) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{
 		getErrors: map[string]error{"lanp1": fmt.Errorf("link not found")},
 	}
@@ -11277,6 +11246,7 @@ func TestBundledLANCoreRepairTimerRecoversMissingPort(t *testing.T) {
 }
 
 func TestBundledLANCoreTeardownDisablesProfileAndRepairTimer(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -11299,7 +11269,7 @@ func TestBundledLANCoreTeardownDisablesProfileAndRepairTimer(t *testing.T) {
 		t.Fatalf("AddPluginRecord(lan_core profiles/default) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{
 		getErrors: map[string]error{"brlan0": fmt.Errorf("link not found")},
 	}
@@ -11391,6 +11361,7 @@ func TestBundledLANCoreTeardownDisablesProfileAndRepairTimer(t *testing.T) {
 }
 
 func TestBundledLANCoreTeardownWithoutStatusDoesNotDeleteBridgeOrPorts(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -11412,7 +11383,7 @@ func TestBundledLANCoreTeardownWithoutStatusDoesNotDeleteBridgeOrPorts(t *testin
 		t.Fatalf("AddPluginRecord(lan_core profiles/default) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -11437,6 +11408,7 @@ func TestBundledLANCoreTeardownWithoutStatusDoesNotDeleteBridgeOrPorts(t *testin
 }
 
 func TestBundledLANCoreTeardownPreservesVMBridge(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -11468,7 +11440,7 @@ func TestBundledLANCoreTeardownPreservesVMBridge(t *testing.T) {
 		t.Fatalf("AddPluginRecord(lan_core egress_nat_plans/default) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -11525,6 +11497,7 @@ func TestBundledLANCoreTeardownPreservesVMBridge(t *testing.T) {
 }
 
 func TestBundledLANCoreTeardownPreservesExistingVMBridgeMember(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -11547,7 +11520,7 @@ func TestBundledLANCoreTeardownPreservesExistingVMBridgeMember(t *testing.T) {
 		t.Fatalf("AddPluginRecord(lan_core profiles/default) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{
 		listNames: []string{"vmbr0", "lanp0", "lanp1"},
 		offloads: map[string]map[string]bool{
@@ -11614,6 +11587,7 @@ func TestBundledLANCoreTeardownPreservesExistingVMBridgeMember(t *testing.T) {
 }
 
 func TestBundledLANCoreTeardownDisablesProfileWhenPortDetachFails(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "lan_core")
 	rootDir := filepath.Join(t.TempDir(), "lan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -11659,7 +11633,7 @@ func TestBundledLANCoreTeardownDisablesProfileWhenPortDetachFails(t *testing.T) 
 		t.Fatalf("AddPluginOwnedResource(lan_core brlan0) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{
 		clearMasterErrors: map[string]error{"lanp1": fmt.Errorf("link not found")},
 	}
@@ -11853,6 +11827,7 @@ func TestPluginEgressNATPlanAllowsLabPluginByDefault(t *testing.T) {
 }
 
 func TestLANCoreActionRedistributesPluginEgressNATPlanToKernelRuntime(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	pluginsDir := t.TempDir()
 	rootDir := filepath.Join(pluginsDir, "lan_core")
 	copyDirForTest(t, filepath.Join("..", "..", "plugins", "lan_core"), rootDir)
@@ -11917,7 +11892,7 @@ func TestLANCoreActionRedistributesPluginEgressNATPlanToKernelRuntime(t *testing
 		kernelNetlinkOwnerRetryCooldownUntil: make(map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState),
 		kernelNetlinkOwnerRetryFailures:      make(map[kernelCandidateOwner]int),
 	}
-	controlRuntime := newPluginControlRuntime(db, cfg, pm).(*gojaPluginControlRuntime)
+	controlRuntime := newPluginControlRuntime(db, cfg, pm).(*pluginControlManager)
 	controlRuntime.netAdmin = &pluginControlNetAdminTest{}
 	pm.pluginControlRuntime = controlRuntime
 	t.Cleanup(func() { _ = controlRuntime.Close() })
@@ -11963,6 +11938,7 @@ func TestLANCoreActionRedistributesPluginEgressNATPlanToKernelRuntime(t *testing
 }
 
 func TestPluginReconcileRedistributesGeneratedEgressNATPlans(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	pluginsDir := t.TempDir()
 	copyDirForTest(t, filepath.Join("..", "..", "plugins", "lan_core"), filepath.Join(pluginsDir, "lan_core"))
 
@@ -12027,7 +12003,7 @@ func TestPluginReconcileRedistributesGeneratedEgressNATPlans(t *testing.T) {
 		kernelNetlinkOwnerRetryCooldownUntil: make(map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState),
 		kernelNetlinkOwnerRetryFailures:      make(map[kernelCandidateOwner]int),
 	}
-	controlRuntime := newPluginControlRuntime(db, cfg, pm).(*gojaPluginControlRuntime)
+	controlRuntime := newPluginControlRuntime(db, cfg, pm).(*pluginControlManager)
 	controlRuntime.netAdmin = &pluginControlNetAdminTest{}
 	pm.pluginControlRuntime = controlRuntime
 	t.Cleanup(func() { _ = controlRuntime.Close() })
@@ -12052,6 +12028,7 @@ func TestPluginReconcileRedistributesGeneratedEgressNATPlans(t *testing.T) {
 }
 
 func TestLANCoreRepairTimerRedistributesWANCoreStatusChanges(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "lan_core", "wan_core")
 	pluginsDir := t.TempDir()
 	copyDirForTest(t, filepath.Join("..", "..", "plugins", "lan_core"), filepath.Join(pluginsDir, "lan_core"))
 	copyDirForTest(t, filepath.Join("..", "..", "plugins", "wan_core"), filepath.Join(pluginsDir, "wan_core"))
@@ -12140,7 +12117,7 @@ func TestLANCoreRepairTimerRedistributesWANCoreStatusChanges(t *testing.T) {
 		kernelNetlinkOwnerRetryCooldownUntil: make(map[kernelCandidateOwner]kernelNetlinkOwnerRetryCooldownState),
 		kernelNetlinkOwnerRetryFailures:      make(map[kernelCandidateOwner]int),
 	}
-	controlRuntime := newPluginControlRuntime(db, cfg, pm).(*gojaPluginControlRuntime)
+	controlRuntime := newPluginControlRuntime(db, cfg, pm).(*pluginControlManager)
 	controlRuntime.netAdmin = &pluginControlNetAdminTest{}
 	pm.pluginControlRuntime = controlRuntime
 	t.Cleanup(func() { _ = controlRuntime.Close() })
@@ -12157,7 +12134,9 @@ func TestLANCoreRepairTimerRedistributesWANCoreStatusChanges(t *testing.T) {
 			t.Fatalf("kernel runtime initial rule = %+v, want veerwan0 egress nat synthetic rule", rule)
 		}
 	}
-	if timers := controlRuntime.pluginTimerList("lan_core"); len(timers) != 1 {
+	// The repair interval, beside the coalescing timer of events the
+	// reconcile itself raised.
+	if timers := controlRuntime.pluginTimerList("lan_core"); !slices.ContainsFunc(timers, func(timer map[string]any) bool { return timer["name"] == "lan_repair" }) {
 		t.Fatalf("lan_core timers after initial reconcile = %+v, want repair timer", timers)
 	}
 	ipv6PlanRecord, err := store.GetPluginRecord(db, "lan_core", "ipv6_assignment_plans", "default")
@@ -12253,6 +12232,7 @@ func TestLANCoreRepairTimerRedistributesWANCoreStatusChanges(t *testing.T) {
 }
 
 func TestBundledWANCoreApplySessionCreatesVeerCoreHandoff(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -12273,7 +12253,7 @@ func TestBundledWANCoreApplySessionCreatesVeerCoreHandoff(t *testing.T) {
 	}
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -12350,6 +12330,7 @@ func TestBundledWANCoreApplySessionCreatesVeerCoreHandoff(t *testing.T) {
 }
 
 func TestBundledWANCoreSegmentedIPv4PeerRouteLifecycle(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -12361,7 +12342,7 @@ func TestBundledWANCoreSegmentedIPv4PeerRouteLifecycle(t *testing.T) {
 	teardownAction := pluginActionByIDForTest(t, plugin, "teardown")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -12428,6 +12409,7 @@ func TestBundledWANCoreSegmentedIPv4PeerRouteLifecycle(t *testing.T) {
 }
 
 func TestBundledWANCoreSegmentedIPv6PolicyRoutingLifecycle(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -12439,7 +12421,7 @@ func TestBundledWANCoreSegmentedIPv6PolicyRoutingLifecycle(t *testing.T) {
 	teardownAction := pluginActionByIDForTest(t, plugin, "teardown")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -12536,6 +12518,7 @@ func TestBundledWANCoreSegmentedIPv6PolicyRoutingLifecycle(t *testing.T) {
 }
 
 func TestBundledWANCorePreparedHandoffHonorsDriverIPv6Policy(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -12547,7 +12530,7 @@ func TestBundledWANCorePreparedHandoffHonorsDriverIPv6Policy(t *testing.T) {
 	sessionsResource := pluginResourceByIDForTest(t, plugin, "sessions")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -12615,6 +12598,7 @@ func TestBundledWANCorePreparedHandoffHonorsDriverIPv6Policy(t *testing.T) {
 }
 
 func TestBundledWANCoreAllocatesDistinctIPv6PolicySlots(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -12625,7 +12609,7 @@ func TestBundledWANCoreAllocatesDistinctIPv6PolicySlots(t *testing.T) {
 	action := pluginActionByIDForTest(t, plugin, "apply_session")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	rt.netAdmin = &pluginControlNetAdminTest{}
 	t.Cleanup(func() { _ = rt.Close() })
 
@@ -12696,6 +12680,7 @@ func TestBundledWANCoreAllocatesDistinctIPv6PolicySlots(t *testing.T) {
 }
 
 func TestBundledWANCorePrepareHandoffCreatesSegmentedDisabledStatus(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -12716,7 +12701,7 @@ func TestBundledWANCorePrepareHandoffCreatesSegmentedDisabledStatus(t *testing.T
 	}
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -12770,6 +12755,7 @@ func TestBundledWANCorePrepareHandoffCreatesSegmentedDisabledStatus(t *testing.T
 }
 
 func TestBundledWANCoreSegmentedHandoffKeepsARPOwnershipAcrossReconcile(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -12780,7 +12766,7 @@ func TestBundledWANCoreSegmentedHandoffKeepsARPOwnershipAcrossReconcile(t *testi
 	action := pluginActionByIDForTest(t, plugin, "prepare_handoff")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -12846,6 +12832,7 @@ func TestBundledWANCoreSegmentedHandoffKeepsARPOwnershipAcrossReconcile(t *testi
 }
 
 func TestBundledWANCoreSegmentedHandoffRestoresARPOnUnmanagedVeth(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -12857,7 +12844,7 @@ func TestBundledWANCoreSegmentedHandoffRestoresARPOnUnmanagedVeth(t *testing.T) 
 	teardownAction := pluginActionByIDForTest(t, plugin, "teardown")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{links: map[string]pluginControlNetLinkInfo{
 		"veerlocal0": {Name: "veerlocal0", IfIndex: 101, Kind: "veth", MTU: 1492, Up: true, ARP: true},
 		"veerpipe0":  {Name: "veerpipe0", IfIndex: 102, Kind: "veth", MTU: 1492, Up: true, ARP: true},
@@ -12903,6 +12890,7 @@ func TestBundledWANCoreSegmentedHandoffRestoresARPOnUnmanagedVeth(t *testing.T) 
 }
 
 func TestBundledWANCoreSegmentedHandoffCleansCreatedPairWhenARPSetupFails(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -12912,7 +12900,7 @@ func TestBundledWANCoreSegmentedHandoffCleansCreatedPairWhenARPSetupFails(t *tes
 	}
 	action := pluginActionByIDForTest(t, plugin, "prepare_handoff")
 
-	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(openTestDB(t), pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{setARPErrors: map[string]error{"veerlocal0": fmt.Errorf("operation not supported")}}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -12938,6 +12926,7 @@ func TestBundledWANCoreSegmentedHandoffCleansCreatedPairWhenARPSetupFails(t *tes
 }
 
 func TestBundledWANCoreHandoffMigrationFailureRestoresPreviousBoundary(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -12948,7 +12937,7 @@ func TestBundledWANCoreHandoffMigrationFailureRestoresPreviousBoundary(t *testin
 	action := pluginActionByIDForTest(t, plugin, "apply_session")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -13020,6 +13009,7 @@ func TestBundledWANCoreHandoffMigrationFailureRestoresPreviousBoundary(t *testin
 }
 
 func TestBundledWANCoreResourceApplyArmsRepairTimer(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -13030,7 +13020,7 @@ func TestBundledWANCoreResourceApplyArmsRepairTimer(t *testing.T) {
 	resource := pluginResourceByIDForTest(t, plugin, "sessions")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	rt.netAdmin = &pluginControlNetAdminTest{}
 	t.Cleanup(func() { _ = rt.Close() })
 
@@ -13054,6 +13044,7 @@ func TestBundledWANCoreResourceApplyArmsRepairTimer(t *testing.T) {
 }
 
 func TestBundledWANCoreResourceApplyIsolatesInvalidSession(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -13064,7 +13055,7 @@ func TestBundledWANCoreResourceApplyIsolatesInvalidSession(t *testing.T) {
 	resource := pluginResourceByIDForTest(t, plugin, "sessions")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	rt.netAdmin = &pluginControlNetAdminTest{}
 	t.Cleanup(func() { _ = rt.Close() })
 
@@ -13104,6 +13095,7 @@ func TestBundledWANCoreResourceApplyIsolatesInvalidSession(t *testing.T) {
 }
 
 func TestBundledWANCoreDisabledSessionResourceDisablesStatus(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -13124,7 +13116,7 @@ func TestBundledWANCoreDisabledSessionResourceDisablesStatus(t *testing.T) {
 		t.Fatalf("AddPluginRecord(wan_core status/default) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	rt.netAdmin = &pluginControlNetAdminTest{}
 	t.Cleanup(func() { _ = rt.Close() })
 
@@ -13153,6 +13145,7 @@ func TestBundledWANCoreDisabledSessionResourceDisablesStatus(t *testing.T) {
 }
 
 func TestBundledWANCoreDisabledSessionKeepsRepairTimerForOtherEnabledSessions(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -13173,7 +13166,7 @@ func TestBundledWANCoreDisabledSessionKeepsRepairTimerForOtherEnabledSessions(t 
 		t.Fatalf("AddPluginRecord(wan_core sessions/other) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	rt.netAdmin = &pluginControlNetAdminTest{}
 	t.Cleanup(func() { _ = rt.Close() })
 
@@ -13190,6 +13183,7 @@ func TestBundledWANCoreDisabledSessionKeepsRepairTimerForOtherEnabledSessions(t 
 }
 
 func TestBundledWANCoreUnusableSessionDisablesPublishedStatus(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -13200,7 +13194,7 @@ func TestBundledWANCoreUnusableSessionDisablesPublishedStatus(t *testing.T) {
 	resource := pluginResourceByIDForTest(t, plugin, "sessions")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	rt.netAdmin = &pluginControlNetAdminTest{}
 	t.Cleanup(func() { _ = rt.Close() })
 
@@ -13229,6 +13223,7 @@ func TestBundledWANCoreUnusableSessionDisablesPublishedStatus(t *testing.T) {
 }
 
 func TestBundledWANCoreRepairTimerRecoversDummyFailure(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -13250,7 +13245,7 @@ func TestBundledWANCoreRepairTimerRecoversDummyFailure(t *testing.T) {
 		t.Fatalf("AddPluginRecord(wan_core sessions/default) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{
 		ensureDummyErrors: map[string]error{"veerlocal0": fmt.Errorf("temporary dummy create failure")},
 	}
@@ -13276,12 +13271,18 @@ func TestBundledWANCoreRepairTimerRecoversDummyFailure(t *testing.T) {
 	if err := store.MarkPluginRuntimeError(db, "wan_core", "resource", "sessions", "api apply failed"); err != nil {
 		t.Fatalf("MarkPluginRuntimeError(wan_core sessions) error = %v", err)
 	}
-	if timers := rt.pluginTimerList("wan_core"); len(timers) != 1 {
-		t.Fatalf("wan_core timers after failed apply = %+v, want one repair timer", timers)
+	// The safety repair stays armed and the failed apply is retried soon.
+	timers := map[string]bool{}
+	for _, item := range rt.pluginTimerList("wan_core") {
+		name, _ := item["name"].(string)
+		timers[name] = true
+	}
+	if len(timers) != 2 || !timers["wan_repair"] || !timers["wan_retry"] {
+		t.Fatalf("wan_core timers after failed apply = %+v, want wan_repair and wan_retry", rt.pluginTimerList("wan_core"))
 	}
 
 	controller.ensureDummyErrors = nil
-	firePluginTimerForTest(t, rt, "wan_core", "wan_repair")
+	firePluginTimerForTest(t, rt, "wan_core", "wan_retry")
 	statusRecord, err = store.GetPluginRecord(db, "wan_core", "status", "default")
 	if err != nil {
 		t.Fatalf("GetPluginRecord(wan_core status/default) recovered error = %v", err)
@@ -13301,6 +13302,7 @@ func TestBundledWANCoreRepairTimerRecoversDummyFailure(t *testing.T) {
 }
 
 func TestBundledWANCoreTeardownDisablesSessionAndRepairTimer(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -13323,7 +13325,7 @@ func TestBundledWANCoreTeardownDisablesSessionAndRepairTimer(t *testing.T) {
 		t.Fatalf("AddPluginRecord(wan_core sessions/default) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -13403,6 +13405,7 @@ func TestBundledWANCoreTeardownDisablesSessionAndRepairTimer(t *testing.T) {
 }
 
 func TestBundledWANCoreTeardownDisablesSessionWhenDeleteFails(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -13425,7 +13428,7 @@ func TestBundledWANCoreTeardownDisablesSessionWhenDeleteFails(t *testing.T) {
 		t.Fatalf("AddPluginRecord(wan_core sessions/default) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{
 		deleteErrors: map[string]error{"veerlocal0": fmt.Errorf("operation not permitted")},
 	}
@@ -13486,6 +13489,7 @@ func TestBundledWANCoreTeardownDisablesSessionWhenDeleteFails(t *testing.T) {
 }
 
 func TestBundledWANCoreTeardownWithoutStatusDoesNotDeleteLinkOrManagedState(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -13507,7 +13511,7 @@ func TestBundledWANCoreTeardownWithoutStatusDoesNotDeleteLinkOrManagedState(t *t
 		t.Fatalf("AddPluginRecord(wan_core sessions/default) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -13536,6 +13540,7 @@ func TestBundledWANCoreTeardownWithoutStatusDoesNotDeleteLinkOrManagedState(t *t
 }
 
 func TestBundledWANCoreResourceApplySkipsUnchangedStatusRewrite(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -13546,7 +13551,7 @@ func TestBundledWANCoreResourceApplySkipsUnchangedStatusRewrite(t *testing.T) {
 	resource := pluginResourceByIDForTest(t, plugin, "sessions")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	rt.netAdmin = &pluginControlNetAdminTest{}
 	t.Cleanup(func() { _ = rt.Close() })
 
@@ -13575,6 +13580,7 @@ func TestBundledWANCoreResourceApplySkipsUnchangedStatusRewrite(t *testing.T) {
 }
 
 func TestBundledWANCoreResourceApplyDeletesRemovedManagedAddressAndRoute(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -13585,7 +13591,7 @@ func TestBundledWANCoreResourceApplyDeletesRemovedManagedAddressAndRoute(t *test
 	resource := pluginResourceByIDForTest(t, plugin, "sessions")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -13640,6 +13646,7 @@ func TestBundledWANCoreResourceApplyDeletesRemovedManagedAddressAndRoute(t *test
 }
 
 func TestBundledWANCoreResourceApplyDeletesManagedDummyWhenInterfaceChanges(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	sourceDir := filepath.Join("..", "..", "plugins", "wan_core")
 	rootDir := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -13650,7 +13657,7 @@ func TestBundledWANCoreResourceApplyDeletesManagedDummyWhenInterfaceChanges(t *t
 	resource := pluginResourceByIDForTest(t, plugin, "sessions")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -13698,6 +13705,7 @@ func TestBundledWANCoreResourceApplyDeletesManagedDummyWhenInterfaceChanges(t *t
 }
 
 func TestBundledVToLocalResourceApplyArmsRepairTimer(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "vtolocal")
 	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -13708,7 +13716,7 @@ func TestBundledVToLocalResourceApplyArmsRepairTimer(t *testing.T) {
 	resource := pluginResourceByIDForTest(t, plugin, "links")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	rt.netAdmin = &pluginControlNetAdminTest{}
 	t.Cleanup(func() { _ = rt.Close() })
 
@@ -13730,6 +13738,7 @@ func TestBundledVToLocalResourceApplyArmsRepairTimer(t *testing.T) {
 }
 
 func TestBundledVToLocalResourceApplyIsolatesInvalidLink(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "vtolocal")
 	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -13740,7 +13749,7 @@ func TestBundledVToLocalResourceApplyIsolatesInvalidLink(t *testing.T) {
 	resource := pluginResourceByIDForTest(t, plugin, "links")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	rt.netAdmin = &pluginControlNetAdminTest{}
 	t.Cleanup(func() { _ = rt.Close() })
 
@@ -13780,6 +13789,7 @@ func TestBundledVToLocalResourceApplyIsolatesInvalidLink(t *testing.T) {
 }
 
 func TestBundledVToLocalDisabledLinkResourceDisablesStatus(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "vtolocal")
 	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -13806,7 +13816,7 @@ func TestBundledVToLocalDisabledLinkResourceDisablesStatus(t *testing.T) {
 		t.Fatalf("AddPluginOwnedResource(vtolocal veerlocal0) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	rt.netAdmin = &pluginControlNetAdminTest{links: map[string]pluginControlNetLinkInfo{
 		"veerlocal0": {Name: "veerlocal0", IfIndex: 101, Kind: "dummy", MTU: 1492, MAC: "02:00:00:00:10:01", Up: true, ARP: true},
 	}}
@@ -13837,6 +13847,7 @@ func TestBundledVToLocalDisabledLinkResourceDisablesStatus(t *testing.T) {
 }
 
 func TestBundledVToLocalDisabledLinkKeepsRepairTimerForOtherEnabledLinks(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "vtolocal")
 	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -13857,7 +13868,7 @@ func TestBundledVToLocalDisabledLinkKeepsRepairTimerForOtherEnabledLinks(t *test
 		t.Fatalf("AddPluginRecord(vtolocal links/other) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	rt.netAdmin = &pluginControlNetAdminTest{}
 	t.Cleanup(func() { _ = rt.Close() })
 
@@ -13874,6 +13885,7 @@ func TestBundledVToLocalDisabledLinkKeepsRepairTimerForOtherEnabledLinks(t *test
 }
 
 func TestBundledVToLocalRepairTimerRecoversDummyFailure(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "vtolocal")
 	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -13895,7 +13907,7 @@ func TestBundledVToLocalRepairTimerRecoversDummyFailure(t *testing.T) {
 		t.Fatalf("AddPluginRecord(vtolocal links/default) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{
 		ensureDummyErrors: map[string]error{"veerlocal0": fmt.Errorf("temporary dummy create failure")},
 	}
@@ -13946,6 +13958,7 @@ func TestBundledVToLocalRepairTimerRecoversDummyFailure(t *testing.T) {
 }
 
 func TestBundledVToLocalTeardownDisablesLinkAndRepairTimer(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "vtolocal")
 	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -13968,7 +13981,7 @@ func TestBundledVToLocalTeardownDisablesLinkAndRepairTimer(t *testing.T) {
 		t.Fatalf("AddPluginRecord(vtolocal links/default) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -14028,6 +14041,7 @@ func TestBundledVToLocalTeardownDisablesLinkAndRepairTimer(t *testing.T) {
 }
 
 func TestBundledVToLocalTeardownDisablesLinkWhenDeleteFails(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "vtolocal")
 	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -14050,7 +14064,7 @@ func TestBundledVToLocalTeardownDisablesLinkWhenDeleteFails(t *testing.T) {
 		t.Fatalf("AddPluginRecord(vtolocal links/default) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{
 		deleteErrors: map[string]error{"veerlocal0": fmt.Errorf("operation not permitted")},
 	}
@@ -14105,6 +14119,7 @@ func TestBundledVToLocalTeardownDisablesLinkWhenDeleteFails(t *testing.T) {
 }
 
 func TestBundledVToLocalTeardownWithoutStatusDoesNotDeleteLinkOrManagedState(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "vtolocal")
 	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -14126,7 +14141,7 @@ func TestBundledVToLocalTeardownWithoutStatusDoesNotDeleteLinkOrManagedState(t *
 		t.Fatalf("AddPluginRecord(vtolocal links/default) error = %v", err)
 	}
 
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -14155,6 +14170,7 @@ func TestBundledVToLocalTeardownWithoutStatusDoesNotDeleteLinkOrManagedState(t *
 }
 
 func TestBundledVToLocalResourceApplySkipsUnchangedStatusRewrite(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "vtolocal")
 	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -14165,7 +14181,7 @@ func TestBundledVToLocalResourceApplySkipsUnchangedStatusRewrite(t *testing.T) {
 	resource := pluginResourceByIDForTest(t, plugin, "links")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	rt.netAdmin = &pluginControlNetAdminTest{}
 	t.Cleanup(func() { _ = rt.Close() })
 
@@ -14194,6 +14210,7 @@ func TestBundledVToLocalResourceApplySkipsUnchangedStatusRewrite(t *testing.T) {
 }
 
 func TestBundledVToLocalResourceApplyDeletesRemovedManagedAddressAndRoute(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "vtolocal")
 	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -14204,7 +14221,7 @@ func TestBundledVToLocalResourceApplyDeletesRemovedManagedAddressAndRoute(t *tes
 	resource := pluginResourceByIDForTest(t, plugin, "links")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -14255,6 +14272,7 @@ func TestBundledVToLocalResourceApplyDeletesRemovedManagedAddressAndRoute(t *tes
 }
 
 func TestBundledVToLocalResourceApplyDeletesManagedDummyWhenInterfaceChanges(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "vtolocal")
 	sourceDir := filepath.Join("..", "..", "plugins", "vtolocal")
 	rootDir := filepath.Join(t.TempDir(), "vtolocal")
 	copyDirForTest(t, sourceDir, rootDir)
@@ -14265,7 +14283,7 @@ func TestBundledVToLocalResourceApplyDeletesManagedDummyWhenInterfaceChanges(t *
 	resource := pluginResourceByIDForTest(t, plugin, "links")
 
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(rootDir)}), nil).(*pluginControlManager)
 	controller := &pluginControlNetAdminTest{}
 	rt.netAdmin = controller
 	t.Cleanup(func() { _ = rt.Close() })
@@ -14386,7 +14404,7 @@ func waitForPluginRuntimeStatusForTest(t *testing.T, db *sql.DB, pluginID, targe
 	}
 }
 
-func firePluginTimerForTest(t testing.TB, rt *gojaPluginControlRuntime, pluginID, name string) {
+func firePluginTimerForTest(t testing.TB, rt *pluginControlManager, pluginID, name string) {
 	t.Helper()
 
 	key := pluginControlTimerKey{pluginID: pluginID, name: name}
@@ -14462,7 +14480,7 @@ func pluginWithRuntimeSurfaceForTest(t *testing.T, plugin LoadedPlugin) LoadedPl
 	if plugin.Builtin || plugin.Status != pluginStatusActive || plugin.controlMainPath == "" {
 		return plugin
 	}
-	rt := newPluginControlRuntime(nil, pluginsEnabledTestConfig(&Config{}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(nil, pluginsEnabledTestConfig(&Config{}), nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = rt.Close() })
 	surface, err := rt.runPluginControlWithSurface(plugin, pluginControlEvent{Kind: "register"}, true)
 	if err != nil {
@@ -14991,6 +15009,9 @@ func setTestPluginControlSHA(t *testing.T, pluginsDir, name string) {
 		control = map[string]any{"main": "control.js"}
 		doc["control"] = control
 	}
+	if _, native := control["library"]; native {
+		return
+	}
 	main := strings.TrimSpace(fmt.Sprint(control["main"]))
 	if main == "" {
 		main = "control.js"
@@ -15033,7 +15054,7 @@ func loadTestPluginByID(t *testing.T, cfg *Config, id string) LoadedPlugin {
 	return LoadedPlugin{}
 }
 
-func pluginControlVMExistsForTest(rt *gojaPluginControlRuntime, pluginID string) bool {
+func pluginControlVMExistsForTest(rt *pluginControlManager, pluginID string) bool {
 	if rt == nil {
 		return false
 	}
@@ -15577,15 +15598,6 @@ func (c *pluginControlNetAdminTest) updateLinkInfo(info pluginControlNetLinkInfo
 	c.links[info.Name] = info
 }
 
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
-}
-
 func countStringsWithPrefix(values []string, prefix string) int {
 	count := 0
 	for _, value := range values {
@@ -15699,7 +15711,7 @@ func copyDirForTest(t testing.TB, src, dst string) {
 
 func decryptPluginRecordForTest(t *testing.T, runtime pluginControlRuntime, record store.PluginRecord, resource PluginResource) store.PluginRecord {
 	t.Helper()
-	rt, ok := runtime.(*gojaPluginControlRuntime)
+	rt, ok := runtime.(*pluginControlManager)
 	if !ok || rt.secretStore == nil {
 		t.Fatal("plugin secret store is unavailable in test runtime")
 	}
@@ -15721,4 +15733,51 @@ func decryptPluginRecordWithNewStoreForTest(t *testing.T, db *sql.DB, record sto
 		t.Fatalf("decrypt plugin record %s/%s/%s: %v", record.PluginID, record.ResourceID, record.RecordKey, err)
 	}
 	return decrypted
+}
+
+// requireNativePluginRuntimeForTest skips a test that runs the handlers of
+// native plugins where this host cannot: they need Linux, the plugin worker
+// and the built libraries (scripts/build-native-plugins.sh). CI sets
+// VEER_REQUIRE_NATIVE_PLUGINS=1 so a missing build fails instead.
+func requireNativePluginRuntimeForTest(t *testing.T, plugins ...string) {
+	t.Helper()
+	skip := func(format string, args ...any) {
+		t.Helper()
+		if os.Getenv("VEER_REQUIRE_NATIVE_PLUGINS") == "1" && pluginNativeHostTriple() != "" {
+			t.Fatalf(format, args...)
+		}
+		t.Skipf(format, args...)
+	}
+	triple := pluginNativeHostTriple()
+	if triple == "" {
+		skip("native plugins run on Linux only")
+	}
+	if _, err := pluginNativeWorkerExecutable(); err != nil {
+		skip("native plugin worker unavailable (run scripts/build-native-plugins.sh): %v", err)
+	}
+	for _, id := range plugins {
+		library := filepath.Join("..", "..", "plugins", id, "lib", triple, "lib"+id+".so")
+		if _, err := os.Stat(library); err != nil {
+			skip("%s is not built (run scripts/build-native-plugins.sh): %v", library, err)
+		}
+	}
+}
+
+// requireBundledNativeControlForTest checks a bundled plugin's native
+// control section: a library declared for every target triple.
+func requireBundledNativeControlForTest(t *testing.T, plugin LoadedPlugin) {
+	t.Helper()
+	if !pluginUsesNativeControl(plugin) {
+		t.Fatalf("%s control = %+v, want a native library", plugin.ID, plugin.Control)
+	}
+	for triple := range pluginNativeTriples {
+		library, ok := plugin.Control.Library[triple]
+		want := "lib/" + triple + "/lib" + plugin.ID + ".so"
+		if !ok || library.Path != want {
+			t.Fatalf("%s library %s = %+v, want %s", plugin.ID, triple, library, want)
+		}
+	}
+	if plugin.Control.ResolvedSHA256 == "" {
+		t.Fatalf("%s control has no resolved digest", plugin.ID)
+	}
 }

@@ -2,25 +2,118 @@ package app
 
 import (
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
 
-func init() { pluginProcessKeeperTestMode = true }
+// requirePluginProcessKeeper skips a managed process test where no plugin
+// worker is built (scripts/build-native-plugins.sh): the keeper is the worker
+// binary. CI sets VEER_REQUIRE_NATIVE_PLUGINS=1 so a missing build fails.
+func requirePluginProcessKeeper(t *testing.T) {
+	t.Helper()
+	if _, err := pluginProcessKeeperExecutable(); err != nil {
+		if os.Getenv("VEER_REQUIRE_NATIVE_PLUGINS") == "1" {
+			t.Fatal(err)
+		}
+		t.Skip(err)
+	}
+}
 
-// TestPluginProcessKeeperEntrypoint is the keeper subprocess used by managed
-// process tests. os.Exit keeps test runner output off the keeper's stdio.
-func TestPluginProcessKeeperEntrypoint(t *testing.T) {
-	if os.Getenv(pluginProcessKeeperTestEnv) != "1" {
+// requireWorkerKeeper checks that pid is the worker binary's keeper.
+func requireWorkerKeeper(t *testing.T, pid int) {
+	t.Helper()
+	comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(comm)) != "veer-keeper" || string(cmdline) != pluginProcessKeeperArgv0+"\x00" {
+		t.Fatalf("keeper %d runs as %q with command line %q", pid, comm, cmdline)
+	}
+}
+
+const pluginProcessKeeperLegacyTestEnv = "VEER_PLUGIN_PROCESS_KEEPER_TEST"
+
+// TestPluginProcessKeeperLegacyEntrypoint plays "veer --plugin-process-keeper"
+// for TestPluginProcessKeeperLegacyCommandBecomesTheWorkerKeeper.
+func TestPluginProcessKeeperLegacyEntrypoint(t *testing.T) {
+	if os.Getenv(pluginProcessKeeperLegacyTestEnv) != "1" {
 		return
 	}
-	if err := runPluginProcessKeeper(); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "plugin process keeper: %v\n", err)
-		os.Exit(2)
+	err := runPluginProcessKeeper()
+	_, _ = fmt.Fprintf(os.Stderr, "plugin process keeper: %v\n", err)
+	os.Exit(2)
+}
+
+// A daemon from before the worker keeper still starts keepers as
+// "veer --plugin-process-keeper" from its executable path, which names the
+// new binary once an upgrade has replaced the file. That process becomes the
+// worker keeper under the same PID, which the daemon has already placed in
+// the resource cgroup, and serves the old daemon.
+func TestPluginProcessKeeperLegacyCommandBecomesTheWorkerKeeper(t *testing.T) {
+	requirePluginProcessKeeper(t)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
 	}
-	os.Exit(0)
+	pair, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local, remote := os.NewFile(uintptr(pair[0]), "daemon"), os.NewFile(uintptr(pair[1]), "keeper")
+	conn, err := net.FileConn(local)
+	_ = local.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	keeper := exec.Command(executable, "-test.run=^TestPluginProcessKeeperLegacyEntrypoint$")
+	keeper.Env = append(os.Environ(), pluginProcessKeeperLegacyTestEnv+"=1")
+	keeper.ExtraFiles = []*os.File{remote}
+	keeper.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := keeper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = remote.Close()
+	defer func() {
+		_ = syscall.Kill(-keeper.Process.Pid, syscall.SIGKILL)
+		_ = keeper.Wait()
+	}()
+	run := newPluginKeeperRun(conn, keeper.Process.Pid)
+	var stdout, stderr pluginProcessLog
+	go run.read(newPluginKeeperScanner(conn), &stdout, &stderr)
+	req := managedTestRequest(t, "graceful")
+	if err := run.send(pluginKeeperMessage{Op: "start", Command: req.Command, Args: req.Args, Env: pluginExecEnvironment(), Dir: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run.awaitStart(); err != nil {
+		t.Fatal(err)
+	}
+	requireWorkerKeeper(t, keeper.Process.Pid)
+	deadline := time.Now().Add(6 * time.Second)
+	for out, _ := stdout.snapshot(); !strings.Contains(out, "ready"); out, _ = stdout.snapshot() {
+		if time.Now().After(deadline) {
+			t.Fatalf("output %q", out)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	run.stop(2 * time.Second)
+	if code := run.code(); code != 0 {
+		t.Fatalf("exit code %d", code)
+	}
+	if out, _ := stdout.snapshot(); !strings.Contains(out, "terminated") {
+		t.Fatalf("output %q", out)
+	}
+	corePID, _ := run.core()
+	waitManagedProcessGone(t, corePID)
 }
 
 func managedProcessAlive(pid int) bool {
@@ -199,12 +292,14 @@ func TestPluginManagedProcessKeeperStopsWhenTheDaemonVanishes(t *testing.T) {
 	p := r.get("one", "core")
 	waitManagedOutput(t, p, "ready")
 	pid := p.snapshot().PID
-	// A crashed daemon closes its end without arming a handoff.
 	p.mu.Lock()
-	conn := p.run.conn
+	conn, keeperPID := p.run.conn, p.run.keeperPID
 	p.mu.Unlock()
+	requireWorkerKeeper(t, keeperPID)
+	// A crashed daemon closes its end without arming a handoff.
 	_ = conn.Close()
 	waitManagedProcessGone(t, pid)
+	waitManagedProcessGone(t, keeperPID)
 }
 
 func TestPluginManagedProcessHandOffIsCancelledWhenTheFileCannotBeWritten(t *testing.T) {

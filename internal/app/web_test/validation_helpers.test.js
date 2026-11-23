@@ -885,8 +885,11 @@ function createHarness() {
       pendingRows[type + ':' + id] = !!pending;
       if (!pending) delete pendingRows[type + ':' + id];
     },
-    getToken() {
-      return '';
+    isAuthenticated() {
+      return false;
+    },
+    restoreSession() {
+      return Promise.resolve(false);
     },
     showTokenModal() {},
     refreshLocalizedUI() {},
@@ -2750,7 +2753,7 @@ test('shouldPauseAutoRefresh returns true while picker input is focused', () => 
 
 test('shouldPauseAutoRefresh returns true while a floating detail layer is open', () => {
   const { app, documentRef } = createHarness();
-  documentRef.querySelector = (selector) => selector === '.kernel-runtime-floating-tooltip.is-visible:not([hidden])' ? {} : null;
+  documentRef.querySelector = (selector) => selector === '.popover.is-visible:not([hidden])' ? {} : null;
 
   assert.equal(app.shouldPauseAutoRefresh(), true);
 });
@@ -2766,7 +2769,7 @@ test('awaitAutoRefreshResume holds an in-flight response until interaction ends'
   const { app, documentRef } = createHarness();
   let floatingLayerOpen = true;
   documentRef.querySelector = (selector) => (
-    selector === '.kernel-runtime-floating-tooltip.is-visible:not([hidden])' && floatingLayerOpen ? {} : null
+    selector === '.popover.is-visible:not([hidden])' && floatingLayerOpen ? {} : null
   );
   const context = { id: 1, cancelled: false };
   let resumed = false;
@@ -2820,7 +2823,7 @@ test('polling refreshes only the active tab and skips overlapping ticks', async 
   const { app, intervals } = createHarness();
   const calls = [];
   const resolvers = [];
-  app.getToken = () => 'token';
+  app.isAuthenticated = () => true;
   app.state.activeTab = 'sites';
   app.refreshDashboard = (options) => {
     calls.push(options);

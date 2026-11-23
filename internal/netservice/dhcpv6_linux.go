@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vishvananda/netlink"
+	"github.com/Unicode01/veer/internal/nlretry"
 	"golang.org/x/net/bpf"
 	"golang.org/x/sys/unix"
 )
@@ -163,6 +163,7 @@ func (srv *ipv6DHCPv6Server) run() {
 				}
 				srv.mu.Unlock()
 			}()
+			var interfaces interfaceCheckGate
 			for {
 				select {
 				case <-srv.stopCh:
@@ -191,7 +192,7 @@ func (srv *ipv6DHCPv6Server) run() {
 						continue
 					}
 					if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
-						if dhcpv6SocketNeedsReopen(state) {
+						if interfaces.run(time.Now(), func() bool { return dhcpv6SocketNeedsReopen(state) }) {
 							return
 						}
 						continue
@@ -440,7 +441,7 @@ func dhcpv6SocketNeedsReopen(state ipv6DHCPv6State) bool {
 	if state.IfName == "" {
 		return false
 	}
-	iface, err := net.InterfaceByName(state.IfName)
+	iface, err := interfaceByName(state.IfName)
 	if err != nil || iface == nil || iface.Index <= 0 {
 		return true
 	}
@@ -672,7 +673,7 @@ func resolveIPv6DHCPv6RemoteMAC(ifIndex int, dstIP net.IP, remoteMAC net.Hardwar
 }
 
 func lookupIPv6DHCPv6NeighborMAC(ifIndex int, dstIP net.IP) net.HardwareAddr {
-	neighbors, err := netlink.NeighList(ifIndex, unix.AF_INET6)
+	neighbors, err := nlretry.NeighList(ifIndex, unix.AF_INET6)
 	if err != nil {
 		return nil
 	}

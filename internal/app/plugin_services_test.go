@@ -50,7 +50,7 @@ func TestPluginServiceDiscoveryFiltersAuthorizedEndpointsAndCallsProvider(t *tes
 
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	catalog := loadPluginCatalogWithState(cfg, db)
 	applyPluginRuntimeSnapshot(&catalog, runtime.Reconcile(catalog))
@@ -81,7 +81,7 @@ func TestPluginServiceResolutionRejectsAmbiguousAndDisabledProviders(t *testing.
 
 	cfg := pluginsEnabledTestConfig(&Config{PluginsDir: dir})
 	db := openTestDB(t)
-	runtime := newPluginControlRuntime(db, cfg, nil).(*gojaPluginControlRuntime)
+	runtime := newPluginControlRuntime(db, cfg, nil).(*pluginControlManager)
 	t.Cleanup(func() { _ = runtime.Close() })
 	catalog := loadPluginCatalogWithState(cfg, db)
 	applyPluginRuntimeSnapshot(&catalog, runtime.Reconcile(catalog))

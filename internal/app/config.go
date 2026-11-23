@@ -43,12 +43,17 @@ type Config struct {
 	WebTLSCertFile                         string                    `json:"web_tls_cert_file,omitempty"`
 	WebTLSKeyFile                          string                    `json:"web_tls_key_file,omitempty"`
 	PluginAdminToken                       string                    `json:"plugin_admin_token,omitempty"`
+	WebAuthRealmsSetting                   []string                  `json:"web_auth_realms,omitempty"` // unset: ["token"] (see WebAuthRealms)
+	WebSessionIdleMinutes                  int                       `json:"web_session_idle_minutes,omitempty"`
+	WebSessionMaxHours                     int                       `json:"web_session_max_hours,omitempty"`
+	WebAdminGroupsSetting                  *[]string                 `json:"web_admin_groups,omitempty"`
+	WebRootLoginSetting                    *bool                     `json:"web_root_login,omitempty"`
+	WebTrustedProxies                      []string                  `json:"web_trusted_proxies,omitempty"`
 	MaxWorkers                             int                       `json:"max_workers"`
 	DrainTimeoutHours                      int                       `json:"drain_timeout_hours"`
 	ManagedNetworkAutoRepair               *bool                     `json:"managed_network_auto_repair,omitempty"`
 	PluginsEnabledSetting                  *bool                     `json:"plugins_enabled,omitempty"`
 	PluginsDataplaneSetting                *bool                     `json:"plugins_dataplane_enabled,omitempty"`
-	PluginsIsolationSetting                *bool                     `json:"plugins_isolation,omitempty"`
 	PluginsMinSandboxLevel                 string                    `json:"plugins_min_sandbox_level,omitempty"`
 	PluginsRequireSigned                   *bool                     `json:"plugins_require_signed_packages,omitempty"`
 	PluginsRemoteInstallEnabled            bool                      `json:"plugins_remote_install_enabled"`
@@ -70,8 +75,6 @@ type Config struct {
 	XDPGenericSetting                      *bool                     `json:"xdp_generic,omitempty"`
 	Experimental                           map[string]bool           `json:"experimental_features"`
 	Tags                                   []string                  `json:"tags"`
-
-	pluginHostTestMode bool
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -126,6 +129,9 @@ func loadConfig(path string) (*Config, error) {
 	cfg.WebTLSKeyFile = strings.TrimSpace(cfg.WebTLSKeyFile)
 	if (cfg.WebTLSCertFile == "") != (cfg.WebTLSKeyFile == "") {
 		return nil, fmt.Errorf("web_tls_cert_file and web_tls_key_file must be set together")
+	}
+	if err := normalizeWebAuthConfig(&cfg); err != nil {
+		return nil, err
 	}
 	if cfg.MaxWorkers < 0 {
 		cfg.MaxWorkers = 0
@@ -312,17 +318,7 @@ func (cfg *Config) PluginsDataplaneEnabled() bool {
 	return *cfg.PluginsDataplaneSetting
 }
 
-func (cfg *Config) PluginsIsolationEnabled() bool {
-	if cfg == nil || cfg.PluginsIsolationSetting == nil {
-		return true
-	}
-	return *cfg.PluginsIsolationSetting
-}
-
 func (cfg *Config) PluginMinimumSandboxLevel() string {
-	if cfg != nil && cfg.pluginHostTestMode {
-		return pluginSandboxLevelMinimal
-	}
 	if cfg == nil {
 		return pluginSandboxLevelFull
 	}

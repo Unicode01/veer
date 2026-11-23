@@ -2,18 +2,121 @@
   "api_version": "v1",
   "id": "packet_observer",
   "name": "Packet Observer",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "kind": "pipeline",
   "stability": "lab",
-  "description": "Example runtime plugin. The control script registers resources, actions, UI, eBPF objects, and hooks dynamically.",
+  "description": "Example runtime plugin. Its manifest declares resources, actions, UI, eBPF objects and hooks; a small native control side records apply requests.",
   "compatibility": {
     "runtime": ">=1.0.0 <2.0.0",
     "control_api_abi": 1,
     "tc_pipeline_abi": 2,
-    "features": ["dataplane.tc_pipeline.v2", "ui.capabilities.v1"]
+    "features": [
+      "control.native.v1",
+      "dataplane.tc_pipeline.v2",
+      "ui.capabilities.v1"
+    ]
   },
   "control": {
-    "main": "control.js",
-    "permissions": ["ebpf.load", "hook.attach", "kv", "plugin.register", "ui"]
+    "library": {
+      "x86_64-linux-gnu": {
+        "path": "lib/x86_64-linux-gnu/libpacket_observer.so"
+      },
+      "x86_64-linux-musl": {
+        "path": "lib/x86_64-linux-musl/libpacket_observer.so"
+      },
+      "aarch64-linux-gnu": {
+        "path": "lib/aarch64-linux-gnu/libpacket_observer.so"
+      },
+      "aarch64-linux-musl": {
+        "path": "lib/aarch64-linux-musl/libpacket_observer.so"
+      }
+    },
+    "worker": "shared",
+    "permissions": [
+      "ebpf.load",
+      "hook.attach",
+      "kv",
+      "plugin.register",
+      "ui"
+    ],
+    "register": {
+      "capabilities": [
+        "observe",
+        "tc"
+      ],
+      "pipeline_nodes": [
+        {
+          "id": "vtap0",
+          "description": "Example logical pipeline node."
+        }
+      ],
+      "ebpf_objects": [
+        {
+          "id": "packet_observer",
+          "path": "packet_observer.o",
+          "description": "Minimal TC pre_forward chain program used for plugin object validation.",
+          "programs": [
+            {
+              "id": "tc_pre_forward",
+              "section": "tc/veer/pre_forward",
+              "type": "tc"
+            }
+          ]
+        }
+      ],
+      "pipeline_attach": [
+        {
+          "id": "observe-ingress",
+          "direction": "forward",
+          "priority": 10,
+          "program": "packet_observer:tc_pre_forward",
+          "mode": "observe",
+          "interfaces": []
+        }
+      ],
+      "resources": [
+        {
+          "id": "bindings",
+          "description": "Plugin-owned JSON records persisted by the host for control-plane code.",
+          "methods": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete"
+          ],
+          "runtime_update": "manual",
+          "max_records": 64,
+          "max_record_bytes": 4096
+        }
+      ],
+      "actions": [
+        {
+          "id": "apply",
+          "description": "Example control-plane action. It persists the latest apply payload into the plugin KV namespace.",
+          "runtime_update": "runtime_apply",
+          "max_payload_bytes": 4096
+        }
+      ],
+      "ui": {
+        "static_dir": "ui",
+        "entry": "index.html",
+        "page": "observe",
+        "page_title": "Observe",
+        "resources": [
+          {
+            "resource": "bindings",
+            "methods": [
+              "list",
+              "create",
+              "delete"
+            ]
+          }
+        ],
+        "actions": [
+          "apply"
+        ]
+      }
+    }
   }
 }

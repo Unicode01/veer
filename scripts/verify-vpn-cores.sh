@@ -2,6 +2,8 @@
 set -eu
 
 ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+# shellcheck source=/dev/null
+. "$ROOT_DIR/scripts/rust-env.sh"
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/veer-vpn-cores.XXXXXX")
 trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
 
@@ -26,8 +28,11 @@ fi
 export VEER_TEST_MIHOMO VEER_TEST_SING_BOX
 cd "$ROOT_DIR"
 node --test plugins/vpn_core/test-share.test.js
+# The native control side generates the core configurations the cores check.
+cargo test -p veer-plugin-vpn-core generated_configurations_pass_the_real_core_check
+bash scripts/build-native-plugins.sh
 go test -c -o "$WORK_DIR/vpn.test" ./internal/app
-VEER_RUN_VPN_CORE_TESTS=1 "$WORK_DIR/vpn.test" -test.run='^(TestPluginManagedProcess.*|TestPluginBinary.*|TestVPNCoreLinuxIntegration|TestVPNMultiExit.*)$' -test.count=1 -test.v -test.timeout=15m
+VEER_RUN_VPN_CORE_TESTS=1 "$WORK_DIR/vpn.test" -test.run='^(TestPluginManagedProcess.*|TestPluginBinary.*|TestVPNCoreLinuxIntegration|TestVPNMultiExit.*|TestVPNChainedExitLinuxIntegration)$' -test.count=1 -test.v -test.timeout=20m
 # A service-owned delegated cgroup lets the strict test verify real quotas,
 # rather than silently degrading in the go command's shared runner cgroup.
 systemd-run --quiet --wait --pipe --collect --unit="veer-vpn-limits-$$" \

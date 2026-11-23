@@ -20,6 +20,8 @@
 #   WEB_PORT      Web 管理端口   (默认 8080)
 #   WEB_TLS       管理面使用 HTTPS（自签证书），对应 config.json 的 web_tls
 #                 (新安装默认 true；已有安装不指定时保持原状，未设置过的写为 false)
+#   WEB_AUTH_REALMS 网页登录方式，逗号分隔的 system（系统账户）/token（访问令牌），对应 web_auth_realms
+#                 (新安装默认 system,token；已有安装不指定时保持原状，未设置过的写为 token)
 #   WEB_TOKEN     Bearer Token，对应 config.json 的 web_token (默认随机生成；新远程配置至少 24 个字符)
 #   PLUGIN_ADMIN_TOKEN 插件高权限 Token，对应 plugin_admin_token (首次安装默认独立随机生成；新远程配置至少 24 个字符)
 #   VEER_SERVICE_MANAGER 服务管理器，auto/systemd/openrc，默认 auto
@@ -52,8 +54,11 @@ usage() {
   READY_TIMEOUT_SECONDS  /readyz 就绪检查等待秒数，默认 120
   VEER_BPF_STATE_DIR      bpffs 状态目录，默认 /sys/fs/bpf/forward
   VEER_RUNTIME_STATE_DIR 热重启状态目录，默认 <INSTALL_DIR>/.kernel-state
-  VEER_INSTALL_PLUGINS   设为 1 时安装 bundled stable 插件，默认 0
+  VEER_INSTALL_PLUGINS   设为 1 时安装插件包里的全部 stable 插件，默认 0。无论是否设置，
+                         已安装且插件包里有的插件都会更新为插件包中的版本（已安装版本更新时保留）
   VEER_PLUGIN_BUNDLE_PATH bundled plugin 包路径，默认与 deploy.sh 同目录的 veer-plugins.tar.gz
+  VEER_ALLOW_INCOMPATIBLE_PLUGINS 设为 1 时，即使已安装插件无法在新版本运行也继续部署
+                         （这些插件会停止工作），默认 0：部署前停止且不做改动
   VEER_SERVICE_MANAGER   服务管理器，auto/systemd/openrc，默认 auto
   VEER_INSTALL_KERNEL_MODULE 设为 1 时安装同目录 kernel/<内核版本>/veer_kfuncs.ko，默认 0
   VEER_LINK_CLI          设为 1 时把 <INSTALL_DIR>/veer 链接为 PATH 中的 veer 命令，
@@ -92,6 +97,8 @@ WEB_UI_ENABLED_EXPLICIT=0
 [[ ${WEB_UI_ENABLED+x} ]] && WEB_UI_ENABLED_EXPLICIT=1
 WEB_TLS_EXPLICIT=0
 [[ ${WEB_TLS+x} ]] && WEB_TLS_EXPLICIT=1
+WEB_AUTH_REALMS_EXPLICIT=0
+[[ ${WEB_AUTH_REALMS+x} ]] && WEB_AUTH_REALMS_EXPLICIT=1
 WEB_PORT_EXPLICIT=0
 [[ ${WEB_PORT+x} ]] && WEB_PORT_EXPLICIT=1
 WEB_TOKEN_EXPLICIT=0
@@ -117,6 +124,7 @@ WEB_PORT="${WEB_PORT:-8080}"
 WEB_BIND="${WEB_BIND:-127.0.0.1}"
 WEB_UI_ENABLED="${WEB_UI_ENABLED:-true}"
 WEB_TLS="${WEB_TLS:-true}"
+WEB_AUTH_REALMS="${WEB_AUTH_REALMS:-system,token}"
 WEB_TOKEN="${WEB_TOKEN:-$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)}"
 PLUGIN_ADMIN_TOKEN="${PLUGIN_ADMIN_TOKEN:-$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)}"
 REMOTE_MANAGEMENT_MINIMUM_TOKEN_CHARACTERS=24
@@ -130,6 +138,13 @@ SERVICE_BACKUP_PATH=""
 LEGACY_SERVICE_BACKUP_PATH=""
 PLUGIN_BUNDLE_PATH="${VEER_PLUGIN_BUNDLE_PATH:-${SCRIPT_DIR}/veer-plugins.tar.gz}"
 INSTALL_BUNDLED_PLUGINS="${VEER_INSTALL_PLUGINS:-0}"
+ALLOW_INCOMPATIBLE_PLUGINS="${VEER_ALLOW_INCOMPATIBLE_PLUGINS:-0}"
+case "$ALLOW_INCOMPATIBLE_PLUGINS" in 0|1) ;; *) fail "VEER_ALLOW_INCOMPATIBLE_PLUGINS 仅支持 0 或 1" ;; esac
+# Installed plugin directories the plugin bundle replaces with its version,
+# even without VEER_INSTALL_PLUGINS=1, and those it leaves because the
+# installed version is newer (check_installed_plugins).
+PLUGIN_UPGRADE_IDS=""
+PLUGIN_KEEP_IDS=""
 INSTALL_KERNEL_MODULE="${VEER_INSTALL_KERNEL_MODULE:-0}"
 case "$INSTALL_KERNEL_MODULE" in 0|1) ;; *) fail "VEER_INSTALL_KERNEL_MODULE 仅支持 0 或 1" ;; esac
 LINK_CLI="${VEER_LINK_CLI:-1}"
@@ -409,6 +424,16 @@ write_service_definition() {
     if kernel_helper_module_installed; then
         kernel_module_capability="CAP_SYS_MODULE"
     fi
+    # System account login reads /etc/shadow. Root reads it as its owner where
+    # the owner may read it (Debian, Alpine, Arch); where it is mode 0000
+    # (RHEL family) only CAP_DAC_READ_SEARCH lets the service read it.
+    local shadow_capability="" shadow_owner="" shadow_mode=""
+    if shadow_owner="$(stat -c '%u' /etc/shadow 2>/dev/null)" && shadow_mode="$(stat -c '%a' /etc/shadow 2>/dev/null)"; then
+        shadow_mode="$(printf '%03d' "$((10#${shadow_mode}))")"
+        if [[ "${shadow_owner}" != "0" ]] || (( (${shadow_mode: -3:1} & 4) == 0 )); then
+            shadow_capability="CAP_DAC_READ_SEARCH"
+        fi
+    fi
 
     cat > "${INSTALL_DIR}/veer-runtime-prepare" <<EOF
 #!/bin/sh
@@ -482,8 +507,8 @@ ReadWritePaths=-${BPF_STATE_DIR}
 ReadWritePaths=/sys/fs/cgroup
 PrivateTmp=true
 
-AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_SETUID CAP_SETGID CAP_KILL CAP_SYS_CHROOT CAP_SYS_ADMIN CAP_SYS_PTRACE ${kernel_module_capability}
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_SETUID CAP_SETGID CAP_KILL CAP_SYS_CHROOT CAP_SYS_ADMIN CAP_SYS_PTRACE ${kernel_module_capability}
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_SETUID CAP_SETGID CAP_KILL CAP_SYS_CHROOT CAP_SYS_ADMIN CAP_SYS_PTRACE ${kernel_module_capability} ${shadow_capability}
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_SETUID CAP_SETGID CAP_KILL CAP_SYS_CHROOT CAP_SYS_ADMIN CAP_SYS_PTRACE ${kernel_module_capability} ${shadow_capability}
 
 StandardOutput=journal
 StandardError=journal
@@ -967,12 +992,12 @@ install_bundled_plugins() {
     local name=""
     local replacement=""
 
-    if [[ "${INSTALL_BUNDLED_PLUGINS}" != "1" ]]; then
-        info "默认不安装 bundled plugins，现有插件目录保持不变"
+    if [[ "${INSTALL_BUNDLED_PLUGINS}" != "1" && -z "${PLUGIN_UPGRADE_IDS}" ]]; then
+        info "没有需要安装或更新的插件，现有插件目录保持不变"
         return
     fi
     if [[ ! -f "${PLUGIN_BUNDLE_PATH}" ]]; then
-        warn "VEER_INSTALL_PLUGINS=1，但未找到插件包: ${PLUGIN_BUNDLE_PATH}"
+        warn "需要安装 bundled plugins，但未找到插件包: ${PLUGIN_BUNDLE_PATH}"
         return 1
     fi
     if [[ -z "${PLUGIN_INSTALL_DIR}" ]]; then
@@ -1062,6 +1087,14 @@ PY
     for source in "${PLUGIN_STAGING_DIR}/plugins"/*; do
         [[ -e "${source}" ]] || continue
         name="$(basename "${source}")"
+        # Without VEER_INSTALL_PLUGINS=1 only installed plugins are updated;
+        # an installed plugin newer than the bundle's is never replaced.
+        if [[ " ${PLUGIN_KEEP_IDS} " == *" ${name} "* ]]; then
+            continue
+        fi
+        if [[ "${INSTALL_BUNDLED_PLUGINS}" != "1" && " ${PLUGIN_UPGRADE_IDS} " != *" ${name} "* ]]; then
+            continue
+        fi
         replacement="${PLUGIN_INSTALL_DIR}/.${name}.next.$$"
         safe_remove_install_path "${replacement}"
         cp -a "${source}" "${replacement}" || {
@@ -1079,7 +1112,158 @@ PY
         }
     done
     safe_remove_install_path "${PLUGIN_STAGING_DIR}"
-    ok "bundled plugins 已更新到 ${PLUGIN_INSTALL_DIR}"
+    if [[ "${INSTALL_BUNDLED_PLUGINS}" == "1" ]]; then
+        ok "bundled plugins 已更新到 ${PLUGIN_INSTALL_DIR}"
+    else
+        ok "已更新为插件包中的版本: ${PLUGIN_UPGRADE_IDS}"
+    fi
+}
+
+# Runs the new binary's read-only plugin check (veer plugin preflight) and
+# keeps the installed plugins in step with the release. phase "before" runs
+# before anything changes: every installed plugin the plugin bundle provides
+# goes into PLUGIN_UPGRADE_IDS and is replaced by the bundle's version, unless
+# the installed one is newer (PLUGIN_KEEP_IDS); any other plugin the new
+# version cannot run stops the deploy. phase "after" runs once the bundle is
+# applied and returns 1 if a plugin still cannot run.
+# VEER_ALLOW_INCOMPATIBLE_PLUGINS=1 turns both stops into warnings.
+check_installed_plugins() {
+    local phase="$1"
+    # The new binary runs from the install directory, which the service
+    # executes from anyway; its upload directory may be a noexec /tmp.
+    local checker="${INSTALL_DIR}/.veer-plugin-check.$$"
+    local report=""
+    local assignments=""
+    local status=0
+    local PLUGIN_CHECK_UPGRADE=""
+    local PLUGIN_CHECK_KEEP=""
+    local PLUGIN_CHECK_BLOCKED=0
+
+    [[ -f "${INSTALL_DIR}/config.json" ]] || return 0
+    install -m 700 "${BINARY_PATH}" "${checker}"
+    report="$("${checker}" plugin preflight --json --install-dir "${INSTALL_DIR}" --config "${INSTALL_DIR}/config.json" 2>&1)" || status=$?
+    rm -f "${checker}"
+    if (( status != 0 )); then
+        if [[ "${ALLOW_INCOMPATIBLE_PLUGINS}" == "1" ]]; then
+            warn "插件兼容性检查未完成，按 VEER_ALLOW_INCOMPATIBLE_PLUGINS=1 继续: ${report##*$'\n'}"
+            return 0
+        fi
+        fail "插件兼容性检查未完成，未替换二进制、配置与插件: ${report##*$'\n'}\n       确认已安装插件能在新版本运行后，可设置 VEER_ALLOW_INCOMPATIBLE_PLUGINS=1 跳过检查"
+    fi
+    assignments="$(python3 - "${report}" "${PLUGIN_BUNDLE_PATH}" "${phase}" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import sys
+import tarfile
+
+report = json.loads(sys.argv[1])
+bundle_path, phase = sys.argv[2], sys.argv[3]
+
+
+def read_version(data):
+    try:
+        return str(json.loads(data).get("version") or "")
+    except (ValueError, AttributeError):
+        return ""
+
+
+def version_key(value):
+    numbers = [int(part) for part in re.findall(r"\d+", value.split("-", 1)[0].split("+", 1)[0])][:3]
+    return tuple(numbers + [0] * (3 - len(numbers)))
+
+
+# The bundle's plugins and the installed ones, by directory, with versions.
+bundled, installed = {}, {}
+if phase == "before" and os.path.isfile(bundle_path):
+    try:
+        with tarfile.open(bundle_path, "r:gz") as archive:
+            for member in archive:
+                parts = member.name.split("/")
+                if len(parts) == 3 and parts[0] == "plugins" and parts[2] == "plugin.json" and member.isfile():
+                    stream = archive.extractfile(member)
+                    bundled[parts[1]] = read_version(stream.read(1 << 20)) if stream else ""
+    except (OSError, tarfile.TarError) as err:
+        print(f"        无法读取插件包 {bundle_path}: {err}", file=sys.stderr)
+plugins_dir = report.get("plugins_dir") or ""
+if phase == "before" and plugins_dir and os.path.isdir(plugins_dir):
+    for entry in sorted(Path(plugins_dir).iterdir()):
+        manifest = entry / "plugin.json"
+        if entry.is_dir() and manifest.is_file():
+            try:
+                installed[entry.name] = read_version(manifest.read_bytes())
+            except OSError:
+                installed[entry.name] = ""
+if phase == "before" and installed and not os.path.isfile(bundle_path):
+    print(f"        未找到插件包 {bundle_path}，已安装插件保持现有版本", file=sys.stderr)
+
+hints = {
+    "control_script": "旧版 JavaScript 插件，新版本只运行原生插件库：安装该插件的新版插件包，或删除它的插件目录",
+    "no_library": "插件里没有本机平台的库：需要支持本机平台的插件版本",
+    "no_worker": "这个 veer 二进制没有插件 worker（源码构建需要 Rust 与 cargo-zigbuild）：请改用 release 包",
+}
+problems = {}
+for plugin in report.get("plugins", []):
+    name = f"{plugin.get('id', '')} {plugin.get('version', '')}".strip()
+    if plugin.get("status") == "warning":
+        print(f"        [注意] {name}: {plugin.get('reason', '')}", file=sys.stderr)
+    elif plugin.get("status") == "blocked":
+        problems[plugin.get("dir") or plugin.get("id", "")] = plugin
+
+upgrade, keep = [], []
+for directory, version in installed.items():
+    if directory not in bundled:
+        continue
+    new = bundled[directory]
+    problem = problems.get(directory)
+    if problem and problem.get("problem") == "no_worker":
+        # A plugin directory cannot bring the missing worker.
+        continue
+    if problem:
+        print(f"        [替换] {directory} {version}: {problem.get('reason', '')}；改用插件包中的 {new}", file=sys.stderr)
+    elif version and new and version_key(version) > version_key(new):
+        keep.append(directory)
+        print(f"        [保留] {directory} {version}: 比插件包中的 {new} 新", file=sys.stderr)
+        continue
+    else:
+        print(f"        [更新] {directory} {version or '?'} -> {new or '?'}", file=sys.stderr)
+    upgrade.append(directory)
+
+blocked = 0
+for directory, plugin in problems.items():
+    if directory in upgrade:
+        continue
+    blocked += 1
+    print(f"        [不兼容] {plugin.get('id', '')} {plugin.get('version', '')}: {plugin.get('reason', '')}", file=sys.stderr)
+    hint = hints.get(plugin.get("problem", ""))
+    if hint:
+        print(f"                 {hint}", file=sys.stderr)
+print("PLUGIN_CHECK_UPGRADE=" + shlex.quote(" ".join(upgrade)))
+print("PLUGIN_CHECK_KEEP=" + shlex.quote(" ".join(keep)))
+print(f"PLUGIN_CHECK_BLOCKED={blocked}")
+PY
+)" || fail "无法解析插件兼容性检查结果，未替换二进制、配置与插件"
+    eval "${assignments}"
+
+    if (( PLUGIN_CHECK_BLOCKED > 0 )); then
+        if [[ "${ALLOW_INCOMPATIBLE_PLUGINS}" == "1" ]]; then
+            warn "${PLUGIN_CHECK_BLOCKED} 个已安装插件无法在新版本运行，按 VEER_ALLOW_INCOMPATIBLE_PLUGINS=1 继续部署，这些插件将停止工作"
+        elif [[ "${phase}" == before ]]; then
+            fail "${PLUGIN_CHECK_BLOCKED} 个已安装插件无法在新版本运行，部署已停止，未替换二进制、配置与插件\n       处理上述插件后重试，或设置 VEER_ALLOW_INCOMPATIBLE_PLUGINS=1 继续部署（这些插件会停止工作）"
+        else
+            return 1
+        fi
+    fi
+    if [[ "${phase}" == before ]]; then
+        PLUGIN_UPGRADE_IDS="${PLUGIN_CHECK_UPGRADE}"
+        PLUGIN_KEEP_IDS="${PLUGIN_CHECK_KEEP}"
+        if [[ -n "${PLUGIN_UPGRADE_IDS}" ]]; then
+            info "以下已安装插件将更新为插件包中的版本: ${PLUGIN_UPGRADE_IDS}"
+        fi
+    fi
+    return 0
 }
 
 sync_config_file() {
@@ -1095,12 +1279,14 @@ sync_config_file() {
     FORWARD_DEPLOY_EXPLICIT_WEB_BIND="${WEB_BIND_EXPLICIT}" \
     FORWARD_DEPLOY_EXPLICIT_WEB_UI_ENABLED="${WEB_UI_ENABLED_EXPLICIT}" \
     FORWARD_DEPLOY_EXPLICIT_WEB_TLS="${WEB_TLS_EXPLICIT}" \
+    FORWARD_DEPLOY_EXPLICIT_WEB_AUTH_REALMS="${WEB_AUTH_REALMS_EXPLICIT}" \
     FORWARD_DEPLOY_EXPLICIT_WEB_PORT="${WEB_PORT_EXPLICIT}" \
     FORWARD_DEPLOY_EXPLICIT_WEB_TOKEN="${WEB_TOKEN_EXPLICIT}" \
     FORWARD_DEPLOY_EXPLICIT_PLUGIN_ADMIN_TOKEN="${PLUGIN_ADMIN_TOKEN_EXPLICIT}" \
     FORWARD_DEPLOY_WEB_BIND="${WEB_BIND}" \
     FORWARD_DEPLOY_WEB_UI_ENABLED="${WEB_UI_ENABLED}" \
     FORWARD_DEPLOY_WEB_TLS="${WEB_TLS}" \
+    FORWARD_DEPLOY_WEB_AUTH_REALMS="${WEB_AUTH_REALMS}" \
     FORWARD_DEPLOY_WEB_PORT="${WEB_PORT}" \
     FORWARD_DEPLOY_WEB_TOKEN="${WEB_TOKEN}" \
     FORWARD_DEPLOY_PLUGIN_ADMIN_TOKEN="${PLUGIN_ADMIN_TOKEN}" \
@@ -1181,6 +1367,25 @@ def get_current_port(key: str):
     return value
 
 
+WEB_AUTH_REALM_NAMES = ("system", "token")
+
+
+def parse_web_auth_realms(value, label: str, from_env: bool = False):
+    # WEB_AUTH_REALMS is comma-separated; config.json holds a JSON list.
+    if from_env and isinstance(value, str):
+        value = [item for item in value.split(",") if item.strip()]
+    if not isinstance(value, list) or not value:
+        raise SystemExit(f"{label} 必须列出至少一种登录方式：system、token")
+    realms = []
+    for item in value:
+        if not isinstance(item, str) or item.strip().lower() not in WEB_AUTH_REALM_NAMES:
+            raise SystemExit(f"{label} 只支持 system、token，收到 {item!r}")
+        realm = item.strip().lower()
+        if realm not in realms:
+            realms.append(realm)
+    return realms
+
+
 def choose_value(key: str, default_value):
     if explicit_keys.get(key, False):
         return explicit_values[key]
@@ -1209,6 +1414,7 @@ explicit_keys = {
     "web_bind": os.environ["FORWARD_DEPLOY_EXPLICIT_WEB_BIND"] == "1",
     "web_ui_enabled": os.environ["FORWARD_DEPLOY_EXPLICIT_WEB_UI_ENABLED"] == "1",
     "web_tls": os.environ.get("FORWARD_DEPLOY_EXPLICIT_WEB_TLS", "0") == "1",
+    "web_auth_realms": os.environ.get("FORWARD_DEPLOY_EXPLICIT_WEB_AUTH_REALMS", "0") == "1",
     "web_port": os.environ["FORWARD_DEPLOY_EXPLICIT_WEB_PORT"] == "1",
     "web_token": os.environ["FORWARD_DEPLOY_EXPLICIT_WEB_TOKEN"] == "1",
     "plugin_admin_token": os.environ["FORWARD_DEPLOY_EXPLICIT_PLUGIN_ADMIN_TOKEN"] == "1",
@@ -1218,6 +1424,7 @@ explicit_values = {
     "web_bind": os.environ["FORWARD_DEPLOY_WEB_BIND"],
     "web_ui_enabled": env_bool("FORWARD_DEPLOY_WEB_UI_ENABLED"),
     "web_tls": os.environ.get("FORWARD_DEPLOY_WEB_TLS", "true") == "true",
+    "web_auth_realms": parse_web_auth_realms(os.environ.get("FORWARD_DEPLOY_WEB_AUTH_REALMS", "system,token"), "WEB_AUTH_REALMS", from_env=True),
     "web_port": env_int("FORWARD_DEPLOY_WEB_PORT"),
     "web_token": os.environ["FORWARD_DEPLOY_WEB_TOKEN"],
     "plugin_admin_token": os.environ["FORWARD_DEPLOY_PLUGIN_ADMIN_TOKEN"],
@@ -1230,6 +1437,12 @@ hardcoded_defaults = OrderedDict([
     ("web_port", env_int("FORWARD_DEPLOY_DEFAULT_WEB_PORT")),
     ("web_token", os.environ["FORWARD_DEPLOY_DEFAULT_WEB_TOKEN"]),
     ("plugin_admin_token", os.environ["FORWARD_DEPLOY_DEFAULT_PLUGIN_ADMIN_TOKEN"]),
+    ("web_auth_realms", ["system", "token"]),
+    ("web_session_idle_minutes", 30),
+    ("web_session_max_hours", 12),
+    ("web_admin_groups", ["sudo", "wheel"]),
+    ("web_root_login", True),
+    ("web_trusted_proxies", []),
     ("max_workers", 0),
     ("drain_timeout_hours", 24),
     ("managed_network_auto_repair", True),
@@ -1303,6 +1516,10 @@ defaults["web_ui_enabled"] = env_bool("FORWARD_DEPLOY_DEFAULT_WEB_UI_ENABLED")
 # New installs serve the panel over HTTPS. A config written before web_tls
 # existed ran plain HTTP, so it gets false and keeps doing so.
 defaults["web_tls"] = not config_exists
+# New installs log in with a host account (over HTTPS, see web_tls) or the
+# token. A config written before web_auth_realms logged in with the token
+# only and keeps exactly that.
+defaults["web_auth_realms"] = ["system", "token"] if not config_exists else ["token"]
 defaults["web_port"] = env_int("FORWARD_DEPLOY_DEFAULT_WEB_PORT")
 defaults["web_token"] = os.environ["FORWARD_DEPLOY_DEFAULT_WEB_TOKEN"]
 defaults["plugin_admin_token"] = os.environ["FORWARD_DEPLOY_DEFAULT_PLUGIN_ADMIN_TOKEN"]
@@ -1325,6 +1542,8 @@ if isinstance(experimental_features, dict) and "kernel_tc_flow_cache" in experim
 # choice. A top-level value already present is kept.
 if isinstance(experimental_features, dict):
     experimental_features.pop("xdp_generic", None)
+
+result["web_auth_realms"] = parse_web_auth_realms(result["web_auth_realms"], "config.json 中的 web_auth_realms")
 
 if result["web_token"] == "":
     raise SystemExit("web_token 不能为空")
@@ -1412,6 +1631,7 @@ values = {
     "WEB_BIND": str(data.get("web_bind", "127.0.0.1")),
     "WEB_UI_ENABLED": "true" if data.get("web_ui_enabled", True) else "false",
     "WEB_TLS": "true" if data.get("web_tls", False) is True else "false",
+    "WEB_AUTH_REALMS": ",".join(data.get("web_auth_realms") or ["token"]),
     "WEB_PORT": str(data.get("web_port", 8080)),
     "WEB_TOKEN": str(data.get("web_token", "")),
 	"PLUGIN_ADMIN_TOKEN": str(data.get("plugin_admin_token", "")),
@@ -1433,6 +1653,9 @@ log_explicit_config_overrides() {
     fi
     if [[ "${WEB_TLS_EXPLICIT}" == "1" ]]; then
         overrides="${overrides} web_tls"
+    fi
+    if [[ "${WEB_AUTH_REALMS_EXPLICIT}" == "1" ]]; then
+        overrides="${overrides} web_auth_realms"
     fi
     if [[ "${WEB_PORT_EXPLICIT}" == "1" ]]; then
         overrides="${overrides} web_port"
@@ -1610,6 +1833,12 @@ elif $HAS_EXISTING_INSTALL; then
     info "检测到已有安装但服务当前未运行，将执行冷启动更新"
 fi
 
+# ---------- 已安装插件兼容性 ----------
+if $HAS_EXISTING_INSTALL; then
+    info "检查已安装插件能否在新版本运行..."
+    check_installed_plugins before
+fi
+
 # ---------- 部署文件 ----------
 info "部署到 ${INSTALL_DIR}..."
 mkdir -p "$INSTALL_DIR"
@@ -1633,15 +1862,22 @@ fi
 warn_short_remote_management_tokens
 secure_runtime_secret_files
 
-if [[ "${INSTALL_BUNDLED_PLUGINS}" == "1" ]]; then
+if [[ "${INSTALL_BUNDLED_PLUGINS}" == "1" || -n "${PLUGIN_UPGRADE_IDS}" ]]; then
     configure_plugin_install_dir
 fi
+plugin_install_failure=""
 if ! install_bundled_plugins; then
+    plugin_install_failure="bundled plugin 安装失败，现有插件与配置已恢复"
+elif [[ "${PLUGIN_BUNDLE_APPLIED}" == "true" ]] && ! check_installed_plugins after; then
+    restore_bundled_plugins
+    plugin_install_failure="插件包中的插件仍无法在新版本运行，现有插件与配置已恢复"
+fi
+if [[ -n "${plugin_install_failure}" ]]; then
     if [[ "${CONFIG_BACKED_UP}" == "true" && -f "${CONFIG_BACKUP_PATH}" ]]; then
         rm -f "${INSTALL_DIR}/config.json"
         install -m 600 "${CONFIG_BACKUP_PATH}" "${INSTALL_DIR}/config.json"
     fi
-    fail "bundled plugin 安装失败，现有插件与配置已恢复"
+    fail "${plugin_install_failure}"
 fi
 
 if [[ "$INSTALL_KERNEL_MODULE" == "1" ]]; then
@@ -1855,6 +2091,18 @@ if [[ "${WEB_TLS}" == "true" ]]; then
         fi
     fi
 fi
+case ",${WEB_AUTH_REALMS}," in
+    *,system,*)
+        if [[ "${WEB_TLS}" == "true" ]] || is_loopback_bind "$WEB_BIND"; then
+            echo -e "  网页登录:  ${CYAN}系统账户（root 或 sudo/wheel 组成员）或访问令牌${NC}"
+        else
+            echo -e "  网页登录:  ${CYAN}访问令牌；系统账户只能在本机或经 HTTPS 登录（WEB_TLS=true）${NC}"
+        fi
+        ;;
+    *)
+        echo -e "  网页登录:  ${CYAN}访问令牌${NC}（启用系统账户登录：WEB_AUTH_REALMS=system,token）"
+        ;;
+esac
 echo -e "  就绪探针:  ${CYAN}${API_READY_URL}${NC}"
 echo -e "  就绪超时:  ${CYAN}${READY_TIMEOUT_SECONDS}s${NC}"
 if [[ "${CONFIG_BACKED_UP}" != "true" && -t 1 ]]; then

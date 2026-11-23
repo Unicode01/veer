@@ -37,6 +37,15 @@ import (
 // TC_ACT_UNSPEC (TCX_NEXT) to pass the packet on and TC_ACT_SHOT to drop
 // it; no dispatcher or tail call is involved. Plugin pipeline hooks run as
 // tail calls of the core and keep their place behind the fallback.
+//
+// An xdp hook may also name a tc_egress program of its own object. The host
+// attaches it the same way at TC egress of every interface the hook is
+// bound to, whatever runs the hook at ingress, so a plugin can see what
+// leaves the interfaces it filters (the firewall learns the connections it
+// lets replies in for). It sits at the head of the egress list too, ahead of
+// any core egress program, and must return TC_ACT_UNSPEC: egress positions
+// observe, they never drop. Both directions share one list of positions,
+// told apart by the key's parent.
 const (
 	kernelXDPPluginTCFallbackPriorityBase = 1
 	// Priorities 1..8 stay below kernelReplyFilterPrio (10).
@@ -47,7 +56,8 @@ const (
 )
 
 // kernelXDPPluginTCFallback is one tc program position on one interface:
-// a cls_bpf filter or a tcx link.
+// a cls_bpf filter or a tcx link, at ingress (a tc_fallback) or at egress (a
+// tc_egress program).
 type kernelXDPPluginTCFallback struct {
 	key      kernelAttachmentKey
 	name     string
@@ -66,10 +76,70 @@ type kernelXDPPluginTCFallbackSplit struct {
 }
 
 // kernelXDPPluginTCFallbackPlan lists the tc programs of one interface in
-// hook order.
+// hook order: their tc_fallback programs, or with egress their tc_egress
+// programs.
 type kernelXDPPluginTCFallbackPlan struct {
 	ifindex  int
+	egress   bool
 	programs []loadedKernelXDPPluginProgram
+}
+
+func (p kernelXDPPluginTCFallbackPlan) program(item loadedKernelXDPPluginProgram) *ebpf.Program {
+	if p.egress {
+		return item.egressProg
+	}
+	return item.tcProg
+}
+
+// egress reports whether a position sits at TC egress.
+func (p kernelXDPPluginTCFallback) egress() bool {
+	return p.key.parent == netlink.HANDLE_MIN_EGRESS
+}
+
+// kernelXDPPluginTCEgressPlans lists, per bound interface, the tc_egress
+// programs of the hooks bound there, in hook order.
+func kernelXDPPluginTCEgressPlans(programs []loadedKernelXDPPluginProgram) []kernelXDPPluginTCFallbackPlan {
+	byIndex := make(map[int][]loadedKernelXDPPluginProgram)
+	order := make([]int, 0)
+	for _, item := range programs {
+		if item.egressProg == nil {
+			continue
+		}
+		for _, ifindex := range item.plan.InterfaceIndexes {
+			if ifindex == 0 {
+				continue
+			}
+			if _, ok := byIndex[int(ifindex)]; !ok {
+				order = append(order, int(ifindex))
+			}
+			byIndex[int(ifindex)] = append(byIndex[int(ifindex)], item)
+		}
+	}
+	sort.Ints(order)
+	out := make([]kernelXDPPluginTCFallbackPlan, 0, len(order))
+	for _, ifindex := range order {
+		out = append(out, kernelXDPPluginTCFallbackPlan{ifindex: ifindex, egress: true, programs: byIndex[ifindex]})
+	}
+	return out
+}
+
+// kernelXDPPluginTCEgressExpected counts the egress positions the hooks of
+// desired need.
+func kernelXDPPluginTCEgressExpected(desired []kernelXDPPluginDesiredPlugin) int {
+	count := 0
+	for _, plugin := range desired {
+		for _, hook := range plugin.hooks {
+			if hook.TCEgressRef == "" {
+				continue
+			}
+			for _, ifindex := range hook.InterfaceIndexes {
+				if ifindex != 0 {
+					count++
+				}
+			}
+		}
+	}
+	return count
 }
 
 func kernelXDPPluginTCFallbackUseTCX(cfg *Config) bool {
@@ -80,13 +150,31 @@ func kernelXDPPluginTCFallbackUseTCX(cfg *Config) bool {
 }
 
 func kernelXDPPluginTCFallbackKey(ifindex, position int, tcx bool) kernelAttachmentKey {
+	return kernelXDPPluginTCPositionKey(ifindex, position, tcx, false)
+}
+
+// kernelXDPPluginTCPositionKey is the key of a position at ingress or, with
+// egress, at egress. cls_bpf keeps a separate filter list per direction, so
+// both use the same priorities and handles.
+func kernelXDPPluginTCPositionKey(ifindex, position int, tcx, egress bool) kernelAttachmentKey {
+	parent := uint32(netlink.HANDLE_MIN_INGRESS)
+	if egress {
+		parent = netlink.HANDLE_MIN_EGRESS
+	}
 	return kernelAttachmentKey{
 		linkIndex: ifindex,
-		parent:    netlink.HANDLE_MIN_INGRESS,
+		parent:    parent,
 		priority:  uint16(kernelXDPPluginTCFallbackPriorityBase + position),
 		handle:    netlink.MakeHandle(0, uint16(kernelXDPPluginTCFallbackHandleBase+position)),
 		tcx:       tcx,
 	}
+}
+
+func kernelXDPPluginTCAttachType(key kernelAttachmentKey) ebpf.AttachType {
+	if key.parent == netlink.HANDLE_MIN_EGRESS {
+		return ebpf.AttachTCXEgress
+	}
+	return ebpf.AttachTCXIngress
 }
 
 func kernelXDPPluginTCFallbackPosition(key kernelAttachmentKey) int {
@@ -132,6 +220,9 @@ func kernelXDPPluginTCFallbackPositionKey(pluginID, hookID string, ifindex int) 
 func kernelXDPPluginTCFallbackHookSet(positions []kernelXDPPluginTCFallback) map[string]struct{} {
 	out := make(map[string]struct{}, len(positions))
 	for _, position := range positions {
+		if position.egress() {
+			continue
+		}
 		out[kernelXDPPluginTCFallbackPositionKey(position.pluginID, position.hookID, position.key.linkIndex)] = struct{}{}
 	}
 	return out
@@ -147,7 +238,7 @@ func kernelXDPPluginTCFallbackExclusions(attachments []xdpAttachment, positions 
 	out := make(map[uint32]map[string]struct{})
 	for _, position := range positions {
 		ifindex := position.key.linkIndex
-		if _, ok := dispatched[ifindex]; !ok {
+		if _, ok := dispatched[ifindex]; !ok || position.egress() {
 			continue
 		}
 		if out[uint32(ifindex)] == nil {
@@ -158,7 +249,10 @@ func kernelXDPPluginTCFallbackExclusions(attachments []xdpAttachment, positions 
 	return out
 }
 
-func kernelXDPPluginTCFallbackName(plan kernelXDPPluginHookPlan) string {
+func kernelXDPPluginTCFallbackName(plan kernelXDPPluginHookPlan, egress bool) string {
+	if egress {
+		return "veer_xdp_egress:" + plan.PluginID + "/" + plan.HookID
+	}
 	return "veer_xdp_fallback:" + plan.PluginID + "/" + plan.HookID
 }
 
@@ -177,13 +271,18 @@ func (rt *kernelXDPPluginPipelineRuntime) reconcileTCFallbacksLocked(plans []ker
 	result := make([]kernelXDPPluginTCFallback, 0)
 	added := make([]kernelXDPPluginTCFallback, 0)
 	for _, plan := range plans {
+		what := "tc fallback"
+		if plan.egress {
+			what = "tc egress program"
+		}
 		if len(plan.programs) > kernelXDPPluginTCFallbackMaxPerInterface {
-			return result, added, fmt.Errorf("%s has %d xdp hooks with a tc fallback, limit %d", xdpInterfaceLabel(plan.ifindex), len(plan.programs), kernelXDPPluginTCFallbackMaxPerInterface)
+			return result, added, fmt.Errorf("%s has %d xdp hooks with a %s, limit %d", xdpInterfaceLabel(plan.ifindex), len(plan.programs), what, kernelXDPPluginTCFallbackMaxPerInterface)
 		}
 		var previous *kernelXDPPluginTCFallback
 		for i, item := range plan.programs {
-			key := kernelXDPPluginTCFallbackKey(plan.ifindex, i, tcx)
-			name := kernelXDPPluginTCFallbackName(item.plan)
+			key := kernelXDPPluginTCPositionKey(plan.ifindex, i, tcx, plan.egress)
+			name := kernelXDPPluginTCFallbackName(item.plan, plan.egress)
+			prog := plan.program(item)
 			position, ok := current[key]
 			if !ok {
 				position, ok = handoff.adoptTCFallback(key)
@@ -191,17 +290,17 @@ func (rt *kernelXDPPluginPipelineRuntime) reconcileTCFallbacksLocked(plans []ker
 			if ok {
 				position.name = name
 				position.pluginID, position.hookID = item.plan.PluginID, item.plan.HookID
-				if err := position.replace(item.tcProg); err != nil {
-					return result, added, fmt.Errorf("replace tc fallback of %s/%s on %s: %w", item.plan.PluginID, item.plan.HookID, xdpInterfaceLabel(plan.ifindex), err)
+				if err := position.replace(prog); err != nil {
+					return result, added, fmt.Errorf("replace %s of %s/%s on %s: %w", what, item.plan.PluginID, item.plan.HookID, xdpInterfaceLabel(plan.ifindex), err)
 				}
 				result = append(result, position)
 				previous = &result[len(result)-1]
 				continue
 			}
 			next := kernelXDPPluginTCFallbackNext(current, key)
-			position, err := attachKernelXDPPluginTCFallback(key, name, item.tcProg, previous, next)
+			position, err := attachKernelXDPPluginTCFallback(key, name, prog, previous, next)
 			if err != nil {
-				return result, added, fmt.Errorf("attach tc fallback of %s/%s on %s: %w", item.plan.PluginID, item.plan.HookID, xdpInterfaceLabel(plan.ifindex), err)
+				return result, added, fmt.Errorf("attach %s of %s/%s on %s: %w", what, item.plan.PluginID, item.plan.HookID, xdpInterfaceLabel(plan.ifindex), err)
 			}
 			position.pluginID, position.hookID = item.plan.PluginID, item.plan.HookID
 			result = append(result, position)
@@ -216,7 +315,7 @@ func (rt *kernelXDPPluginPipelineRuntime) reconcileTCFallbacksLocked(plans []ker
 // already holds, if any: a new tcx link goes before it.
 func kernelXDPPluginTCFallbackNext(current map[kernelAttachmentKey]kernelXDPPluginTCFallback, key kernelAttachmentKey) *kernelXDPPluginTCFallback {
 	for position := kernelXDPPluginTCFallbackPosition(key) + 1; position < kernelXDPPluginTCFallbackMaxPerInterface; position++ {
-		next, ok := current[kernelXDPPluginTCFallbackKey(key.linkIndex, position, key.tcx)]
+		next, ok := current[kernelXDPPluginTCPositionKey(key.linkIndex, position, key.tcx, key.parent == netlink.HANDLE_MIN_EGRESS)]
 		if ok && next.slot != nil && next.slot.link != nil {
 			return &next
 		}
@@ -241,7 +340,7 @@ func attachKernelXDPPluginTCFallback(key kernelAttachmentKey, name string, prog 
 		l, err := link.AttachTCX(link.TCXOptions{
 			Interface: key.linkIndex,
 			Program:   prog,
-			Attach:    ebpf.AttachTCXIngress,
+			Attach:    kernelXDPPluginTCAttachType(key),
 			Anchor:    anchor,
 		})
 		if err != nil {
@@ -346,17 +445,22 @@ func detachStaleKernelXDPPluginTCFallbacks(old, next []kernelXDPPluginTCFallback
 // kernelXDPPluginTCFallbacksPresent reports whether the kernel still runs
 // every position, whichever program it holds.
 func kernelXDPPluginTCFallbacksPresent(positions []kernelXDPPluginTCFallback) bool {
-	tcxLinks := make(map[int]map[link.ID]struct{})
-	filters := make(map[int][]netlink.Filter)
+	type listKey struct {
+		ifindex int
+		parent  uint32
+	}
+	tcxLinks := make(map[listKey]map[link.ID]struct{})
+	filters := make(map[listKey][]netlink.Filter)
 	for _, position := range positions {
 		ifindex := position.key.linkIndex
+		which := listKey{ifindex: ifindex, parent: position.key.parent}
 		if position.key.tcx {
 			if position.slot == nil || position.slot.link == nil {
 				return false
 			}
-			ids, ok := tcxLinks[ifindex]
+			ids, ok := tcxLinks[which]
 			if !ok {
-				result, err := link.QueryPrograms(link.QueryOptions{Target: ifindex, Attach: ebpf.AttachTCXIngress})
+				result, err := link.QueryPrograms(link.QueryOptions{Target: ifindex, Attach: kernelXDPPluginTCAttachType(position.key)})
 				if err != nil {
 					return false
 				}
@@ -366,24 +470,24 @@ func kernelXDPPluginTCFallbacksPresent(positions []kernelXDPPluginTCFallback) bo
 						ids[id] = struct{}{}
 					}
 				}
-				tcxLinks[ifindex] = ids
+				tcxLinks[which] = ids
 			}
 			if _, ok := ids[position.slot.linkID]; !ok {
 				return false
 			}
 			continue
 		}
-		list, ok := filters[ifindex]
+		list, ok := filters[which]
 		if !ok {
 			l, err := netlink.LinkByIndex(ifindex)
 			if err != nil {
 				return false
 			}
-			list, err = netlink.FilterList(l, netlink.HANDLE_MIN_INGRESS)
+			list, err = netlink.FilterList(l, position.key.parent)
 			if err != nil {
 				return false
 			}
-			filters[ifindex] = list
+			filters[which] = list
 		}
 		found := false
 		for _, filter := range list {
@@ -400,12 +504,26 @@ func kernelXDPPluginTCFallbacksPresent(positions []kernelXDPPluginTCFallback) bo
 	return true
 }
 
+// kernelXDPPluginTCFallbackInterfaces names the interfaces that run some
+// hook's tc_fallback; egress positions do not count.
 func kernelXDPPluginTCFallbackInterfaces(positions []kernelXDPPluginTCFallback) map[int]struct{} {
 	out := make(map[int]struct{}, len(positions))
 	for _, position := range positions {
-		out[position.key.linkIndex] = struct{}{}
+		if !position.egress() {
+			out[position.key.linkIndex] = struct{}{}
+		}
 	}
 	return out
+}
+
+func kernelXDPPluginTCEgressCount(positions []kernelXDPPluginTCFallback) int {
+	count := 0
+	for _, position := range positions {
+		if position.egress() {
+			count++
+		}
+	}
+	return count
 }
 
 func kernelXDPPluginTCFallbackMetadata(positions []kernelXDPPluginTCFallback) []kernelHotRestartTCAttachment {
@@ -423,6 +541,9 @@ func kernelXDPPluginTCFallbackMetadata(positions []kernelXDPPluginTCFallback) []
 		if out[i].LinkIndex != out[j].LinkIndex {
 			return out[i].LinkIndex < out[j].LinkIndex
 		}
+		if out[i].Parent != out[j].Parent {
+			return out[i].Parent < out[j].Parent // ingress (ffff:fff2) before egress (ffff:fff3)
+		}
 		return out[i].Priority < out[j].Priority
 	})
 	return out
@@ -437,10 +558,11 @@ func kernelXDPPluginTCFallbackKeyFromMetadata(item kernelHotRestartTCAttachment)
 		tcx:       item.TCX,
 	}
 	position := kernelXDPPluginTCFallbackPosition(key)
-	if item.LinkIndex <= 0 || item.Parent != netlink.HANDLE_MIN_INGRESS || position < 0 || position >= kernelXDPPluginTCFallbackMaxPerInterface {
+	egress := item.Parent == netlink.HANDLE_MIN_EGRESS
+	if item.LinkIndex <= 0 || (item.Parent != netlink.HANDLE_MIN_INGRESS && !egress) || position < 0 || position >= kernelXDPPluginTCFallbackMaxPerInterface {
 		return kernelAttachmentKey{}, false
 	}
-	if key != kernelXDPPluginTCFallbackKey(item.LinkIndex, position, item.TCX) {
+	if key != kernelXDPPluginTCPositionKey(item.LinkIndex, position, item.TCX, egress) {
 		return kernelAttachmentKey{}, false
 	}
 	return key, true
@@ -448,6 +570,9 @@ func kernelXDPPluginTCFallbackKeyFromMetadata(item kernelHotRestartTCAttachment)
 
 func kernelXDPPluginTCFallbackPinPath(key kernelAttachmentKey) string {
 	name := fmt.Sprintf("%d-%d", key.linkIndex, kernelXDPPluginTCFallbackPosition(key))
+	if key.parent == netlink.HANDLE_MIN_EGRESS {
+		name = fmt.Sprintf("%d-e%d", key.linkIndex, kernelXDPPluginTCFallbackPosition(key))
+	}
 	return filepath.Join(kernelHotRestartEngineDir(kernelXDPPluginRuntimeEngine), kernelXDPPluginTCFallbackPinDir, name)
 }
 

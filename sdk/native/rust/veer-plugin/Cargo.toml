@@ -1,0 +1,16 @@
+[package]
+name = "veer-plugin"
+version = "1.0.0"
+# Self-contained, so the SDK crate builds outside this workspace too.
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Safe Rust bindings for the Veer native plugin ABI"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# Exposes veer_plugin::testing (a scriptable fake host) to plugin tests.
+testing = []

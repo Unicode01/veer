@@ -16,7 +16,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/cilium/ebpf"
 	ebpflink "github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
@@ -256,7 +258,7 @@ func newXDPKernelRuleRuntime(cfg *Config) kernelRuleRuntime {
 
 func (rt *xdpKernelRuleRuntime) ensureAvailabilityInitialized() {
 	rt.availableOnce.Do(func() {
-		if reason := xdpKernelRuntimeCapabilityUnavailableReason(); reason != "" {
+		if reason := xdpKernelRuntimeCapabilityUnavailableReason(rt.allowGenericAttach); reason != "" {
 			rt.available = false
 			rt.availableReason = reason
 			log.Printf("xdp dataplane unavailable: %s", rt.availableReason)
@@ -2532,9 +2534,36 @@ func detachXDPAttachment(att xdpAttachment) error {
 	return netlink.LinkSetXdpFdWithFlags(link, -1, att.flags)
 }
 
+// bpfProgInfoHead is the start of struct bpf_prog_info: type, then id.
+type bpfProgInfoHead struct {
+	_  uint32
+	ID uint32
+}
+
+// bpfObjInfoAttr is the BPF_OBJ_GET_INFO_BY_FD member of union bpf_attr. Info
+// keeps its pointer type so the buffer stays visible to the garbage collector.
+type bpfObjInfoAttr struct {
+	BpfFD   uint32
+	InfoLen uint32
+	Info    unsafe.Pointer
+}
+
+// kernelProgramID returns a loaded program's kernel ID. Program.Info copies
+// everything the kernel holds about the program, its translated
+// instructions included, and parses fdinfo besides; attachment health asks
+// for the IDs of every attachment each pass, so it reads just the first
+// eight bytes of bpf_prog_info and keeps Program.Info as the fallback.
 func kernelProgramID(prog *ebpf.Program) uint32 {
 	if prog == nil {
 		return 0
+	}
+	if fd := prog.FD(); fd >= 0 {
+		head := new(bpfProgInfoHead)
+		attr := bpfObjInfoAttr{BpfFD: uint32(fd), InfoLen: uint32(unsafe.Sizeof(*head)), Info: unsafe.Pointer(head)}
+		_, _, errno := unix.Syscall(unix.SYS_BPF, unix.BPF_OBJ_GET_INFO_BY_FD, uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
+		if errno == 0 && head.ID != 0 {
+			return head.ID
+		}
 	}
 	info, err := prog.Info()
 	if err != nil {
@@ -2712,12 +2741,12 @@ func prepareXDPKernelRuleRef(rule *Rule, opts xdpPrepareOptions) ([]preparedXDPK
 	if rule.ID <= 0 || rule.ID > int64(^uint32(0)) {
 		return nil, fmt.Errorf("xdp dataplane requires a rule id in uint32 range")
 	}
-	inLink, err := netlink.LinkByName(rule.InInterface)
+	inLink, err := nlretry.LinkByName(rule.InInterface)
 	if err != nil {
 		return nil, fmt.Errorf("resolve inbound interface %q: %w", rule.InInterface, err)
 	}
 
-	outLink, err := netlink.LinkByName(rule.OutInterface)
+	outLink, err := nlretry.LinkByName(rule.OutInterface)
 	if err != nil {
 		return nil, fmt.Errorf("resolve outbound interface %q: %w", rule.OutInterface, err)
 	}

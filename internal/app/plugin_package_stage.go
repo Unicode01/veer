@@ -383,7 +383,7 @@ func registerPluginPackageCandidate(plugin LoadedPlugin, cfg *Config) (LoadedPlu
 	}
 	enabled := true
 	validationConfig.PluginsEnabledSetting = &enabled
-	runtime, ok := newPluginControlRuntime(nil, &validationConfig, nil).(*gojaPluginControlRuntime)
+	runtime, ok := newPluginControlRuntime(nil, &validationConfig, nil).(*pluginControlManager)
 	if !ok || runtime == nil {
 		return LoadedPlugin{}, fmt.Errorf("plugin control runtime is unavailable")
 	}

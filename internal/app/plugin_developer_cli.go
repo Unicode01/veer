@@ -89,7 +89,6 @@ type pluginContractCLIResult struct {
 	SHA256         string `json:"sha256"`
 	ControlMethods int    `json:"control_methods"`
 	Path           string `json:"path,omitempty"`
-	TypesPath      string `json:"types_path,omitempty"`
 }
 
 func runPluginContractCLI(args []string, stdout, stderr io.Writer) error {
@@ -97,7 +96,6 @@ func runPluginContractCLI(args []string, stdout, stderr io.Writer) error {
 	flags.SetOutput(stderr)
 	checkPath := flags.String("check", "", "verify a contract file against this Veer runtime")
 	outputPath := flags.String("output", "", "write the canonical contract to a file")
-	typesOutputPath := flags.String("types-output", "", "write generated TypeScript host method types to a file")
 	force := flags.Bool("force", false, "replace an existing regular output file")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -106,13 +104,13 @@ func runPluginContractCLI(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	selectedOutputs := 0
-	for _, value := range []string{*checkPath, *outputPath, *typesOutputPath} {
+	for _, value := range []string{*checkPath, *outputPath} {
 		if strings.TrimSpace(value) != "" {
 			selectedOutputs++
 		}
 	}
 	if flags.NArg() != 0 || selectedOutputs > 1 {
-		return fmt.Errorf("plugin contract accepts no positional arguments and only one of --check, --output or --types-output")
+		return fmt.Errorf("plugin contract accepts no positional arguments and only one of --check or --output")
 	}
 	contract := currentPluginSDKAPIContract()
 	pretty, digest, err := encodePluginSDKAPIContract(contract, true)
@@ -164,22 +162,6 @@ func runPluginContractCLI(args []string, stdout, stderr io.Writer) error {
 		result.Path = path
 		return writePluginPackageCLIJSON(stdout, result)
 	}
-	if value := strings.TrimSpace(*typesOutputPath); value != "" {
-		path, err := filepath.Abs(value)
-		if err != nil {
-			return err
-		}
-		types, err := encodePluginSDKMethodTypes(contract.ControlMethods)
-		if err != nil {
-			return err
-		}
-		if err := writePluginDeveloperFile(path, types, *force); err != nil {
-			return err
-		}
-		result.Status = "written"
-		result.TypesPath = path
-		return writePluginPackageCLIJSON(stdout, result)
-	}
 	_, err = stdout.Write(pretty)
 	return err
 }
@@ -192,6 +174,7 @@ func runPluginInitCLI(args []string, stdout, stderr io.Writer) error {
 	kind := flags.String("kind", "control", "control, pipeline or ui")
 	directory := flags.String("directory", "", "target directory")
 	sdkInclude := flags.String("sdk-include", "", "directory containing veer_plugin_helpers.h")
+	sdkCrate := flags.String("sdk-crate", "", "path of the veer-plugin Rust crate (sdk/native/rust/veer-plugin)")
 	force := flags.Bool("force", false, "replace generated files that already exist")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -222,15 +205,19 @@ func runPluginInitCLI(args []string, stdout, stderr io.Writer) error {
 	if displayName == "" {
 		displayName = pluginDeveloperDisplayName(pluginID)
 	}
-	manifest, controlSource, bpfSource, uiSource := pluginDeveloperScaffold(pluginID, displayName, pluginKind)
+	crate, err := locatePluginSDKCrate(*sdkCrate)
+	if err != nil {
+		return err
+	}
+	manifest, sources := pluginDeveloperScaffold(pluginID, displayName, pluginKind, crate)
 	manifestData, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return err
 	}
 	manifestData = append(manifestData, '\n')
-	files := map[string][]byte{
-		pluginManifestFile: manifestData,
-		"control.js":       []byte(controlSource),
+	files := map[string][]byte{pluginManifestFile: manifestData}
+	for relative, source := range sources {
+		files[filepath.FromSlash(relative)] = []byte(source)
 	}
 	if pluginKind == "pipeline" {
 		includeDir, err := locatePluginSDKInclude(*sdkInclude)
@@ -241,10 +228,7 @@ func runPluginInitCLI(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("read plugin SDK helper: %w", err)
 		}
-		files["main.bpf.c"] = []byte(bpfSource)
 		files[filepath.Join("include", "veer_plugin_helpers.h")] = helper
-	} else if pluginKind == "ui" {
-		files[filepath.Join("ui", "index.html")] = []byte(uiSource)
 	}
 	paths := make([]string, 0, len(files))
 	for relative := range files {
@@ -266,7 +250,9 @@ func runPluginInitCLI(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 	}
-	nextCommands := make([][]string, 0, 3)
+	nextCommands := make([][]string, 0, 5)
+	nextCommands = append(nextCommands, []string{"cargo", "test", "--manifest-path", filepath.Join(absTarget, "Cargo.toml")})
+	nextCommands = append(nextCommands, []string{"bash", filepath.Join(filepath.Dir(filepath.Dir(crate)), "build-plugin.sh"), absTarget})
 	if pluginKind == "pipeline" {
 		nextCommands = append(nextCommands, []string{"veer", "plugin", "build", "--source", absTarget, "--architectures", "all"})
 		targetArchitecture := normalizePluginObjectArchitecture(runtime.GOARCH)
@@ -356,11 +342,9 @@ func runPluginLintCLI(args []string, stdout, stderr io.Writer, registration bool
 		plugin.objectArchitecture = environment.Arch
 		basePlugin := plugin
 		enabled := true
-		isolation := false
 		validationConfig := &Config{
-			PluginsEnabledSetting:   &enabled,
-			PluginsIsolationSetting: &isolation,
-			PluginsMinSandboxLevel:  pluginSandboxLevelNone,
+			PluginsEnabledSetting:  &enabled,
+			PluginsMinSandboxLevel: pluginSandboxLevelNone,
 		}
 		first, err := registerPluginPackageCandidate(basePlugin, validationConfig)
 		if err != nil {
@@ -569,7 +553,15 @@ func runPluginBuildCLI(args []string, stdout, stderr io.Writer) error {
 	return writePluginPackageCLIJSON(stdout, result)
 }
 
-func pluginDeveloperScaffold(id, name, kind string) (PluginManifest, string, string, string) {
+// pluginDeveloperScaffold returns a native plugin: its manifest and the
+// files beside it, a Rust crate built against the plugin SDK plus the eBPF
+// source or UI page of the kind. The library is built per target into
+// lib/<triple>/, where the manifest points.
+func pluginDeveloperScaffold(id, name, kind, sdkCrate string) (PluginManifest, map[string]string) {
+	library := make(map[string]PluginNativeLibrary, len(pluginNativeTargets))
+	for _, target := range pluginNativeTargets {
+		library[target] = PluginNativeLibrary{Path: "lib/" + target + "/lib" + id + ".so"}
+	}
 	manifest := PluginManifest{
 		APIVersion:  pluginAPIVersionV1,
 		ID:          id,
@@ -581,44 +573,100 @@ func pluginDeveloperScaffold(id, name, kind string) (PluginManifest, string, str
 		Compatibility: &PluginCompatibility{
 			Runtime:       ">=1.0.0 <2.0.0",
 			ControlAPIABI: pluginControlAPIABI,
+			Features:      []string{pluginNativeControlFeature},
 		},
 		Control: &PluginControl{
-			Main:        "control.js",
+			Library:     library,
+			Worker:      "shared",
 			Permissions: []string{"metrics"},
+			Register:    &PluginNativeRegistration{},
 		},
 	}
-	control := "exports.onReconcile = function () {\n  metrics.counter('reconciles_total');\n};\n"
-	bpf := ""
-	ui := ""
-	if kind == "pipeline" {
+	sources := map[string]string{
+		"Cargo.toml": fmt.Sprintf(`[package]
+name = "veer-plugin-%s"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = %q
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+veer-plugin = { path = %q }
+
+[dev-dependencies]
+veer-plugin = { path = %q, features = ["testing"] }
+
+# A plugin is its own workspace, also when it lives inside another one.
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+# The SDK turns a panic into an error at the ABI boundary; abort would take
+# down every plugin in a shared worker.
+panic = "unwind"
+`, strings.ReplaceAll(id, "_", "-"), id, filepath.ToSlash(sdkCrate), filepath.ToSlash(sdkCrate)),
+		"src/lib.rs": fmt.Sprintf(`//! %[1]s: a Veer native plugin. The host sends each handler a message
+//! (onReconcile, onAction, onTimer, ...) and serves its host API calls.
+
+use veer_plugin::{export_plugin, json, Host, Message, Outcome, Plugin, Result, Value};
+
+pub struct Control;
+
+impl Plugin for Control {
+    fn create(_host: &Host, _config: &Value) -> Result<Self> {
+        Ok(Control)
+    }
+
+    fn handle(&mut self, host: &Host, msg: &Message) -> Result<Outcome> {
+        match msg.handler.as_str() {
+            "onReconcile" => {
+                host.call("metrics.counter", json!(["reconciles_total"]))?;
+                Ok(Outcome::Done)
+            }
+            _ => Ok(Outcome::Unhandled),
+        }
+    }
+}
+
+export_plugin!(Control, %[2]q);
+
+#[cfg(test)]
+mod tests {
+    use veer_plugin::testing::{FakeHost, Harness};
+
+    use super::Control;
+
+    #[test]
+    fn reconcile_counts() {
+        let fake = FakeHost::new();
+        fake.adapter("metrics.counter", |_| Ok(veer_plugin::Value::Null));
+        let mut harness = Harness::<Control>::load(concat!(env!("CARGO_MANIFEST_DIR"), "/plugin.json"), fake.clone());
+        harness.reconcile().unwrap();
+        assert_eq!(fake.call_names(), ["metrics.counter"]);
+    }
+}
+`, name, id),
+	}
+	switch kind {
+	case "pipeline":
 		manifest.Compatibility.TCPipelineABI = pluginTCPipelineABI
 		manifest.Compatibility.OS = []string{"linux"}
 		manifest.Compatibility.Architectures = []string{"amd64", "arm64", "arm"}
-		manifest.Compatibility.Features = []string{"dataplane.tc_pipeline.v2", "ebpf.object_variants.v1"}
+		manifest.Compatibility.Features = append(manifest.Compatibility.Features, "dataplane.tc_pipeline.v2", "ebpf.object_variants.v1")
 		manifest.Control.Permissions = []string{"ebpf.load", "hook.attach", "metrics", "plugin.register"}
-		control = `plugin.capabilities(['tc']);
-ebpf.loadObject({
-  id: 'main',
-  variants: [
-    {architecture: 'amd64', path: 'build/amd64/main.o'},
-    {architecture: 'arm64', path: 'build/arm64/main.o'},
-    {architecture: 'arm', path: 'build/arm/main.o'}
-  ],
-  programs: [{id: 'pre_forward', section: 'tc/veer/pre_forward', type: 'tc'}]
-});
-pipeline.attach({
-  id: 'pre-forward',
-  direction: 'forward',
-  priority: 10,
-  program: 'main:pre_forward',
-  mode: 'observe'
-});
-
-exports.onReconcile = function () {
-  metrics.counter('reconciles_total');
-};
-`
-		bpf = `#include "include/veer_plugin_helpers.h"
+		manifest.Control.Register.Capabilities = []string{"tc"}
+		manifest.Control.Register.Objects = []json.RawMessage{json.RawMessage(`{"id":"main","variants":[` +
+			`{"architecture":"amd64","path":"build/amd64/main.o"},{"architecture":"arm64","path":"build/arm64/main.o"},` +
+			`{"architecture":"arm","path":"build/arm/main.o"}],"programs":[{"id":"pre_forward","section":"tc/veer/pre_forward","type":"tc"}]}`)}
+		manifest.Control.Register.PipelineAttach = []json.RawMessage{json.RawMessage(
+			`{"id":"pre-forward","direction":"forward","priority":10,"program":"main:pre_forward","mode":"observe"}`)}
+		sources["main.bpf.c"] = `#include "include/veer_plugin_helpers.h"
 
 VEER_DECLARE_PROG_CHAIN_V4();
 
@@ -632,24 +680,15 @@ int pre_forward(struct __sk_buff *skb)
 
 char __license[] SEC("license") = "GPL";
 `
-	} else if kind == "ui" {
-		manifest.Control.Permissions = []string{"ui"}
+	case "ui":
+		manifest.Control.Permissions = []string{"metrics", "ui"}
 		page := id
 		if page == "plugins" || page == "diagnostics" {
 			page += "_ui"
 		}
-		quotedPage, _ := json.Marshal(page)
-		quotedName, _ := json.Marshal(name)
-		control = fmt.Sprintf(`ui.register({
-  static_dir: 'ui',
-  entry: 'index.html',
-  page: %s,
-  page_title: %s
-});
-
-exports.onReconcile = function () {};
-`, quotedPage, quotedName)
-		ui = fmt.Sprintf(`<!doctype html>
+		registration, _ := json.Marshal(map[string]string{"static_dir": "ui", "entry": "index.html", "page": page, "page_title": name})
+		manifest.Control.Register.UI = registration
+		sources["ui/index.html"] = fmt.Sprintf(`<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -677,7 +716,39 @@ exports.onReconcile = function () {};
 </html>
 `, html.EscapeString(name))
 	}
-	return manifest, control, bpf, ui
+	return manifest, sources
+}
+
+// locatePluginSDKCrate finds the Rust plugin SDK crate a generated plugin
+// depends on.
+func locatePluginSDKCrate(explicit string) (string, error) {
+	if strings.TrimSpace(explicit) != "" {
+		crate, err := filepath.Abs(explicit)
+		if err != nil {
+			return "", err
+		}
+		if info, err := os.Stat(filepath.Join(crate, "Cargo.toml")); err != nil || !info.Mode().IsRegular() {
+			return "", fmt.Errorf("--sdk-crate %s has no Cargo.toml", crate)
+		}
+		return crate, nil
+	}
+	candidates := make([]string, 0, 4)
+	if cwd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, filepath.Join(cwd, "sdk", "native", "rust", "veer-plugin"))
+	}
+	if executable, err := os.Executable(); err == nil {
+		base := filepath.Dir(executable)
+		candidates = append(candidates,
+			filepath.Join(base, "sdk", "native", "rust", "veer-plugin"),
+			filepath.Join(base, "..", "share", "veer", "sdk", "native", "rust", "veer-plugin"),
+		)
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(filepath.Join(candidate, "Cargo.toml")); err == nil && info.Mode().IsRegular() {
+			return filepath.Abs(candidate)
+		}
+	}
+	return "", fmt.Errorf("the veer-plugin Rust crate was not found; pass --sdk-crate")
 }
 
 func ensurePluginInitTarget(target string) error {

@@ -1,6 +1,6 @@
 # Firewall 插件设计（草案）
 
-状态：P0、P1 已实现，以 stable 1.0.0 随默认插件包发布（`plugins/firewall/`，当前 1.0.1：TCP 首片读不到标志位时按规避解析丢弃）；P2 未实现。适用宿主：Veer dev（e011ecb 之后，`xdp_generic` 默认开启），插件 ABI `control_api_abi=1`、`dataplane.xdp_pipeline.v1`、`dataplane.xdp_tc_fallback.v1`。
+状态：P0、P1 已实现，以 stable 1.0.0 随默认插件包发布（`plugins/firewall/`）。1.1.0 补上了与 nftables 差距里价值最高的几项（第 11 节）：连接跟踪与"默认拒绝入站"、地址集合（黑名单、动态元素、诱捕写入）、ICMP/其他 IP 协议/全部流量策略、"TCP 只判新连接"和安全基线（保留地址来源、非法 TCP 标志、分片、反向路径检查）。适用宿主：Veer dev（e011ecb 之后，`xdp_generic` 默认开启），插件 ABI `control_api_abi=1`、`dataplane.xdp_pipeline.v1`、`dataplane.xdp_tc_fallback.v1`；连接跟踪另需 `dataplane.xdp_tc_egress.v1`（SDK 契约 18），宿主没有时其余功能照常可用。
 
 ## 1. 背景与目标
 
@@ -16,7 +16,7 @@ Veer 的端口转发目前不能按来源限制访问：知道入口端口的任
 
 非目标（第一版）：
 
-- 有状态防火墙（"默认拒绝入站、只放行回包"）。XDP 拿不到核心的连接表，这类策略交给 nftables。
+- 有状态防火墙（"默认拒绝入站、只放行回包"）。XDP 拿不到核心的连接表，这类策略交给 nftables。1.1 起由插件自己的连接表实现，见第 11.2 节。
 - 出站过滤、LAN 内部过滤、VPN 入口过滤。
 - 七层识别、GeoIP、按 VLAN 区分策略。
 
@@ -74,7 +74,8 @@ generic XDP 的复制与程序无关：veth 上一个只返回 XDP_PASS 的空�
 |---|---|
 | P0 | 策略：协议 + 目标端口范围 + 可选目标 CIDR；来源 CIDR 列表按最长前缀给出放行/拒绝，未命中走策略默认动作；全局信任来源；原生 XDP 挂载到用户选定接口；802.1Q/802.1ad 与 PPPoE 会话解析；按策略计数；应用后限时确认、超时回滚 |
 | P1（已实现） | TCP SYN 按来源限速与临时封禁；封禁列表查看与手动解封；抽样丢包日志 |
-| P2 | UDP 按来源限包速；ICMP/任意协议的仅来源策略；从 Veer 规则导入（需要宿主能力，见第 9 节）；正式支持 VPN/L3 入口 |
+| 1.1（已实现） | 连接跟踪与全部流量策略（默认拒绝入站）；ICMP/ICMPv6 按类型和代码、其他 IP 协议按协议号的策略；TCP 只判新连接；地址集合：黑名单、策略来源引用、运行时增删（带超时）、策略丢弃写入集合；安全基线：保留地址来源、非法 TCP 标志、丢弃分片、反向路径检查。见第 11 节 |
+| P2 | UDP 按来源限包速；从 Veer 规则导入（需要宿主能力，见第 9 节）；按接口区分策略；GeoIP；nft 规则导入；正式支持 VPN/L3 入口 |
 
 ## 4. 数据面设计
 
@@ -135,6 +136,8 @@ hooks.attach({
 
 ### 4.4 Map 布局
 
+（1.0 的 map；1.1 新增的见第 11.3 节。）
+
 | Map | 类型 | Key → Value | 说明 |
 |---|---|---|---|
 | `fw_cfg` | ARRAY[1] | 0 → {当前代, 标志} | 原子切换的 selector；标志：有 L3 接口、有策略、控制面已写入（区分重启后的空 map） |
@@ -158,6 +161,8 @@ hooks.attach({
 内存估算（4 CPU）：端口位图 32 KiB，两个 LRU 合计约十几 MiB，ring 256 KiB，LPM 视条目数而定。远低于宿主默认预算（单 map 64 MiB、单插件 256 MiB，见 `plugin_resource_limits.go`）。
 
 ### 4.5 每包流程
+
+（1.0 的流程；1.1 加入的阶段见第 11.3 节。）
 
 ```text
 规避解析且当前代有策略 ................................... DROP(evasive)
@@ -220,9 +225,10 @@ TCP SYN 且无 ACK 且策略有限速：窗口计数 +1，超限写封禁 ... DR
                  "ebpf.map_state.v1", "ebpf.map_transactions.v1", "ui.capabilities.v1"]
   },
   "control": {
-    "main": "control.js",
+    "library": {"x86_64-linux-gnu": {"path": "lib/x86_64-linux-gnu/libfirewall.so"}, "...": {}},
     "permissions": ["plugin.register", "resource", "kv", "timer", "ui", "crypto", "net.admin",
-                    "ebpf.load", "ebpf.map_read", "ebpf.map_write", "hook.attach", "worker"]
+                    "ebpf.load", "ebpf.map_read", "ebpf.map_write", "hook.attach", "worker"],
+    "register": {"ebpf_objects": ["..."], "hooks": ["..."], "resources": ["..."], "actions": ["..."], "ui": {}}
   }
 }
 ```
@@ -344,7 +350,7 @@ XDP 在 nftables、iptables 和 pve-firewall 之前执行，只会丢弃、不�
 已实现的测试（Linux 测试都要求 root，并在 `scripts/verify-plugin-release.sh` 里出现 skip 即失败）：
 
 - **控制面单元测试**（node，`plugins/firewall/test-*.test.js`，33 个）：编译与 map 布局、端口区间与冲突、提示规则和 token、SYN 限速校验与掩码、封禁和日志解码；apply / confirm / 截止回滚 / 重启恢复 / 热重启保留、check 与 accept_warnings、限速与日志配置写入、bans / unban / events、槽位复用清理、宿主按 key 排序存储后的草稿比较、挂载状态与核心引擎、挂载失败回滚。
-- **BPF 单元测试**（`BPF_PROG_TEST_RUN`）：`TestFirewallProgramVerdicts`（IPv4/IPv6、单层和两层 VLAN、PPPoE 会话、发现帧与 LCP、IPv4/IPv6 首片和非首片、扩展头与过多扩展头、截断包、L3 接口、最长前缀、信任来源、带目标的策略）、`TestFirewallProgramWithoutConfigPasses`、`TestFirewallMapKeysMatchCompiler`（Go 与 compile.js 的 key 字节一致）、`TestFirewallProgramSynLimit`（窗口内放行、超限丢弃并封禁、封禁对已建立连接生效、其他策略不受影响、ACK 与 SYN-ACK 不计数、信任来源不受限、规则丢弃不计入限速、IPv6 按 /64 聚合、过期封禁失效、`ban_seconds` 为 0 只丢不封、日志事件内容、日志限流与关闭）。以上对 clang 14、18、21 编出的 object 都跑过。 每个程序测试都分 `xdp`、`tc` 两个子测试，分别跑 `xdp_firewall` 和 `tc_firewall`（测试机 69 个通过）；TC 下 30 字节截断帧跳过（`BPF_PROG_RUN` 拒收 34 字节以下、IP 头不完整的 TC 帧），线性区之外的头部也测不了（`BPF_PROG_RUN` 只造线性 skb），拉取路径由性能测试里的 GSO 聚合包间接覆盖（受保护端口的包全部按策略放行计数）。
+- **BPF 单元测试**（`BPF_PROG_TEST_RUN`）：`TestFirewallProgramVerdicts`（IPv4/IPv6、单层和两层 VLAN、PPPoE 会话、发现帧与 LCP、IPv4/IPv6 首片和非首片、扩展头与过多扩展头、截断包、L3 接口、最长前缀、信任来源、带目标的策略）、`TestFirewallProgramWithoutConfigPasses`、`TestFirewallMapKeysMatchCompiler`（Go 与插件 `src/compile.rs` 的 key 字节一致）、`TestFirewallProgramSynLimit`（窗口内放行、超限丢弃并封禁、封禁对已建立连接生效、其他策略不受影响、ACK 与 SYN-ACK 不计数、信任来源不受限、规则丢弃不计入限速、IPv6 按 /64 聚合、过期封禁失效、`ban_seconds` 为 0 只丢不封、日志事件内容、日志限流与关闭）。以上对 clang 14、18、21 编出的 object 都跑过。 每个程序测试都分 `xdp`、`tc` 两个子测试，分别跑 `xdp_firewall` 和 `tc_firewall`（测试机 69 个通过）；TC 下 30 字节截断帧跳过（`BPF_PROG_RUN` 拒收 34 字节以下、IP 头不完整的 TC 帧），线性区之外的头部也测不了（`BPF_PROG_RUN` 只造线性 skb），拉取路径由性能测试里的 GSO 聚合包间接覆盖（受保护端口的包全部按策略放行计数）。
 - **宿主 TC 兜底**：`TestKernelXDPPluginTCFallbackRunsAheadOfCore`（tcx 和 cls_bpf 两种挂法：兜底排在一个模拟核心的程序之前，丢弃的包核心收不到；同接口排在后面的 Hook 没有兜底时整体改用 generic；排在前面时 XDP 和 TC 同时挂，前面的 Hook 在 generic Dispatcher 里、防火墙在 TC，各只执行一次；去掉后回到纯 TC，没有残留）、`TestKernelXDPPluginTCFallbackHotRestartHandsOffInPlace`（旧进程退出后兜底继续丢包；新进程接管同一个 tcx link 或 cls_bpf 位置并换上自己的程序，pin 被清理），以及字段校验、同 object 规则和特性要求的单元测试。
 - **verifier 矩阵**：clang 14 / 18 / 21 × 6.12（原生）/ 5.10.0-32 / 5.15.0-25（QEMU），数字见 4.9。CI 的 kernel-load-matrix 用 `TestLoadBundledPluginObjectsSmoke` 在各 runner 内核（含 7.x）和来宾内核里加载 `firewall.o`。
 - **集成测试**（真实 daemon）：
@@ -394,7 +400,7 @@ XDP 在 nftables、iptables 和 pve-firewall 之前执行，只会丢弃、不�
 
 ## 9. 需要宿主补充的能力
 
-第 1、6 项已完成；其余不阻塞：
+第 1、6、7、9 项已完成；其余不阻塞：
 
 1. ~~插件 map 跨 Veer 热重启保留~~：已实现。声明 `preserve` 的 TC pipeline、XDP、Netfilter 插件 map 由旧进程 pin 到热重启目录，新进程按 `state_maps` 契约接管，启动 reconcile 后释放。vpn_core 的 `tunnel_links` 没有声明 `state_maps`，仍由控制面重写。
 2. **只读获取核心转发规则**：插件目前只能写 `forward_rule_plans`，读不到用户在核心里配的规则。P2 的"从 Veer 规则导入"需要一个只读资源或宿主 API。
@@ -403,7 +409,8 @@ XDP 在 nftables、iptables 和 pve-firewall 之前执行，只会丢弃、不�
 5. **Dispatcher 支持 `xdp.frags`**：解除巨帧 MTU 限制。
 6. ~~插件 Hook 单独允许 generic 模式~~：已改为 `xdp_generic` 顶层设置默认开启，插件 Dispatcher 先试原生、再用 generic。如果以后需要按 Hook 指定模式，再加 `xdp_mode: auto | native | generic`。
 7. ~~直接挂载、能丢包的 TC Hook~~：已实现为 XDP Hook 的 `tc_fallback`（`dataplane.xdp_tc_fallback.v1`）。没有原生 XDP 的接口上，宿主把同一 object 里的 tc 程序直接挂在 TC ingress 最前面，排在核心之前，不计入 `tc_flow_cache_plugin_hooked()`；同接口有不带兜底的 Hook 时，排在它之后的 Hook 仍在 TC 执行，与 generic Dispatcher 同时挂载；generic 只在关闭兜底或链尾 Hook 没有兜底时使用。
-8. **XDP 转发引擎接入 Dispatcher 链末端**：避免启用 XDP 插件就让核心退回 TC。
+8. **XDP 转发引擎接入 Dispatcher 链末端**：避免启用 XDP 插件就让核心退回 TC。做这一项时要保留一个条件：防火墙开着连接跟踪时核心必须仍走 TC。XDP 引擎用 XDP_REDIRECT 转发的包不经过 TC egress，出口程序看不到这些连接，它们的回包会被全部流量策略丢掉（第 11.2 节实测：XDP 引擎转发约 90 万包，出口一个都没看到）。
+9. ~~XDP Hook 的出口程序~~：已实现为 `tc_egress`（`dataplane.xdp_tc_egress.v1`，见 [PLUGIN.md](../../PLUGIN.md)"TC 出口程序"），连接跟踪用它记录出站连接。
 
 ## 10. 待定问题
 
@@ -412,3 +419,171 @@ XDP 在 nftables、iptables 和 pve-firewall 之前执行，只会丢弃、不�
 3. ~~封禁按策略还是全局~~：按策略。同一来源在别的策略上不受影响；要挡多端口扫描，可以给这些端口建一条带限速的策略。
 4. 是否需要按接口区分策略（例如不同 WAN 用不同策略），还是统一一套。
 5. ~~抽样日志保留多少条、是否允许导出~~：内存里保留最近 500 条，不落库、不导出。
+
+## 11. 1.1：补齐 nftables 差距
+
+和 nftables 对照，1.0 缺的按价值排序是：连接跟踪、命名集合与黑名单、ICMP/任意协议策略、安全基线、通用限速、按接口区分策略、GeoIP 等。1.1 做了前四项和"TCP 只判新连接"。不做的：通用规则链（jump/goto）、synproxy、mark、notrack、reject（TCP RST / ICMP 不可达）、connlimit。
+
+### 11.1 规则模型
+
+策略（`policies` 资源，schema 版本 2，1.0 的记录原样有效）：
+
+| 字段 | 说明 |
+|---|---|
+| `protocol` | 新增 `icmp`、`icmpv6`、`ip`、`any`。`tcp`/`udp`/`tcp+udp` 仍按 `ports` 匹配 |
+| `icmp_types` | `icmp`/`icmpv6` 用：`"8"`（类型的所有代码）、`"3/4"`（单个代码）或名字（`echo-request`、`destination-unreachable` 等）；留空表示全部类型 |
+| `ip_protocols` | `ip` 用：协议号或名字（`gre`、`esp`、`ah`、`sctp`、`ospf`、`vrrp` 等）；1、6、17、58 要用对应的专门策略 |
+| `any` | 全部流量策略：没有其他策略匹配的包（任何端口、协议）都归它，用来做"默认拒绝入站"。可以带目标地址；同一目标上只能有一条 |
+| `tcp_new_only` | 只判 TCP 连接尝试（SYN 且无 ACK），其余 TCP 包放行。不需要连接跟踪就能让出站连接的回包通过，零开销。代价：已经建立的会话不受新规则影响 |
+| `sources[].set` | 来源条目可以引用集合：`{set, action}`，每条策略最多 4 个。判定顺序：先按地址条目的最长前缀，未命中再按集合在列表里的顺序，都没有用默认动作 |
+| `add_to_set` | `{set, timeout_seconds, ipv6_prefix}`：被这条策略的来源规则丢弃的来源写入集合（TCP 只算 SYN，避免把被伪造来源攻击的受害者写进去），IPv6 按前缀写入（默认 /64）。配合黑名单就是诱捕端口 |
+
+设置（`settings` 资源，schema 版本 2）新增：`connection_tracking`、`blocklists`（最多 4 个集合）、`baseline`（`bogon_sources: off|reserved|all`、`invalid_tcp_flags`、`drop_fragments`、`urpf: off|loose|strict`）。
+
+集合（新资源 `sets`）：记录键就是集合名（小写字母、数字、`-`、`_`），`elements` 是静态元素（每集合最多 4096，合计 32768），和策略一样是草稿，随"应用"生效。运行时元素用动作增删，立即生效：
+
+| 动作 | 说明 |
+|---|---|
+| `set_add` | `{set, elements, timeout_seconds}`：一次最多 256 个，可带超时。已被静态元素覆盖的跳过。加入的元素记在 KV 里（合计最多 1024 个），Veer 冷重启后恢复（剩余时间按墙钟换算）；热重启时 map 交接，不需要恢复 |
+| `set_del` | `{set, elements}`：只删运行时元素 |
+| `set_flush` | `{set}`：删掉集合的全部运行时元素 |
+| `set_list` | `{set, cursor, limit}`：分页列出元素、来源（static / api / policy）和剩余秒数 |
+
+fail2ban 之类的工具可以直接调这些动作（HTTP `POST /api/plugins/firewall/actions/set_add`）。策略写入的元素（`add_to_set`）不记 KV，冷重启后清空。过期元素数据面查到时忽略，控制面每 60 秒删一次（还没删的过期元素，策略再次写入时直接覆盖；reconcile 不会把待触发的清理往后推）。
+
+### 11.2 连接跟踪
+
+XDP 程序只看得到进来的包。1.1 给 XDP Hook 加了宿主能力 `tc_egress`（见 [PLUGIN.md](../../PLUGIN.md)"TC 出口程序"）：同一 object 里的 `tc_firewall_egress` 挂在绑定接口的 TC egress 最前面，记录本侧发起的连接；入口程序查到回包属于这些连接就放行。
+
+**能看到哪些出站包**（测试机 6.12 实测，WAN veth egress 挂只读计数程序，逐阶段和 veth 发送计数对账）：核心走 TC（tcx 和 cls_bpf 两种挂法）时，IPv4 透明转发、IPv4/IPv6 Full NAT、出向 NAT（TCP、UDP、300 个短连接）、内核转发的 IPv6、路由器本机 TCP，全部漏计 0、字节完全一致；看到的都是 NAT 之后的地址；连接缓存快路径的包也经过 egress（v4 透明 TCP：缓存命中 242757 次，egress 242775 个 skb）。大流量 TCP 每个 egress skb 平均约 30 个 GSO 分段，出口程序按 skb 运行，开销按段摊薄。核心走 XDP 引擎时，XDP_REDIRECT 转发的约 90 万包 egress 一个都没看到，所以连接跟踪要求核心走 TC；目前只要有 XDP 插件 Hook 在运行核心就固定走 TC（第 9 节第 8 项写了以后的约束）。
+
+**记录什么**（`fw_ct`，LRU 131072 条，键是离开时的五元组：本地地址和端口、对端地址和端口；ICMP echo 用标识符当本地端口）：
+
+- TCP：只在本侧发出的 SYN（无 ACK）时建立。入站发起的连接（本侧发 SYN-ACK）永远不建，策略照常逐包判断。这样规则改动对已有的入站会话立即生效，确认机制也不会被浏览器保持着的 keep-alive 连接骗过：新规则如果挡住了管理端口，确认请求就过不来，照常回滚。
+- UDP：本地端口没有被显式 UDP 策略覆盖时，任何出站包都建立（UDP 分不出谁先发起；被策略覆盖的端口视为本机服务，不建）。所以默认丢弃的 UDP 策略覆盖了 NAT 端口池或临时端口时，开着连接跟踪 `check` 照样提示回包会被丢。
+- ICMP/ICMPv6：echo 请求建立，回 echo 应答。
+- 出站包命中已有记录时刷新时间（最多每秒一次），TCP 看到 FIN/RST 标为关闭中。超时：TCP 1 天、关闭后 120 秒、UDP 180 秒、ICMP 30 秒；入站命中也刷新。
+
+**入站判定**：回包（反转元组查 `fw_ct`）和"相关"的 ICMP 差错（IPv4 类型 3/11/12，IPv6 类型 1/3/4：解析差错里引用的原始包头，按它查 `fw_ct`）在所有策略之前放行，也免于保留地址和反向路径检查（本侧主动连接的光猫、私有地址对端照常可用），但不免于黑名单（fail2ban 的语义：封了就是封了）。只有当这个包会被某条策略判断（端口被覆盖、或有全部流量策略）或者会被基线丢弃时才查表，未保护端口的包不付这个开销。
+
+**限制**：
+
+- 开启跟踪之前已经建立的出站 TCP 连接没有记录（不做 nf_conntrack 那种中途接管，原因同上），会被全部流量策略丢掉，重连即可；Veer 冷重启后 `fw_ct` 是空的，同样如此。热重启交接 map，不受影响（集成测试覆盖）。
+- 非对称路由（从一个接口出去、回包从另一个绑定接口回来）照常工作，因为表是全局的；从未绑定的接口出去的连接没有记录。
+- LRU 满时挤掉最久没用的记录，它们的回包会被丢弃（与 nf_conntrack 表满时类似）。每条约 100 字节，131072 条约 13 MB。
+- 需要宿主 `dataplane.xdp_tc_egress.v1`；没有时 `check` 报错，其余功能照常。关闭跟踪时绑定记录写 `tc_egress: false`，宿主卸下出口程序，不用的人零开销。
+
+### 11.3 数据面
+
+新 map，不改 1.0 已声明 preserve 的 map 布局（从 1.0.x 升级时旧 map 照常交接）：
+
+| Map | 类型 | 说明 |
+|---|---|---|
+| `fw_gcfg` | ARRAY[2] | 每代的全局设置：标志（跟踪、保留地址、非法标志、分片、uRPF 宽松/严格、有协议策略）、全部流量策略的端口类、黑名单集合 id（最多 4 个） |
+| `fw_pext` | ARRAY[2×256] | 每代每策略的扩展：只判新连接、写入集合（集合、超时、IPv6 前缀和掩码）、来源集合（最多 4 个及动作） |
+| `fw_sets` | LPM_TRIE 65536 | 所有集合在一棵树里：键 {地址族, 集合 id, 地址}，两个地址族一次查找；值 {到期时间, 来源}。不分代：运行时元素要跨应用保留，静态元素在切代前写入新增的、切代后删掉旧的。保留地址列表用保留 id 0xfff0 |
+| `fw_ct` | LRU_HASH 131072 | 连接表，见 11.2 |
+| `fw_gstats` | PERCPU_ARRAY | 全局计数：回包放行、相关 ICMP、必放、黑名单/保留地址/反向路径/非法标志/分片丢弃、出口记录与失败、写入集合 |
+| `fw_scratch` | PERCPU_ARRAY[1] | 路由查找参数和日志事件的暂存区（栈上放不下），不跨包使用 |
+
+`fw_ports` 的协议字节扩展：2 = ICMP、3 = ICMPv6（"端口"是类型 << 8 | 代码，所以按类型是 /8 前缀、按代码是 /16），4 = 其他 IP 协议（协议号 << 8，/8 前缀）。端口位图仍只管 TCP/UDP。
+
+**每包流程**：
+
+```text
+解析失败、非 IP ............................................... PASS
+规避解析且当前代有策略 ................................... DROP(evasive)
+非首片：开了丢弃分片 DROP，否则 PASS
+TCP/UDP 发往未覆盖端口，且没有全部流量策略、黑名单和基线检查 ... PASS  ← 1.0 的快路径
+必放：ICMP PTB、ICMPv6 邻居发现/MLD/PTB、DHCP(v6) 客户端回包 ...... PASS
+基线：分片、非法 TCP 标志 .................................... DROP
+来源：黑名单集合 → 保留地址 → 反向路径（bpf_fib_lookup）……… 记下原因
+类：TCP/UDP 端口位图+LPM，ICMP 类型或协议号 LPM，否则全部流量策略
+连接跟踪（有类或有基线原因时才查）：回包/相关 ICMP ......... PASS（黑名单原因除外）
+有黑名单/基线原因：信任来源 PASS，否则 ......................... DROP
+策略：信任 → 封禁 → 只判新连接 → 来源地址 → 来源集合 → 默认动作 → SYN 限速；
+      规则丢弃时写入集合
+```
+
+**安全基线**：
+
+- 保留地址：`reserved` 是任何外来包都不该有的来源（0/8、127/8、192.0.0.0/24、文档网段、198.18/15、224/3 组播和保留段、`::`、`::1`、`100::/64`、`2001:db8::/32`、`ff00::/8`）；`all` 再加私有、共享（CGNAT）和链路本地地址。WAN 接在光猫或运营商级 NAT 后面时私有来源是正常的，用 `reserved`。DHCPv4 客户端从 0.0.0.0 发往 67 端口的请求免于保留地址和反向路径检查，绑定在 Veer 提供 DHCP 的接口上也不会断租约；67 端口上的策略照常判断。
+- 非法 TCP 标志：SYN+FIN、SYN+RST、FIN+RST、无 ACK 的 FIN/PSH/URG、无标志。对所有 TCP 包生效，不只受保护端口。
+- 丢弃分片：所有 IPv4/IPv6 分片（首片和后续片）。大 UDP（DNSSEC 应答、部分 VPN）会受影响，默认关闭。
+- 反向路径：Veer 在 TC 入口就转发走了包，内核的 `rp_filter` 根本没机会看，所以伪造 LAN 来源的包能被转发进内网。按"包从这个接口进来、要到来源地址"做路由查找：宽松模式在没有可用路由（黑洞、不可达、禁止，或来源是本机地址）时丢；严格模式还要求路由从收包接口出去。接口关了转发、轻量隧道路由等查不出结论的情况放行。严格模式不适合多出口、非对称路由，以及 VLAN、PPPoE 帧（路由在子接口上，与物理口对不上），`check` 会提示。
+- 信任来源豁免黑名单和基线检查；回包豁免保留地址和反向路径检查。PTB 和邻居发现始终放行，免得默认拒绝把 IPv6 和路径 MTU 发现弄坏。
+
+### 11.4 verifier 与指令预算
+
+三个入口都不在核心 tail-call 链里，没有 bpf-to-bpf 调用（ARM64 6.0 之前不能和 tail call 混用），全部内联。栈上放不下路由查找参数和日志事件，放进 per-CPU 暂存 map。新增阶段的判断都是标量，指针不跨阶段保存（同 4.6 节"条件选出的指针"问题）。
+
+clang 14 / 18 / 21 × 6.12 / 5.10.0-32 / 5.15.0-25，27 个组合全部通过：
+
+| 程序 | 静态指令 | verifier 处理量 |
+|---|---|---|
+| `xdp_firewall` | 2843–2951 | 9.4–12.3 万 |
+| `tc_firewall` | 3611–3804 | 12.5–19.5 万（最高 5.15.0-25 / clang 14） |
+| `tc_firewall_egress` | 760–772 | 0.9 万 |
+
+1.0 是 xdp 2.3–3.8 万、tc 4.0–6.0 万。上限 100 万，6.x 的 16 位跳转约 27k 静态指令，都还有很大余量。
+
+### 11.5 测试
+
+- 控制面单元测试（node，48 个）：编译器（ICMP 类型、协议号、全部流量策略、冲突、来源集合、写入集合、提示、`fw_pext`/`fw_gcfg`/`fw_sets` 字节布局、集合 id 稳定、事件解码）；控制脚本（集合随应用写入、切代后删旧元素、`set_add`/`set_list`/`set_del`/`set_flush`、冷重启从 KV 恢复、过期清理、连接跟踪的绑定字段和出口未挂上时回滚、基线标志和保留地址、全局计数、黑名单丢包显示集合名、旧宿主上拒绝连接跟踪）。
+- BPF 程序测试（`BPF_PROG_TEST_RUN`，xdp 和 tc 两个入口各跑一遍，clang 14/18/21 的对象都通过）：`TestFirewallProgramProtocolsAndCatchAll`、`TestFirewallProgramBaseline`、`TestFirewallProgramSets`（黑名单、信任豁免、过期元素、来源集合顺序、诱捕写入含 IPv6 /64、SYN-ACK 不写入）、`TestFirewallProgramNewOnly`、`TestFirewallProgramConnectionTracking`（出口程序建表、入站发起的连接不建、UDP 被策略覆盖的端口不建、ICMP echo、ICMP 差错按引用的连接放行、IPv6、黑名单优先、TCP 1 天和关闭后 120 秒超时、关闭跟踪后不建）、`TestFirewallExtMapKeysMatchCompiler`。
+- 宿主：`TestKernelXDPPluginTCEgress*`（tcx 和 cls_bpf：挂在 egress 最前面、出站包经过、绑定 `tc_egress: false` 时卸下、原生 XDP 时也挂、热重启原地交接），以及 `tc_egress` 的字段校验、同 object 规则、feature 要求和绑定选项的单元测试。
+- 系统测试 `TestFirewallSystemConnectionTracking`（真实 daemon）：全部流量策略默认丢弃、tcp 8101 端口转发开放、连接跟踪开启；本机 IPv4/IPv6 出站、LAN 经出向 NAT 出站、本机和 LAN ping 外网都通，外网连本机端口和 ping 本机都不通，端口转发可达；关掉跟踪后同样的规则让出站全部失败，再打开恢复；热重启期间保持的一条连接在重启后继续收发；`set_add` 把对端加入黑名单后连不上，`set_del` 后恢复；外网用 LAN 网段的伪造来源访问，被严格反向路径检查丢弃。原有的集成和系统测试（端口转发白名单、连接缓存不受影响、XDP 引擎切换、停用卸载、坏对象 fail-open）回归通过。
+- Playwright：真实页面里的全部流量、ICMP 策略显示，新建 ICMP 策略时端口框换成类型框，集合的运行时元素列表和立即加入，设置里的连接跟踪、黑名单和基线保存；桌面和 375px 两种尺寸、明暗两种主题的对比度检查。
+
+### 11.6 性能
+
+测试机同第 8 节（6.12 KVM 来宾，4 vCPU，EPYC 7763）。单包开销用 `BPF_PROG_TEST_RUN`（clang 18 对象，每组 200 万次，3 轮中位数，同一时段交替运行 1.0.2 和 1.1.0 的对象；这台机器同一对象两次运行可差 ±8 ns）。
+
+1.0 已有的路径（`BenchmarkFirewallProgram`）：
+
+| 情况 | 1.0.2 | 1.1.0 |
+|---|---|---|
+| 未保护端口 | 64.9 | 73.1（三次 60.9 / 78.9 / 73.1；同一路径在阶段基准里 62.7–68.7） |
+| 未加载 | 60.9 | 63.9 |
+| 信任来源 | 236.6 | 242.9 |
+| 放行 IPv4 / IPv6 | 349.0 / 313.0 | 361.0 / 324.8 |
+| 丢弃 IPv4 / IPv6 | 388.9 / 361.0 | 400.9 / 366.4 |
+| SYN 限速策略：已建立 / SYN | 318.8 / 362.9 | 328.8 / 377.0 |
+
+受保护端口多 5–14 ns（约 3%：全局设置、策略扩展各一次数组查找和几个判断）。未保护端口走与 1.0 相同的快路径，差别在噪声内；没有这条快路径时实测多约 10 ns。
+
+新增阶段（`BenchmarkFirewallProgramStages`，同一份规则集上，单位 ns/包）：
+
+| 情况 | 开销 |
+|---|---|
+| 未保护端口（基准） | 65.2 |
+| 开着连接跟踪的未保护端口（不查表） | 65.0 |
+| 全部流量策略下已建立连接的回包 IPv4 / IPv6 | 178.9 / 177.1 |
+| 全部流量策略丢弃：查表未命中 / 未开跟踪 | 263.0 / 223.0 |
+| 黑名单开启（1001 个前缀）未命中 IPv4 / IPv6 | 180.9 / 144.5 |
+| 黑名单命中丢弃 | 291.1 |
+| 保留地址检查未命中 / 命中丢弃 | 118.9 / 234.9 |
+| 非法 TCP 标志检查（合法包） | 76.9 |
+| 反向路径宽松 / 严格（放行） | 232.9 / 228.8 |
+| ICMP 策略放行 / 丢弃 | 182.8 / 232.8 |
+| 来源集合（第 2 个集合命中） | 302.5 |
+| 出口程序：跟踪关闭 / 已跟踪的连接 / 未跟踪的包 | 36.9 / 144.2 / 82.9 |
+
+由此：连接跟踪查表约 115 ns，回包在全部流量策略下 179 ns，比 1.0 无状态放行（按来源 LPM，349–361 ns）还便宜。黑名单开启后所有入站包多一次 LPM（IPv4 约 115 ns），保留地址检查约 54 ns，反向路径检查约 165 ns，这三项都是可选的。出口程序每个 skb：已跟踪连接约 107 ns、未跟踪（例如入站连接的应答）约 46 ns；大流量 TCP 每个 skb 约 30 个分段，摊到每段只有几 ns。新建连接时要插入 LRU（另加约 100–200 ns，每个连接一次）。
+
+**与 nftables 对比**（`TestFirewallPluginEstablishedFlood`）：主机先向客户端命名空间发一个 UDP 包，然后客户端以最快速度发回这个流的"回包"到主机上一个不读取的 UDP 套接字。对比三种情况：不过滤；防火墙（原生 XDP，全部流量策略默认丢弃 + 连接跟踪）；nftables（`inet` 表 input 链：该接口上 `ct state established,related accept`，其余丢弃）。另外两组发一个主机从没打开过的流，两者都丢。单核发包，3 轮中位数，软中断每包开销：
+
+| 发包方式 | 情况 | 进入主机 pps | 送达套接字 pps | 软中断 ns/包 |
+|---|---|---|---|---|
+| XDP（帧像网卡收的一样，没有 skb） | 不过滤 | 56.9 万 | 56.9 万 | 1631 |
+| | 防火墙连接跟踪，回包 | 49.8 万 | 49.8 万 | 1866 |
+| | nftables conntrack，回包 | 46.2 万 | 46.2 万 | 2034 |
+| | 防火墙，未打开的流（丢弃） | 209 万 | 0 | 346 |
+| | nftables，未打开的流（丢弃） | 46.8 万 | 0 | 1998 |
+| AF_PACKET（一开始就是 skb） | 不过滤 | 23.1 万 | 23.1 万 | 2099 |
+| | 防火墙连接跟踪，回包 | 17.9 万 | 18.0 万 | 3290 |
+| | nftables conntrack，回包 | 20.6 万 | 20.6 万 | 2658 |
+| | 防火墙，未打开的流（丢弃） | 28.0 万 | 0 | 1416 |
+| | nftables，未打开的流（丢弃） | 20.8 万 | 0 | 2611 |
+
+XDP 发包时（与物理网卡一致），放行已建立连接的额外开销防火墙约 235 ns、nftables 约 403 ns；丢弃未打开的流防火墙每包 346 ns，是 nftables 的 1/5.8（nftables 要先分配 skb、建 conntrack 条目再丢）。AF_PACKET 发包时 veth 要把每个 skb 复制成 XDP 缓冲区才能跑原生 XDP 程序（第 8 节，与防火墙无关，物理网卡没有这一步），防火墙放行路径因此反而比 nftables 贵；丢弃路径仍便宜近一半。另外，nftables 在 input 链看不到 Veer 在 TC 入口就转发走的流量（第 8 节 SYN 洪泛），出向 NAT 和端口转发的连接只有防火墙的连接跟踪能管。

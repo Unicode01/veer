@@ -45,6 +45,7 @@ type KernelCapabilities struct {
 	BPFNetfilter       CapabilityCheck     `json:"bpf_netfilter"`
 	BPFNetfilterDynptr CapabilityCheck     `json:"bpf_netfilter_dynptr"`
 	TCAttach           CapabilityCheck     `json:"tc_attach"`
+	TCXAttach          CapabilityCheck     `json:"tcx_attach"`
 	XDPGenericAttach   CapabilityCheck     `json:"xdp_generic_attach"`
 	NetfilterAttach    CapabilityCheck     `json:"netfilter_attach"`
 	TC                 CapabilityCheck     `json:"tc"`
@@ -86,6 +87,30 @@ func combineCapability(label string, checks ...CapabilityCheck) CapabilityCheck 
 		Available: false,
 		Reason:    fmt.Sprintf("%s unavailable: %s", label, strings.Join(reasons, "; ")),
 	}
+}
+
+// xdpDataplaneChecks are what the XDP dataplane needs in either attach
+// mode. Whether a device runs XDP in driver mode is up to its driver; see
+// DetectXDPNativeDevices.
+func xdpDataplaneChecks(caps KernelCapabilities) []CapabilityCheck {
+	return []CapabilityCheck{
+		caps.BPFMapArray,
+		caps.BPFMapHash,
+		caps.BPFMapPerCPUHash,
+		caps.BPFMapPerCPUArray,
+		caps.BPFMapProgArray,
+		caps.BPFMapDevMapHash,
+		caps.BPFXDP,
+		caps.Netlink.RouteSocket,
+		caps.Netlink.LinkList,
+		caps.Netlink.RouteList,
+	}
+}
+
+// XDPDriverDataplane is the XDP dataplane for a runtime that attaches in
+// driver mode only: the generic attach probe on lo says nothing about it.
+func (caps KernelCapabilities) XDPDriverDataplane() CapabilityCheck {
+	return combineCapability("XDP driver dataplane", xdpDataplaneChecks(caps)...)
 }
 
 func kernelCapabilityWarnings(caps KernelCapabilities) []string {

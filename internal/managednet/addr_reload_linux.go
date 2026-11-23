@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -44,7 +45,7 @@ func linuxIPv4AddressFromCIDR(interfaceName string, cidr string) (netlink.Link, 
 	if interfaceName == "" {
 		return nil, nil, fmt.Errorf("interface is required")
 	}
-	link, err := netlink.LinkByName(interfaceName)
+	link, err := nlretry.LinkByName(interfaceName)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -68,7 +69,7 @@ func linuxHasIPv4Address(link netlink.Link, want *netlink.Addr) (bool, error) {
 		return false, fmt.Errorf("ipv4 address is required")
 	}
 	wantCIDR := (&net.IPNet{IP: want.IPNet.IP.To4(), Mask: want.IPNet.Mask}).String()
-	addrs, err := netlink.AddrList(link, unix.AF_INET)
+	addrs, err := nlretry.AddrList(link, unix.AF_INET)
 	if err != nil {
 		return false, err
 	}

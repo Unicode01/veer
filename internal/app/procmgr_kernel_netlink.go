@@ -835,7 +835,11 @@ func (pm *ProcessManager) handleKernelNetlinkRecoveryTrigger(trigger kernelNetli
 	source := triggerSourceLabel(trigger)
 
 	pm.mu.Lock()
-	pm.kernelAttachmentCheckAt = time.Time{}
+	if trigger.hasSource("link") {
+		// A link that changed may have lost its attachments; a neighbour,
+		// FDB or address change cannot detach a program.
+		pm.kernelAttachmentCheckAt = time.Time{}
+	}
 	if pm.kernelRuntime != nil {
 		if !trigger.hasSource("addr") || len(trigger.sources) > 1 {
 			summary = pm.summarizeNetlinkTriggeredKernelFallbacksLocked()

@@ -12,6 +12,7 @@ import (
 )
 
 func TestBundledWANCoreHelperBoundaryMigrationAndIsolation(t *testing.T) {
+	requireNativePluginRuntimeForTest(t, "wan_core")
 	root := filepath.Join(t.TempDir(), "wan_core")
 	copyDirForTest(t, filepath.Join("..", "..", "plugins", "wan_core"), root)
 	plugin, err := loadPluginFromDir(root, "wan_core")
@@ -19,7 +20,7 @@ func TestBundledWANCoreHelperBoundaryMigrationAndIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	db := openTestDB(t)
-	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(root)}), nil).(*gojaPluginControlRuntime)
+	rt := newPluginControlRuntime(db, pluginsEnabledTestConfig(&Config{PluginsDir: filepath.Dir(root)}), nil).(*pluginControlManager)
 	other := pluginControlNetLinkInfo{Name: "veerother", IfIndex: 999, Kind: "dummy", MTU: 1420, Up: true}
 	admin := &pluginControlNetAdminTest{links: map[string]pluginControlNetLinkInfo{"veerother": other}}
 	rt.netAdmin = admin

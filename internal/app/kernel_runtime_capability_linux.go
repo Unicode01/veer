@@ -17,13 +17,20 @@ func tcKernelRuntimeCapabilityUnavailableReason() string {
 	return "TC dataplane unavailable on this kernel"
 }
 
-func xdpKernelRuntimeCapabilityUnavailableReason() string {
+// xdpKernelRuntimeCapabilityUnavailableReason checks the XDP dataplane for
+// the attach modes the runtime may use. Without generic mode it attaches in
+// driver mode only, which the generic attach probe on lo says nothing about.
+func xdpKernelRuntimeCapabilityUnavailableReason(allowGeneric bool) string {
 	caps := detectKernelRuntimeCapabilities()
-	if caps.XDPGeneric.Available {
+	check, label := caps.XDPGeneric, "XDP generic dataplane"
+	if !allowGeneric {
+		check, label = caps.XDPDriverDataplane(), "XDP driver dataplane"
+	}
+	if check.Available {
 		return ""
 	}
-	if caps.XDPGeneric.Reason != "" {
-		return caps.XDPGeneric.Reason
+	if check.Reason != "" {
+		return check.Reason
 	}
-	return "XDP generic dataplane unavailable on this kernel"
+	return label + " unavailable on this kernel"
 }

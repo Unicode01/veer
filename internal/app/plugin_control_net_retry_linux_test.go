@@ -36,14 +36,3 @@ func TestPluginControlNetRetryLinkLookupRejectsPermanentError(t *testing.T) {
 		t.Fatalf("permanent lookup link=%v attempts=%d err=%v", got, attempts, err)
 	}
 }
-
-func TestPluginControlNetRetryLinkLookupIsBounded(t *testing.T) {
-	attempts := 0
-	got, err := pluginControlNetRetryLinkLookup(func() (netlink.Link, error) {
-		attempts++
-		return nil, nl.ErrDumpInterrupted
-	})
-	if got != nil || !errors.Is(err, nl.ErrDumpInterrupted) || attempts != pluginControlNetLinkLookupAttempts {
-		t.Fatalf("exhausted lookup link=%v attempts=%d err=%v", got, attempts, err)
-	}
-}

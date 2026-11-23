@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math"
 	"runtime"
-	"sort"
 
 	"github.com/Unicode01/veer/internal/store"
 	"github.com/cilium/ebpf"
@@ -379,25 +378,11 @@ func pluginObjectResourceUsageFromSpec(spec *ebpf.CollectionSpec, limits PluginR
 	if spec == nil {
 		return &PluginObjectResourceUsage{}, nil
 	}
-	usage := &PluginObjectResourceUsage{Programs: len(spec.Programs), Maps: len(spec.Maps)}
-	programNames := make([]string, 0, len(spec.Programs))
-	for name := range spec.Programs {
-		programNames = append(programNames, name)
-	}
-	sort.Strings(programNames)
-	for _, name := range programNames {
-		program := spec.Programs[name]
-		if program == nil {
-			continue
-		}
-		instructions := len(program.Instructions)
-		if instructions > limits.InstructionsPerProgram {
-			return nil, fmt.Errorf("program %q instructions = %d exceeds per-program limit %d", name, instructions, limits.InstructionsPerProgram)
-		}
-		if !safeAddUint64(&usage.Instructions, uint64(instructions)) {
-			return nil, fmt.Errorf("program instruction count overflow")
-		}
-	}
+	return summarizePluginObjectSpec(spec).resourceUsage(limits)
+}
+
+// pluginObjectCPUs is the CPU count per-CPU maps are estimated for.
+func pluginObjectCPUs() int {
 	cpus := runtime.NumCPU()
 	if possible, err := ebpf.PossibleCPU(); err == nil && possible > cpus {
 		cpus = possible
@@ -405,25 +390,7 @@ func pluginObjectResourceUsageFromSpec(spec *ebpf.CollectionSpec, limits PluginR
 	if cpus < 1 {
 		cpus = 1
 	}
-	mapNames := make([]string, 0, len(spec.Maps))
-	for name := range spec.Maps {
-		mapNames = append(mapNames, name)
-	}
-	sort.Strings(mapNames)
-	for _, name := range mapNames {
-		mapSpec := spec.Maps[name]
-		bytes, err := estimatePluginMapMemory(mapSpec, cpus, 0)
-		if err != nil {
-			return nil, fmt.Errorf("map %q: %w", name, err)
-		}
-		if bytes > limits.MapMemoryBytes {
-			return nil, fmt.Errorf("map %q estimated memory = %d bytes exceeds per-map limit %d", name, bytes, limits.MapMemoryBytes)
-		}
-		if !safeAddUint64(&usage.EstimatedMapMemoryBytes, bytes) {
-			return nil, fmt.Errorf("map memory estimate overflow")
-		}
-	}
-	return usage, nil
+	return cpus
 }
 
 func estimatePluginMapMemory(spec *ebpf.MapSpec, cpus, depth int) (uint64, error) {

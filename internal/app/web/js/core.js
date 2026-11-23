@@ -375,22 +375,6 @@
     );
   };
 
-  app.getToken = function getToken() {
-    const token = localStorage.getItem('veer_token');
-    if (token !== null) return token;
-    const legacyToken = localStorage.getItem('forward_token') || '';
-    if (legacyToken) localStorage.setItem('veer_token', legacyToken);
-    return legacyToken;
-  };
-  app.setToken = function setToken(token) {
-    localStorage.setItem('veer_token', token);
-    localStorage.setItem('forward_token', token);
-  };
-  app.clearToken = function clearToken() {
-    localStorage.removeItem('veer_token');
-    localStorage.removeItem('forward_token');
-  };
-
 	app.getPluginAdminToken = function getPluginAdminToken() {
 		try {
 			return sessionStorage.getItem('veer_plugin_admin_token') || '';
@@ -409,20 +393,12 @@
 		app.setPluginAdminToken('');
 	};
 	app.pluginAdminAPICall = async function pluginAdminAPICall(method, path, body) {
-		const headers = {
-			Authorization: 'Bearer ' + app.getToken(),
-			'Content-Type': 'application/json'
-		};
+		const headers = { 'Content-Type': 'application/json' };
 		const adminToken = app.getPluginAdminToken();
 		if (adminToken) headers['X-Veer-Plugin-Admin'] = adminToken;
 		const opts = { method, headers };
 		if (body !== undefined && body !== null) opts.body = JSON.stringify(body);
-		const resp = await fetch(path, opts);
-		if (resp.status === 401) {
-			app.clearToken();
-			app.showTokenModal({ rejected: true });
-			throw new Error('unauthorized');
-		}
+		const resp = await app.authFetch(path, opts);
 		const payload = await resp.json().catch(() => ({ error: resp.statusText }));
 		if (!resp.ok) {
 			const error = new Error(payload.error || resp.statusText);
@@ -433,39 +409,19 @@
 		return payload;
 	};
 
-  app.showTokenModal = function showTokenModal() {
-    app.el.appRoot.style.display = 'none';
-    app.el.tokenModal.classList.add('active');
-    app.el.tokenInput.disabled = false;
-    app.el.tokenInput.value = '';
-    app.el.tokenInput.focus();
-  };
-
-  app.hideTokenModal = function hideTokenModal() {
-    app.el.tokenModal.classList.remove('active');
-    app.el.tokenInput.value = '';
-    app.el.tokenInput.disabled = true;
-    app.el.appRoot.style.display = 'block';
-  };
-
+  // apiCall sends a JSON request with the session (see auth.js). GET requests
+  // made by the auto refresh are marked as background polls, which do not
+  // keep an idle session alive.
   app.apiCall = async function apiCall(method, path, body) {
     const pollContext = String(method || '').toUpperCase() === 'GET'
       ? app.state.pollRequestContext || null
       : null;
     const opts = {
       method,
-      headers: {
-        Authorization: 'Bearer ' + app.getToken(),
-        'Content-Type': 'application/json'
-      }
+      headers: { 'Content-Type': 'application/json' }
     };
     if (body) opts.body = JSON.stringify(body);
-    const resp = await fetch(path, opts);
-    if (resp.status === 401) {
-      app.clearToken();
-      app.showTokenModal({ rejected: true });
-      throw new Error('unauthorized');
-    }
+    const resp = await app.authFetch(path, opts, { background: !!pollContext });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ error: resp.statusText }));
       const error = new Error(err.error || resp.statusText);
@@ -861,7 +817,7 @@
     {
       const opt = document.createElement('option');
       opt.value = '';
-      opt.textContent = 'Unspecified';
+      opt.textContent = typeof app.t === 'function' ? app.t('common.unspecified') : 'Unspecified';
       sel.appendChild(opt);
     }
     app.tags.forEach((tag) => {

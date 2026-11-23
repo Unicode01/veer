@@ -208,9 +208,7 @@ function createHarness() {
     formatBytes(value) {
       return String(Number(value || 0)) + ' B';
     },
-    getToken() {
-      return 'test-token';
-    },
+
 	getPluginAdminToken() {
 	  return pluginAdminToken;
 	},
@@ -220,8 +218,23 @@ function createHarness() {
 	clearPluginAdminToken() {
 	  pluginAdminToken = '';
 	},
-    clearToken() {
-      this.clearedToken = true;
+    isAuthenticated() {
+      return true;
+    },
+    async authFetch(url, init) {
+      const request = Object.assign({ credentials: 'same-origin' }, init || {});
+      request.headers = Object.assign({}, request.headers || {});
+      const method = String(request.method || 'GET').toUpperCase();
+      if (method !== 'GET' && method !== 'HEAD') request.headers['X-Veer-CSRF'] = 'test-csrf';
+      const response = await rawHandler(url, request);
+      if (response.status === 401) {
+        this.handleUnauthorized(response);
+        throw new Error('unauthorized');
+      }
+      return response;
+    },
+    handleUnauthorized() {
+      this.unauthorizedHandled = true;
     },
     showTokenModal() {
       this.showedTokenModal = true;
@@ -337,7 +350,9 @@ test('package staging sends one self-contained package without detached signatur
   assert.equal(rawRequest.path, '/api/plugin-packages/stage');
   assert.equal(rawRequest.options.method, 'POST');
 	assert.equal(rawRequest.options.body, packageFile);
-  assert.equal(rawRequest.options.headers.Authorization, 'Bearer test-token');
+  assert.equal(rawRequest.options.headers.Authorization, undefined);
+  assert.equal(rawRequest.options.headers['X-Veer-CSRF'], 'test-csrf');
+  assert.equal(rawRequest.options.credentials, 'same-origin');
 	assert.equal(rawRequest.options.headers['X-Veer-Plugin-Admin'], 'test-plugin-admin');
 	assert.equal(rawRequest.options.headers['Content-Type'], 'application/zip');
 	assert.equal(rawRequest.options.headers['X-Veer-Plugin-Signer'], undefined);
@@ -964,7 +979,7 @@ test('plugin manager menu reserves persistent focus styling for keyboard focus',
   assert.doesNotMatch(css, /\.plugin-manager-menu-item:hover,\s*\.plugin-manager-menu-item:focus\s*\{/);
 });
 
-test('plugin overview exposes isolated host health and package probation', async () => {
+test('plugin overview exposes plugin worker health and package probation', async () => {
   const app = createHarness();
   app.state.plugins.data[0].runtime.isolation = {
     enabled: true,
@@ -973,8 +988,7 @@ test('plugin overview exposes isolated host health and package probation', async
     pids: [101, 202],
     restart_count: 3,
     rss_bytes: 4096,
-    resource_limit_mode: 'cgroup_v2+rss',
-    resource_limit_degraded: 'cgroup unavailable'
+    last_error: 'worker exited'
   };
   app.state.plugins.data[0].runtime.leases = [
     { type: 'net.link.state', key: 'host0/mtu' },
@@ -1004,7 +1018,7 @@ test('plugin overview exposes isolated host health and package probation', async
   assert.match(text, /plugins\.manager\.hostProcesses/);
   assert.match(text, /2 \/ plugins\.manager\.restarts 3/);
   assert.match(text, /PID 101, 202/);
-  assert.match(text, /cgroup unavailable/);
+  assert.match(text, /worker exited/);
   assert.match(text, /plugins\.manager\.leases/);
   assert.match(text, /host0\/mtu/);
   assert.match(text, /plugins\.manager\.operations/);

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Unicode01/veer/internal/nlretry"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -143,7 +144,7 @@ func bridgeAgeingTime(name string) time.Duration {
 // touchStaleNeighbors asks the kernel to confirm the stale neighbours of one
 // interface and family.
 func touchStaleNeighbors(linkIndex int, family int) {
-	neighbors, err := netlink.NeighList(linkIndex, family)
+	neighbors, err := nlretry.NeighList(linkIndex, family)
 	if err != nil {
 		return
 	}
