@@ -379,3 +379,51 @@ func TestPluginManagedProcessHandOffReleasesDelegatedControllers(t *testing.T) {
 		t.Fatal("managed cgroup remains", err)
 	}
 }
+
+// A keeper run signals its executable's group only while the recorded PID
+// still names the executable, or names nothing: a process that started later
+// under that PID means the group is gone and the number is someone else's.
+func TestPluginKeeperRunLeavesAReusedPIDAlone(t *testing.T) {
+	pid := os.Getpid()
+	ticks, err := kernelProcessStartTicks(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := &pluginKeeperRun{corePID: pid}
+	run.noteCoreStart()
+	if run.coreTicks != ticks {
+		t.Fatalf("recorded start ticks = %d, want %d", run.coreTicks, ticks)
+	}
+	if group := run.coreGroup(); group != pid {
+		t.Fatalf("group of the live executable = %d, want %d", group, pid)
+	}
+	run.coreTicks = ticks + 1 // as if this PID had been handed out again
+	if group := run.coreGroup(); group != 0 {
+		t.Fatalf("group of a reused PID = %d, want 0", group)
+	}
+
+	child := exec.Command("true")
+	if err := child.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if pluginPIDInUse(child.Process.Pid) {
+		t.Skip("the reaped child's PID was handed out again at once")
+	}
+	gone := &pluginKeeperRun{corePID: child.Process.Pid, coreTicks: ticks}
+	if group := gone.coreGroup(); group != child.Process.Pid {
+		t.Fatalf("group of an executable that is gone = %d, want %d: its children may live on", group, child.Process.Pid)
+	}
+}
+
+func TestPluginPIDInUse(t *testing.T) {
+	if !pluginPIDInUse(os.Getpid()) {
+		t.Fatal("this process is not in use")
+	}
+	child := exec.Command("true")
+	if err := child.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if pluginPIDInUse(child.Process.Pid) {
+		t.Skip("the reaped child's PID was handed out again at once")
+	}
+}

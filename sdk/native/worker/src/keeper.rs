@@ -309,12 +309,19 @@ impl Core {
         })
     }
 
-    /// Signals the program's process group while it may still exist.
+    /// Signals the program's process group while it may still exist. Once
+    /// the program is reaped its PID can be handed out again, though not while
+    /// its group lives on: a process with that PID means the group is gone and
+    /// the number belongs to someone else now.
     fn signal_group(&self, signal: libc::c_int) {
-        if !self.done && self.pid > 0 {
-            unsafe {
-                libc::kill(-self.pid, signal);
-            }
+        if self.done || self.pid <= 0 {
+            return;
+        }
+        if self.exited_at.is_some() && pid_in_use(self.pid) {
+            return;
+        }
+        unsafe {
+            libc::kill(-self.pid, signal);
         }
     }
 }
@@ -862,6 +869,12 @@ fn peer_uid(fd: RawFd) -> Option<u32> {
         )
     };
     (result == 0).then_some(credentials.uid)
+}
+
+/// Reports whether a process with this PID exists.
+fn pid_in_use(pid: libc::pid_t) -> bool {
+    let sent = unsafe { libc::kill(pid, 0) } == 0;
+    sent || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// Waits for events on fds, for at most timeout (None: no limit).

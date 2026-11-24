@@ -81,6 +81,7 @@ func (p *pluginManagedProcess) launch(req pluginProcessRequest, dir string) (*pl
 		cleanup()
 		return nil, nil, fmt.Errorf("start executable: %w", err)
 	}
+	run.noteCoreStart()
 	corePID, startedAt := run.core()
 	p.mu.Lock()
 	p.run = run
@@ -101,9 +102,46 @@ func (run *pluginKeeperRun) kill() {
 			_ = syscall.Kill(-run.keeperPID, syscall.SIGKILL)
 		}
 	}
-	if corePID, _ := run.core(); corePID > 0 {
-		_ = syscall.Kill(-corePID, syscall.SIGKILL)
+	if group := run.coreGroup(); group > 0 {
+		_ = syscall.Kill(-group, syscall.SIGKILL)
 	}
+}
+
+// noteCoreStart records the start time of the executable the keeper reported.
+// If it already exited and was reaped there is nothing to record, and its
+// group is signalled as before.
+func (run *pluginKeeperRun) noteCoreStart() {
+	corePID, _ := run.core()
+	if corePID <= 0 {
+		return
+	}
+	ticks, err := kernelProcessStartTicks(corePID)
+	if err != nil {
+		return
+	}
+	run.mu.Lock()
+	run.coreTicks = ticks
+	run.mu.Unlock()
+}
+
+// coreGroup returns the executable's process group, or 0 once its PID names a
+// different process. The kernel does not hand out a PID while a group still
+// uses it as its ID, so the executable's group is gone by then and the number
+// may lead somebody else's. A PID that names no process is still returned:
+// the group may live on in the executable's children.
+func (run *pluginKeeperRun) coreGroup() int {
+	run.mu.Lock()
+	corePID, coreTicks := run.corePID, run.coreTicks
+	run.mu.Unlock()
+	if corePID <= 0 {
+		return 0
+	}
+	if coreTicks != 0 {
+		if ticks, err := kernelProcessStartTicks(corePID); err == nil && ticks != coreTicks {
+			return 0
+		}
+	}
+	return corePID
 }
 
 // teardown kills the keeper and the executable's process group, waits until
@@ -119,12 +157,12 @@ func (run *pluginKeeperRun) teardown(releaseLimits func()) {
 // running. A killed process acts on SIGKILL only when it leaves the kernel, so
 // one in an uninterruptible sleep keeps its sockets and files a while longer.
 func (run *pluginKeeperRun) awaitGroupGone(timeout time.Duration) {
-	corePID, _ := run.core()
-	if corePID <= 0 {
+	group := run.coreGroup()
+	if group <= 0 {
 		return
 	}
 	deadline := time.Now().Add(timeout)
-	for pluginProcessGroupRunning(corePID) && time.Now().Before(deadline) {
+	for pluginProcessGroupRunning(group) && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
@@ -202,6 +240,7 @@ func dialPluginKeeper(name, token string, keeperPID int, keeperTicks uint64) (*p
 	run.mu.Lock()
 	run.corePID, run.startedAt = msg.PID, msg.StartedAt
 	run.mu.Unlock()
+	run.noteCoreStart()
 	return run, msg, scanner, nil
 }
 

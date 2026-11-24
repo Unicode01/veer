@@ -66,6 +66,10 @@ type pluginKeeperRun struct {
 	enc       *json.Encoder
 	corePID   int
 	startedAt int64
+	// coreTicks is the executable's start time in clock ticks, when it
+	// could be read; it tells the executable from a later process that got
+	// the same PID once its group was gone.
+	coreTicks uint64
 	exitCode  int
 	released  bool
 

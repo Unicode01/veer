@@ -24,5 +24,18 @@ func configurePluginExecCommand(command *exec.Cmd) func() {
 		return err
 	}
 	command.Cancel = kill
-	return func() { _ = kill() }
+	// Run has reaped the command by the time this cleanup runs, so its PID
+	// may have been handed out again, but only once its group was gone. A
+	// process with that PID therefore means there is nothing of ours to kill.
+	return func() {
+		if command.Process != nil && !pluginPIDInUse(command.Process.Pid) {
+			_ = kill()
+		}
+	}
+}
+
+// pluginPIDInUse reports whether a process with this PID exists.
+func pluginPIDInUse(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
