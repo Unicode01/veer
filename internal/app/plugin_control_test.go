@@ -163,7 +163,7 @@ func TestPluginControlReconcileAllowsPrivilegedLabByDefault(t *testing.T) {
 	if !ok {
 		t.Fatalf("snapshot = %+v, want privileged_l2_lab state", snapshot)
 	}
-	if state.Mode != pluginRuntimeModeControl || state.Attachable || state.Attached || state.Reason != "control script loaded" {
+	if state.Mode != pluginRuntimeModeControl || state.Attachable || state.Attached || state.Reason != "plugin control loaded" {
 		t.Fatalf("state = %+v, want control runtime for privileged lab", state)
 	}
 	if _, loaded := rt.plugins["privileged_l2_lab"]; !loaded {

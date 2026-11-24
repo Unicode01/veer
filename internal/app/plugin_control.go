@@ -67,7 +67,7 @@ func resolvePluginControlSource(plugin *LoadedPlugin) error {
 	got := fmt.Sprintf("%x", sha256.Sum256(data))
 	plugin.Control.ResolvedSHA256 = got
 	if pluginControlSHA256Required(*plugin) && plugin.Control.SHA256 == "" {
-		return fmt.Errorf("control.sha256 is required for stable or preview control scripts")
+		return fmt.Errorf("control.sha256 is required for stable and preview plugins")
 	}
 	if plugin.Control.SHA256 != "" && plugin.Control.SHA256 != got {
 		return fmt.Errorf("control.sha256 mismatch")

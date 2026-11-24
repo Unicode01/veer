@@ -538,10 +538,10 @@ func (rt *pluginControlManager) Reconcile(catalog PluginCatalog) pluginRuntimeSn
 		surface, err := rt.runPluginControlWithSurface(plugin, pluginControlEvent{Kind: "register"}, true)
 		if err != nil {
 			if preservePreviousPluginControlRuntime(plugin.ID, previousPlugins, previousSurfaces, registeredByID, surfaces) {
-				states[plugin.ID] = preservedPluginControlRuntimeState("control script registration failed; previous runtime preserved", err)
+				states[plugin.ID] = preservedPluginControlRuntimeState("plugin control registration failed; previous runtime preserved", err)
 			} else {
 				state := pluginRuntimeErrorState(err.Error())
-				state.Reason = "control script registration failed"
+				state.Reason = "plugin control registration failed"
 				states[plugin.ID] = state
 				registrationFailures[plugin.ID] = err.Error()
 			}
@@ -552,10 +552,10 @@ func (rt *pluginControlManager) Reconcile(catalog PluginCatalog) pluginRuntimeSn
 		if registered.Status != pluginStatusActive {
 			validationErr := fmt.Errorf("%s", strings.TrimSpace(registered.Error))
 			if preservePreviousPluginControlRuntime(plugin.ID, previousPlugins, previousSurfaces, registeredByID, surfaces) {
-				states[plugin.ID] = preservedPluginControlRuntimeState("control script surface validation failed; previous runtime preserved", validationErr)
+				states[plugin.ID] = preservedPluginControlRuntimeState("plugin control surface validation failed; previous runtime preserved", validationErr)
 			} else {
 				state := pluginRuntimeErrorState(registered.Error)
-				state.Reason = "control script surface validation failed"
+				state.Reason = "plugin control surface validation failed"
 				states[plugin.ID] = state
 				registrationFailures[plugin.ID] = registered.Error
 			}
@@ -674,15 +674,15 @@ func (rt *pluginControlManager) Reconcile(catalog PluginCatalog) pluginRuntimeSn
 			Mode:       pluginRuntimeModeControl,
 			Attachable: false,
 			Attached:   false,
-			Reason:     "control script loaded",
+			Reason:     "plugin control loaded",
 		}
 		if _, err := rt.runPluginControlWithSurface(plugin, pluginControlEvent{Kind: "reconcile"}, true); err != nil {
 			state = pluginRuntimeErrorState(err.Error())
-			state.Reason = "control script reconcile failed"
+			state.Reason = "plugin control reconcile failed"
 		} else if len(plugin.Objects) == 0 {
 			if err := rt.applyRuntimeResourcesForReconcile(plugin); err != nil {
 				state = pluginRuntimeErrorState(err.Error())
-				state.Reason = "control script runtime resource reconcile failed"
+				state.Reason = "plugin control runtime resource reconcile failed"
 			}
 		}
 		states[plugin.ID] = state
@@ -1213,7 +1213,7 @@ func (rt *pluginControlManager) getPluginControlVM(plugin LoadedPlugin, mode str
 	applyPluginRuntimeSurface(&validated, registration.surface)
 	if validated.Status != pluginStatusActive {
 		candidate.stopVM()
-		return nil, fmt.Errorf("control script surface validation failed: %s", strings.TrimSpace(validated.Error))
+		return nil, fmt.Errorf("plugin control surface validation failed: %s", strings.TrimSpace(validated.Error))
 	}
 	candidate.plugin = validated
 

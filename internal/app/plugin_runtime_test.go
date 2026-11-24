@@ -9677,7 +9677,7 @@ func TestMergePluginRuntimeSnapshotPrefersDataplaneState(t *testing.T) {
 		Runtime: PluginRuntimeState{
 			Mode:        pluginRuntimeModeControl,
 			WorkerQueue: &PluginControlWorkerQueueState{PendingRequests: 2, PendingBytes: 1024, RequestLimit: pluginControlWorkerMaxPending, ByteLimit: pluginControlWorkerMaxPendingBytes},
-			Reason:      "control script loaded",
+			Reason:      "plugin control loaded",
 			Error:       "control warning",
 		},
 	}}}
@@ -9695,7 +9695,7 @@ func TestMergePluginRuntimeSnapshotPrefersDataplaneState(t *testing.T) {
 	if got.Mode != pluginRuntimeModeDataplane || !got.Attached || got.AttachmentCount != 1 {
 		t.Fatalf("merged runtime = %+v, want dataplane state", got)
 	}
-	if !strings.Contains(got.Reason, "control script loaded") || !strings.Contains(got.Reason, "dataplane attached") {
+	if !strings.Contains(got.Reason, "plugin control loaded") || !strings.Contains(got.Reason, "dataplane attached") {
 		t.Fatalf("merged reason = %q, want control and dataplane details", got.Reason)
 	}
 	if got.Error != "control warning" {

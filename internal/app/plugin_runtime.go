@@ -841,7 +841,7 @@ func pluginRuntimeCapabilities(cfg *Config) PluginRuntimeCapabilities {
 			"persistent TCP/UDP sockets are host-owned and capped at 32 handles per plugin; transactional upgrades transfer compatible handles to the new instance, while cold replacement, plugin deactivation, and runtime shutdown close them",
 			"plugin dataplane mode is a trust contract for installed eBPF objects; keep external dataplane loading disabled unless the object source is trusted",
 			"plugin stability is declared by manifest.stability: lab is for examples/tests only, preview is suitable for controlled deployments, stable is expected to be production-ready, and deprecated should not be used for new deployments",
-			"lab, preview, and stable plugins can execute control scripts and join external tc dataplane when the corresponding global plugin switches are enabled; deprecated plugins are always blocked",
+			"lab, preview, and stable plugins can run their control libraries and join external tc dataplane when the corresponding global plugin switches are enabled; deprecated plugins are always blocked",
 			"xdp plugins run only on explicit ingress interfaces before the tc pipeline; Veer refuses to replace an existing XDP program on the same interface",
 			"netfilter plugins use host-owned native hook links scoped by network namespace, protocol family, hook, and semantic phase; interface matching is implemented by the plugin program",
 			"plugin UI assets require the same API bearer token; prefer single-file UI assets or authenticated fetches",
@@ -863,7 +863,7 @@ func externalPluginRuntimeState() PluginRuntimeState {
 		Mode:       pluginRuntimeModeRegistered,
 		Attachable: false,
 		Attached:   false,
-		Reason:     "external dataplane loading is disabled or no supported tc pipeline hook was registered; the plugin is limited to discovery, control scripts, object validation, and static UI assets",
+		Reason:     "external dataplane loading is disabled or no supported tc pipeline hook was registered; the plugin is limited to discovery, plugin control, object validation, and static UI assets",
 	}
 }
 
