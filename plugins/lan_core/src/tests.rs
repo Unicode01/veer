@@ -11,6 +11,8 @@ struct Net {
     links: BTreeMap<String, Value>,
     next: u64,
     gro: BTreeMap<String, bool>,
+    /// Links whose delete fails.
+    undeletable: std::collections::BTreeSet<String>,
 }
 
 fn fixture(wan_status: Option<Value>) -> (Arc<Mutex<Net>>, Harness<LanCore>) {
@@ -63,7 +65,12 @@ fn fixture(wan_status: Option<Value>) -> (Arc<Mutex<Net>>, Harness<LanCore>) {
     });
     let m = net.clone();
     fake.adapter("net.link.delete", move |args| {
-        m.lock().unwrap().links.remove(args[0].as_str().unwrap());
+        let mut n = m.lock().unwrap();
+        let name = args[0].as_str().unwrap();
+        if n.undeletable.contains(name) {
+            return Err(format!("delete {name}: device or resource busy"));
+        }
+        n.links.remove(name);
         Ok(Value::Null)
     });
     let m = net.clone();
@@ -117,10 +124,93 @@ fn apply_network_builds_the_bridge_and_its_plans() {
     let ipv6 = h.fake.data("ipv6_assignment_plans", "default");
     assert_eq!(ipv6["enabled"], true);
     assert_eq!(ipv6["dns_servers"], json!(["2001:db8::53"]));
+    assert!(ipv6.get("parent_valid_until_ms").is_none(), "no lease times, no deadline: {ipv6}");
     // A segmented WAN provides its own segmentation boundary: GRO stays on.
     assert_eq!(status["member_gro"]["required"], false);
     assert!(net.lock().unwrap().gro.values().all(|gro| *gro));
     assert_eq!(h.fake.timer(REPAIR_TIMER).unwrap()["delay_ms"], json!(SAFETY_REPAIR_MS));
+}
+
+#[test]
+fn a_port_list_with_a_trailing_comma_or_blank_entries_is_accepted() {
+    for ports in [json!("lanp0, lanp1,"), json!(" lanp0 ,, lanp1 "), json!(["lanp0", "", "  ", "lanp1"])] {
+        let profile = normalize_profile("lan", &json!({"bridge": "br-lan", "ports": ports})).unwrap();
+        assert_eq!(profile["ports"], json!(["lanp0", "lanp1"]), "ports {ports}");
+    }
+    assert_eq!(normalize_profile("lan", &json!({"ports": ","})).unwrap()["ports"], json!([]));
+    assert!(normalize_profile("lan", &json!({"ports": "lan p0"})).is_err(), "a name with a space is still invalid");
+}
+
+#[test]
+fn renaming_the_bridge_deletes_the_one_the_plugin_created() {
+    let (net, mut h) = fixture(None);
+    h.action("apply_network", json!({"lan_id": "default", "bridge": "brlan0", "ports": ["lanp0"]})).unwrap();
+    assert_eq!(h.fake.data("status", "default")["bridge_created"], true);
+
+    h.action("apply_network", json!({"lan_id": "default", "bridge": "brlan1", "ports": ["lanp0"]})).unwrap();
+    {
+        let n = net.lock().unwrap();
+        assert!(!n.links.contains_key("brlan0"), "the old plugin-created bridge is left behind");
+        assert_eq!(n.links["lanp0"]["master_name"], "brlan1");
+    }
+    let status = h.fake.data("status", "default");
+    assert_eq!(status["bridge"], "brlan1");
+    assert_eq!(status["retired_bridges"], json!([]));
+
+    // A pre-existing bridge is never deleted, renamed away from or not.
+    net.lock().unwrap().links.insert("vmbr9".into(), json!({"name": "vmbr9", "ifindex": 90, "kind": "bridge", "up": true}));
+    h.action("apply_network", json!({"lan_id": "default", "bridge": "vmbr9", "ports": ["lanp0"]})).unwrap();
+    h.action("apply_network", json!({"lan_id": "default", "bridge": "brlan2", "ports": ["lanp0"]})).unwrap();
+    assert!(net.lock().unwrap().links.contains_key("vmbr9"));
+    assert!(!net.lock().unwrap().links.contains_key("brlan1"), "brlan1 was deleted when the profile moved to vmbr9");
+}
+
+#[test]
+fn a_retired_bridge_whose_delete_failed_is_deleted_later() {
+    let (net, mut h) = fixture(None);
+    h.action("apply_network", json!({"lan_id": "default", "bridge": "brlan0", "ports": ["lanp0"]})).unwrap();
+    net.lock().unwrap().undeletable.insert("brlan0".into());
+    h.action("apply_network", json!({"lan_id": "default", "bridge": "brlan1", "ports": ["lanp0"]})).unwrap();
+    let status = h.fake.data("status", "default");
+    assert_eq!(status["retired_bridges"], json!(["brlan0"]));
+    assert!(js::text(&status["cleanup_errors"]).contains("retired bridge brlan0"), "{status}");
+
+    net.lock().unwrap().undeletable.clear();
+    h.action("apply_network", json!({"lan_id": "default", "bridge": "brlan1", "ports": ["lanp0"]})).unwrap();
+    assert!(!net.lock().unwrap().links.contains_key("brlan0"));
+    assert_eq!(h.fake.data("status", "default")["retired_bridges"], json!([]));
+
+    // A teardown deletes retired bridges too.
+    net.lock().unwrap().undeletable.insert("brlan1".into());
+    h.action("apply_network", json!({"lan_id": "default", "bridge": "brlan2", "ports": ["lanp0"]})).unwrap();
+    net.lock().unwrap().undeletable.clear();
+    h.action("teardown", json!({"lan_id": "default"})).unwrap();
+    let n = net.lock().unwrap();
+    assert!(!n.links.contains_key("brlan1") && !n.links.contains_key("brlan2"), "links left: {:?}", n.links.keys());
+}
+
+#[test]
+fn a_retired_bridge_another_profile_now_uses_is_left_alone() {
+    let (net, mut h) = fixture(None);
+    h.action("apply_network", json!({"lan_id": "default", "bridge": "brlan0", "ports": ["lanp0"]})).unwrap();
+    h.fake.put_record("profiles", "guest", json!({"bridge": "brlan0", "ports": []}), true);
+    h.action("apply_network", json!({"lan_id": "default", "bridge": "brlan1", "ports": ["lanp0"]})).unwrap();
+    assert!(net.lock().unwrap().links.contains_key("brlan0"));
+    assert_eq!(h.fake.data("status", "default")["retired_bridges"], json!([]));
+}
+
+#[test]
+fn the_ipv6_plan_keeps_within_the_delegated_prefix_lease() {
+    let wan = json!({"enabled": true, "data": {"phase": "applied", "egress_nat_parent_interface": "veerlocal0", "segmentation_ready": true,
+        "pd_prefix": "2001:db8:100::/56", "pd_prefixes": [
+            {"prefix": "2001:db8:200::/56", "preferred_until_ms": 1.0, "valid_until_ms": 2.0},
+            {"prefix": "2001:db8:100::/56", "preferred_until_ms": 1800000000000.0, "valid_until_ms": 1800003600000.0}]}});
+    let (_net, mut h) = fixture(Some(wan));
+    h.action("apply_network", json!({"lan_id": "default", "bridge": "brlan0", "ports": ["lanp0"]})).unwrap();
+    let ipv6 = h.fake.data("ipv6_assignment_plans", "default");
+    assert_eq!(ipv6["enabled"], true, "{ipv6}");
+    assert_eq!(ipv6["parent_preferred_until_ms"], json!(1800000000000i64));
+    assert_eq!(ipv6["parent_valid_until_ms"], json!(1800003600000i64));
 }
 
 #[test]
