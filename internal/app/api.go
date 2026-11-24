@@ -353,6 +353,7 @@ func buildAPIHandlerWithAuth(cfg *Config, db *sql.DB, pm *ProcessManager, auth *
 			pluginIDs = req.PluginIDs
 		}
 		if pm != nil {
+			defer pm.enterPluginChange()()
 			if err := pm.applyPluginCatalogUpdateSelection(pluginIDs); err != nil {
 				recordPluginAudit(db, "", "catalog.reload", "api", "error", map[string]any{"plugin_ids": pluginIDs, "error": err.Error()})
 				writeJSON(w, http.StatusInternalServerError, map[string]any{

@@ -185,3 +185,32 @@ func TestBackgroundReconcilePassDefersToAPIMutation(t *testing.T) {
 		t.Fatal("the API mutation never entered after the pass")
 	}
 }
+
+// Changes that run passes of their own (enable/disable, runtime updates, a
+// rollback) used to run side by side with other API writes, which then failed
+// on the resources the pass journaled. Changes now take turns.
+func TestPluginChangesTakeTurns(t *testing.T) {
+	pm := &ProcessManager{}
+	first := pm.enterPluginChange()
+	entered := make(chan struct{})
+	go func() {
+		defer close(entered)
+		pm.enterPluginChange()()
+	}()
+	select {
+	case <-entered:
+		t.Fatal("a second change entered while the first ran")
+	case <-time.After(50 * time.Millisecond):
+	}
+	first()
+	first() // leaving twice is harmless
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the second change never entered after the first")
+	}
+	if !pm.pluginMutationGate.tryEnterPass() {
+		t.Fatal("the gate refused a background pass after every change left")
+	}
+	pm.pluginMutationGate.leavePass()
+}

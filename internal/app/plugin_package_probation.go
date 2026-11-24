@@ -280,7 +280,13 @@ func (m *pluginPackageManager) completePluginPackageProbation(record PluginPacka
 	return m.completePluginPackageProbationGroupIfFinished(record.GroupID, reason)
 }
 
+// recoverPluginPackageProbation rolls a package on probation back. It is a
+// plugin change (see pluginMutationGate): API writes wait for its passes
+// rather than fail on the resources they journal.
 func (m *pluginPackageManager) recoverPluginPackageProbation(record PluginPackageProbation, reason, actor string) (PluginPackageOperationResult, error) {
+	if m.pm != nil {
+		defer m.pm.enterPluginChange()()
+	}
 	reason = boundedPluginControlHealthError(reason)
 	if record.GroupID != "" {
 		group, err := m.loadPluginPackageProbationGroup(record.GroupID)

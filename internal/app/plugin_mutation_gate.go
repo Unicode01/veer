@@ -2,28 +2,30 @@ package app
 
 import "sync"
 
-// pluginMutationGate keeps the plugin actions and resource writes made
-// through the API apart from the plugin reconcile passes the daemon starts by
-// itself (a retry after a failed pass, the dataplane self-heal).
+// pluginMutationGate keeps plugin changes apart from one another and from the
+// plugin reconcile passes the daemon starts by itself (a retry after a failed
+// pass, the dataplane self-heal). The changes are the actions, resource
+// writes, enable/disable and catalog reloads made through the API, and the
+// automatic rollback of a package on probation.
 //
 // A reconcile pass journals every resource the plugins write during it so
 // that a failed pass can restore them, and refuses other writes to those
 // resources until it commits or rolls back. A pass can take seconds, since it
 // includes the dataplane reconcile, and while a plugin keeps reporting an
-// error the daemon retries every 250 ms to 1 min. An action that wrote the
-// same resource meanwhile failed with "plugin resource migration is pending".
+// error the daemon retries every 250 ms to 1 min. A write to the same
+// resource meanwhile failed with "plugin resource migration is pending".
 //
-// API mutations run side by side. One waits while a background pass runs; a
-// background pass does not start while one runs, so the maintenance loop is
-// never held up behind an action and simply tries again later. Passes that
-// an API mutation causes (its runtime update, or a plugin handler asking for
-// one) and passes started by API requests that are not mutations bypass the
-// gate.
+// Many changes run a pass of their own (enable/disable, a runtime update, a
+// plugin handler asking for one, a rollback), so they take turns: one waits
+// while another change or a background pass runs. A background pass does not
+// start while a change runs, so the maintenance loop is never held up behind
+// one and simply tries again later. The passes a change runs belong to it and
+// do not take the gate again.
 type pluginMutationGate struct {
-	mu        sync.Mutex
-	cond      *sync.Cond
-	mutations int
-	pass      bool
+	mu       sync.Mutex
+	cond     *sync.Cond
+	changing bool
+	pass     bool
 }
 
 func (g *pluginMutationGate) condLocked() *sync.Cond {
@@ -33,34 +35,32 @@ func (g *pluginMutationGate) condLocked() *sync.Cond {
 	return g.cond
 }
 
-// enterMutation waits until no background pass runs and admits an API
-// mutation; call the returned function when it is done.
+// enterMutation waits until no other change and no background pass runs and
+// admits a change; call the returned function when it is done.
 func (g *pluginMutationGate) enterMutation() func() {
 	g.mu.Lock()
-	for g.pass {
+	for g.pass || g.changing {
 		g.condLocked().Wait()
 	}
-	g.mutations++
+	g.changing = true
 	g.mu.Unlock()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			g.mu.Lock()
-			g.mutations--
-			if g.mutations == 0 {
-				g.condLocked().Broadcast()
-			}
+			g.changing = false
+			g.condLocked().Broadcast()
 			g.mu.Unlock()
 		})
 	}
 }
 
-// tryEnterPass admits a background pass unless an API mutation or another
+// tryEnterPass admits a background pass unless a change or another
 // background pass runs.
 func (g *pluginMutationGate) tryEnterPass() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.pass || g.mutations > 0 {
+	if g.pass || g.changing {
 		return false
 	}
 	g.pass = true
@@ -75,9 +75,9 @@ func (g *pluginMutationGate) leavePass() {
 }
 
 // reconcilePluginsInBackground runs a reconcile pass the daemon starts by
-// itself. It reports false, without running, while an API mutation runs; the
-// caller tries again later. The gate is taken before pluginReconcileMu: a
-// running API mutation may need that lock for its own runtime update.
+// itself. It reports false, without running, while a change runs; the caller
+// tries again later. The gate is taken before pluginReconcileMu: a running
+// change may need that lock for its own runtime update.
 func (pm *ProcessManager) reconcilePluginsInBackground() (bool, error) {
 	if pm == nil {
 		return false, nil
@@ -102,9 +102,9 @@ func (pm *ProcessManager) beginPluginResourceMigrationAfterPass(runtime pluginRe
 	return runtime.BeginPluginResourceMigrationTransactionWithID(id)
 }
 
-// enterPluginAPIMutation admits a plugin action or resource write made
-// through the API; see pluginMutationGate.
-func (pm *ProcessManager) enterPluginAPIMutation() func() {
+// enterPluginChange admits a plugin change; see pluginMutationGate. Nothing a
+// change runs may enter again: the gate is not reentrant.
+func (pm *ProcessManager) enterPluginChange() func() {
 	if pm == nil {
 		return func() {}
 	}
