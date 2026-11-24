@@ -2,7 +2,7 @@
   "api_version": "v1",
   "id": "pppoe_client",
   "name": "PPPoE Client",
-  "version": "1.10.1",
+  "version": "1.10.2",
   "kind": "pipeline",
   "stability": "stable",
   "description": "PPPoE WAN control and bidirectional TC pipeline integration.",
@@ -61,6 +61,8 @@
     "net_access": [
       {
         "interfaces": [
+          "bond*",
+          "br*",
           "en*",
           "eth*",
           "veer*",
@@ -68,9 +70,14 @@
           "local*",
           "ppp*",
           "tap*",
+          "team*",
+          "usb*",
           "veth*",
+          "vlan*",
           "vmbr*",
-          "wan*"
+          "wan*",
+          "wl*",
+          "wwan*"
         ],
         "operations": [
           "l2",

@@ -67,7 +67,10 @@ pub(crate) fn iso_at(ms: f64) -> String {
 }
 
 pub struct PppoeClient {
-    /// (kfuncs, direct), learned on the first message.
+    /// (kfuncs, direct), learned on the first message. They hold for the
+    /// life of the instance: the host chose the tunnel object for them, and
+    /// when the kernel module comes or goes it registers a new instance,
+    /// which takes over the session like an upgrade.
     features: Option<(bool, bool)>,
 }
 
@@ -725,17 +728,24 @@ impl<'a> Ctx<'a> {
             match installed {
                 Ok(value) => tunnel = value,
                 Err(err) => {
-                    self.send_padt(profile, &ac_mac, pads.session_id, 0.0)?;
-                    self.clear_tunnel_config()?;
-                    return Err(err);
+                    // Both steps run whatever the other does: a PADT that
+                    // cannot be sent must not leave a tunnel config behind.
+                    let padt = self.send_padt(profile, &ac_mac, pads.session_id, 0.0);
+                    let cleared = self.clear_tunnel_config();
+                    let cleanup: Vec<String> = [padt.err(), cleared.err()].into_iter().flatten().map(|e| error_message(&e)).collect();
+                    if cleanup.is_empty() {
+                        return Err(err);
+                    }
+                    bail!("{}; cleanup after the failed tunnel install: {}", error_message(&err), cleanup.join("; "));
                 }
             }
         }
         if flag(profile, "send_padt") {
-            self.send_padt(profile, &ac_mac, pads.session_id, 0.0)?;
+            let padt = self.send_padt(profile, &ac_mac, pads.session_id, 0.0);
             if !tunnel.is_null() {
                 self.clear_tunnel_config()?;
             }
+            padt?;
         }
         let lcp_ready = session::lcp_ready_for_network_cp(&frames);
         Ok(base_result(profile, "session_probe", json!({

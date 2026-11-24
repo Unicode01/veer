@@ -980,7 +980,33 @@ pub fn stamp_dhcpv6_lease(mut lease: Value, acquired_ms: f64) -> Value {
     lease["rebind_at"] = iso(at(rebind));
     lease["expires_at"] = iso(at(valid));
     lease["lease_timer_error"] = json!(error);
+    // Each address and prefix also carries when it stops being preferred and
+    // valid, so what is derived from it later (the LAN's router
+    // advertisements) can keep within the lease without knowing when it was
+    // acquired.
+    for key in ["prefixes", "addresses"] {
+        if let Some(items) = lease.get_mut(key).and_then(Value::as_array_mut) {
+            for item in items.iter_mut().filter(|item| item.is_object()) {
+                let preferred = lifetime_deadline_ms(acquired, item.get("preferred_lifetime"));
+                let valid = lifetime_deadline_ms(acquired, item.get("valid_lifetime"));
+                item["preferred_until_ms"] = js::num(preferred);
+                item["valid_until_ms"] = js::num(valid);
+            }
+        }
+    }
     lease
+}
+
+/// When a lifetime of `seconds` from `acquired_ms` ends, in Unix ms; 0 for an
+/// infinite lifetime or one that is missing.
+fn lifetime_deadline_ms(acquired_ms: f64, seconds: Option<&Value>) -> f64 {
+    let Some(seconds) = seconds.and_then(Value::as_f64) else {
+        return 0.0;
+    };
+    if !(0.0..4294967295.0).contains(&seconds) {
+        return 0.0;
+    }
+    lease_deadline_ms(acquired_ms, seconds)
 }
 
 pub fn merge_by_type(primary: &Value, fallback: &Value) -> Vec<Value> {
