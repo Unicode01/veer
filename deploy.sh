@@ -1128,9 +1128,10 @@ PY
 # keeps the installed plugins in step with the release. phase "before" runs
 # before anything changes: every installed plugin the plugin bundle provides
 # goes into PLUGIN_UPGRADE_IDS and is replaced by the bundle's version, unless
-# the installed one is newer (PLUGIN_KEEP_IDS); any other plugin the new
-# version cannot run stops the deploy. phase "after" runs once the bundle is
-# applied and returns 1 if a plugin still cannot run.
+# the installed one is newer or has the bundle's files already
+# (PLUGIN_KEEP_IDS); any other plugin the new version cannot run stops the
+# deploy. phase "after" runs once the bundle is applied and returns 1 if a
+# plugin still cannot run.
 # VEER_ALLOW_INCOMPATIBLE_PLUGINS=1 turns both stops into warnings.
 check_installed_plugins() {
     local phase="$1"
@@ -1156,6 +1157,7 @@ check_installed_plugins() {
         fail "插件兼容性检查未完成，未替换二进制、配置与插件: ${report##*$'\n'}\n       确认已安装插件能在新版本运行后，可设置 VEER_ALLOW_INCOMPATIBLE_PLUGINS=1 跳过检查"
     fi
     assignments="$(python3 - "${report}" "${PLUGIN_BUNDLE_PATH}" "${phase}" <<'PY'
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -1180,18 +1182,31 @@ def version_key(value):
     return tuple(numbers + [0] * (3 - len(numbers)))
 
 
-# The bundle's plugins and the installed ones, by directory, with versions.
-bundled, installed = {}, {}
-if phase == "before" and os.path.isfile(bundle_path):
-    try:
-        with tarfile.open(bundle_path, "r:gz") as archive:
-            for member in archive:
-                parts = member.name.split("/")
-                if len(parts) == 3 and parts[0] == "plugins" and parts[2] == "plugin.json" and member.isfile():
-                    stream = archive.extractfile(member)
-                    bundled[parts[1]] = read_version(stream.read(1 << 20)) if stream else ""
-    except (OSError, tarfile.TarError) as err:
-        print(f"        无法读取插件包 {bundle_path}: {err}", file=sys.stderr)
+def stream_digest(stream, head=b""):
+    digest = hashlib.sha256(head)
+    for chunk in iter(lambda: stream.read(1 << 20), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def directory_digests(root):
+    """Digest of every file under root by relative path; links count as different."""
+    digests = {}
+    for current, directories, files in os.walk(root):
+        for name in directories + files:
+            path = Path(current) / name
+            relative = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                digests[relative] = "link"
+            elif name in files:
+                with path.open("rb") as stream:
+                    digests[relative] = stream_digest(stream)
+    return digests
+
+
+# The installed plugins and the bundle's, by directory, with versions, and
+# the digests of the bundle's files for the plugins that are installed.
+bundled, installed, bundled_files = {}, {}, {}
 plugins_dir = report.get("plugins_dir") or ""
 if phase == "before" and plugins_dir and os.path.isdir(plugins_dir):
     for entry in sorted(Path(plugins_dir).iterdir()):
@@ -1201,6 +1216,36 @@ if phase == "before" and plugins_dir and os.path.isdir(plugins_dir):
                 installed[entry.name] = read_version(manifest.read_bytes())
             except OSError:
                 installed[entry.name] = ""
+if phase == "before" and os.path.isfile(bundle_path):
+    try:
+        with tarfile.open(bundle_path, "r:gz") as archive:
+            for member in archive:
+                parts = member.name.split("/")
+                if len(parts) < 3 or parts[0] != "plugins" or not member.isfile():
+                    continue
+                directory, relative = parts[1], "/".join(parts[2:])
+                if relative != "plugin.json" and directory not in installed:
+                    continue
+                stream = archive.extractfile(member)
+                head = stream.read(1 << 20) if relative == "plugin.json" else b""
+                if relative == "plugin.json":
+                    bundled[directory] = read_version(head)
+                if directory in installed:
+                    bundled_files.setdefault(directory, {})[relative] = stream_digest(stream, head)
+    except (OSError, tarfile.TarError) as err:
+        print(f"        无法读取插件包 {bundle_path}: {err}", file=sys.stderr)
+
+
+def same_as_bundle(directory):
+    expected = bundled_files.get(directory)
+    if not expected:
+        return False
+    try:
+        return directory_digests(Path(plugins_dir) / directory) == expected
+    except OSError:
+        return False
+
+
 if phase == "before" and installed and not os.path.isfile(bundle_path):
     print(f"        未找到插件包 {bundle_path}，已安装插件保持现有版本", file=sys.stderr)
 
@@ -1232,6 +1277,13 @@ for directory, version in installed.items():
         keep.append(directory)
         print(f"        [保留] {directory} {version}: 比插件包中的 {new} 新", file=sys.stderr)
         continue
+    elif version and version == new:
+        if same_as_bundle(directory):
+            keep.append(directory)
+            print(f"        [相同] {directory} {version}: 与插件包中的一致，保持不变", file=sys.stderr)
+            continue
+        # A build of the same version, e.g. a development package.
+        print(f"        [重装] {directory} {version}: 插件包中的同版本文件不同，改用插件包中的文件", file=sys.stderr)
     else:
         print(f"        [更新] {directory} {version or '?'} -> {new or '?'}", file=sys.stderr)
     upgrade.append(directory)

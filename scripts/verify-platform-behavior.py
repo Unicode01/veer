@@ -7,6 +7,7 @@ import os
 import pty
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -259,8 +260,12 @@ install_bundled_plugins
             "an older plugin that runs is updated too": dict(
                 plugins=[("wan_core", "ok", ""), ("vpn_core", "ok", "")],
                 rc=0, upgrade="wan_core", replaced=True, says="[更新] wan_core 1.7.0 -> 1.8.0"),
-            "the same version is refreshed from the bundle": dict(
-                plugins=[("wan_core", "ok", "")], installed="1.8.0", rc=0, upgrade="wan_core", replaced=True),
+            "the same version with other files is refreshed from the bundle": dict(
+                plugins=[("wan_core", "ok", "")], installed="1.8.0", rc=0, upgrade="wan_core", replaced=True,
+                says="[重装] wan_core 1.8.0"),
+            "the same version with the bundle's files is left alone": dict(
+                plugins=[("wan_core", "ok", "")], installed="1.8.0", identical=True, rc=0, upgrade="",
+                keep="wan_core", says="[相同] wan_core 1.8.0"),
             "a newer installed plugin is kept": dict(
                 plugins=[("wan_core", "ok", "")], installed="1.10.0", rc=0, upgrade="", keep="wan_core",
                 says="[保留] wan_core 1.10.0"),
@@ -299,6 +304,11 @@ install_bundled_plugins
                     (bundle_root / "plugins" / plugin / "plugin.json").write_text(
                         json.dumps({"id": plugin, "version": version}), encoding="utf-8")
                     (bundle_root / "plugins" / plugin / "lib" / f"lib{plugin}.so").write_text("new", encoding="utf-8")
+                if case.get("identical"):
+                    # Installed from this bundle before: the same files.
+                    shutil.rmtree(plugins / "wan_core")
+                    shutil.copytree(bundle_root / "plugins" / "wan_core", plugins / "wan_core")
+                    installed_mtime = (plugins / "wan_core" / "lib" / "libwan_core.so").stat().st_mtime_ns
                 bundle = root / "veer-plugins.tar.gz"
                 if case.get("bundle", True):
                     subprocess.run(["tar", "-C", bundle_root.as_posix(), "-czf", bundle.as_posix(), "plugins"], check=True)
@@ -332,9 +342,14 @@ install_bundled_plugins
                     self.assertIn(f"upgrade={case['upgrade']} keep={case.get('keep', '')}\n", result.stdout)
                 # Python 3.12+ warns when tar extraction names no filter.
                 self.assertNotIn("DeprecationWarning", result.stderr)
-                replaced = case.get("replaced", False)
-                self.assertEqual((plugins / "wan_core" / "lib" / "libwan_core.so").exists(), replaced)
-                self.assertEqual((plugins / "wan_core" / "control.js").exists(), not replaced)
+                if case.get("identical"):
+                    self.assertIn("没有需要安装或更新的插件", result.stdout)
+                    self.assertEqual((plugins / "wan_core" / "lib" / "libwan_core.so").stat().st_mtime_ns,
+                                     installed_mtime, "an identical plugin is not copied again")
+                else:
+                    replaced = case.get("replaced", False)
+                    self.assertEqual((plugins / "wan_core" / "lib" / "libwan_core.so").exists(), replaced)
+                    self.assertEqual((plugins / "wan_core" / "control.js").exists(), not replaced)
                 self.assertTrue((plugins / "vpn_core" / "control.js").exists(), "plugins outside the bundle stay")
                 # Plugins that were not installed stay out.
                 self.assertFalse((plugins / "lan_core").exists())
