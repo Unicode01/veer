@@ -604,6 +604,10 @@ type LoadedPlugin struct {
 	// exists for this platform.
 	nativeLibraryPath   string
 	nativeLibrarySHA256 string
+	// nativeFollowsHostFeatures is set when the native registration has an
+	// entry conditioned on a host feature that can change while the daemon
+	// runs; the instance is then registered again when one does.
+	nativeFollowsHostFeatures bool
 	// controlDigest identifies the control section, so the VM key does not
 	// serialize it again for every event.
 	controlDigest      string
