@@ -158,12 +158,12 @@ type ManagedNetworkRepairResponse struct {
 
 type ManagedNetworkRuntimeReloadStatus struct {
 	Pending            bool      `json:"pending"`
-	DueAt              time.Time `json:"due_at,omitempty"`
-	LastRequestedAt    time.Time `json:"last_requested_at,omitempty"`
+	DueAt              time.Time `json:"due_at,omitzero"`
+	LastRequestedAt    time.Time `json:"last_requested_at,omitzero"`
 	LastRequestSource  string    `json:"last_request_source,omitempty"`
 	LastRequestSummary string    `json:"last_request_summary,omitempty"`
-	LastStartedAt      time.Time `json:"last_started_at,omitempty"`
-	LastCompletedAt    time.Time `json:"last_completed_at,omitempty"`
+	LastStartedAt      time.Time `json:"last_started_at,omitzero"`
+	LastCompletedAt    time.Time `json:"last_completed_at,omitzero"`
 	LastResult         string    `json:"last_result,omitempty"`
 	LastAppliedSummary string    `json:"last_applied_summary,omitempty"`
 	LastError          string    `json:"last_error,omitempty"`
@@ -445,10 +445,10 @@ type KernelEngineRuntimeView struct {
 	PressureActive                          bool      `json:"pressure_active"`
 	PressureLevel                           string    `json:"pressure_level,omitempty"`
 	PressureReason                          string    `json:"pressure_reason,omitempty"`
-	PressureSince                           time.Time `json:"pressure_since,omitempty"`
+	PressureSince                           time.Time `json:"pressure_since,omitzero"`
 	Degraded                                bool      `json:"degraded"`
 	DegradedReason                          string    `json:"degraded_reason,omitempty"`
-	DegradedSince                           time.Time `json:"degraded_since,omitempty"`
+	DegradedSince                           time.Time `json:"degraded_since,omitzero"`
 	Loaded                                  bool      `json:"loaded"`
 	ActiveEntries                           int       `json:"active_entries"`
 	Attachments                             int       `json:"attachments"`
@@ -457,7 +457,7 @@ type KernelEngineRuntimeView struct {
 	AttachmentMode                          string    `json:"attachment_mode,omitempty"`
 	AttachmentAPI                           string    `json:"attachment_api,omitempty"`
 	AttachmentsUnhealthyCount               int       `json:"attachments_unhealthy_count,omitempty"`
-	LastAttachmentsUnhealthyAt              time.Time `json:"last_attachments_unhealthy_at,omitempty"`
+	LastAttachmentsUnhealthyAt              time.Time `json:"last_attachments_unhealthy_at,omitzero"`
 	RulesMapEntries                         int       `json:"rules_map_entries"`
 	RulesMapCapacity                        int       `json:"rules_map_capacity"`
 	RulesMapEntriesV4                       int       `json:"rules_map_entries_v4,omitempty"`
@@ -518,7 +518,7 @@ type KernelEngineRuntimeView struct {
 	DiagFragmentForwarded                   uint64    `json:"diag_fragment_forwarded,omitempty"`
 	DiagFlowCacheHit                        uint64    `json:"diag_flow_cache_hit,omitempty"`
 	DiagSnapshotError                       string    `json:"diag_snapshot_error,omitempty"`
-	LastReconcileAt                         time.Time `json:"last_reconcile_at,omitempty"`
+	LastReconcileAt                         time.Time `json:"last_reconcile_at,omitzero"`
 	LastReconcileMs                         int64     `json:"last_reconcile_ms,omitempty"`
 	LastReconcileError                      string    `json:"last_reconcile_error,omitempty"`
 	LastReconcileRequestEntries             int       `json:"last_reconcile_request_entries,omitempty"`
@@ -533,7 +533,7 @@ type KernelEngineRuntimeView struct {
 	LastReconcilePrepareMs                  int64     `json:"last_reconcile_prepare_ms,omitempty"`
 	LastReconcileAttachMs                   int64     `json:"last_reconcile_attach_ms,omitempty"`
 	LastReconcileFlowPurgeMs                int64     `json:"last_reconcile_flow_purge_ms,omitempty"`
-	LastMaintainAt                          time.Time `json:"last_maintain_at,omitempty"`
+	LastMaintainAt                          time.Time `json:"last_maintain_at,omitzero"`
 	LastMaintainMs                          int64     `json:"last_maintain_ms,omitempty"`
 	LastMaintainError                       string    `json:"last_maintain_error,omitempty"`
 	LastPruneBudget                         int       `json:"last_prune_budget,omitempty"`
@@ -576,16 +576,16 @@ type KernelRuntimeResponse struct {
 	TransientFallbackSummary                       string                       `json:"transient_fallback_summary,omitempty"`
 	RetryPending                                   bool                         `json:"retry_pending"`
 	KernelRetryCount                               int                          `json:"kernel_retry_count"`
-	LastKernelRetryAt                              time.Time                    `json:"last_kernel_retry_at,omitempty"`
+	LastKernelRetryAt                              time.Time                    `json:"last_kernel_retry_at,omitzero"`
 	LastKernelRetryReason                          string                       `json:"last_kernel_retry_reason,omitempty"`
 	KernelIncrementalRetryCount                    int                          `json:"kernel_incremental_retry_count"`
 	KernelIncrementalRetryFallbackCount            int                          `json:"kernel_incremental_retry_fallback_count"`
 	CooldownRuleOwnerCount                         int                          `json:"cooldown_rule_owner_count"`
 	CooldownRangeOwnerCount                        int                          `json:"cooldown_range_owner_count"`
 	CooldownSummary                                string                       `json:"cooldown_summary,omitempty"`
-	CooldownNextExpiryAt                           time.Time                    `json:"cooldown_next_expiry_at,omitempty"`
-	CooldownClearAt                                time.Time                    `json:"cooldown_clear_at,omitempty"`
-	LastKernelIncrementalRetryAt                   time.Time                    `json:"last_kernel_incremental_retry_at,omitempty"`
+	CooldownNextExpiryAt                           time.Time                    `json:"cooldown_next_expiry_at,omitzero"`
+	CooldownClearAt                                time.Time                    `json:"cooldown_clear_at,omitzero"`
+	LastKernelIncrementalRetryAt                   time.Time                    `json:"last_kernel_incremental_retry_at,omitzero"`
 	LastKernelIncrementalRetryResult               string                       `json:"last_kernel_incremental_retry_result,omitempty"`
 	LastKernelIncrementalRetryMatchedRuleOwners    int                          `json:"last_kernel_incremental_retry_matched_rule_owners"`
 	LastKernelIncrementalRetryMatchedRangeOwners   int                          `json:"last_kernel_incremental_retry_matched_range_owners"`
@@ -608,14 +608,14 @@ type KernelRuntimeResponse struct {
 	KernelNetlinkRecoverPending                    bool                         `json:"kernel_netlink_recover_pending"`
 	KernelNetlinkRecoverSource                     string                       `json:"kernel_netlink_recover_source,omitempty"`
 	KernelNetlinkRecoverSummary                    string                       `json:"kernel_netlink_recover_summary,omitempty"`
-	KernelNetlinkRecoverRequestedAt                time.Time                    `json:"kernel_netlink_recover_requested_at,omitempty"`
+	KernelNetlinkRecoverRequestedAt                time.Time                    `json:"kernel_netlink_recover_requested_at,omitzero"`
 	KernelNetlinkRecoverTriggerSummary             string                       `json:"kernel_netlink_recover_trigger_summary,omitempty"`
 	LastKernelAttachmentIssue                      string                       `json:"last_kernel_attachment_issue,omitempty"`
-	LastKernelAttachmentHealAt                     time.Time                    `json:"last_kernel_attachment_heal_at,omitempty"`
+	LastKernelAttachmentHealAt                     time.Time                    `json:"last_kernel_attachment_heal_at,omitzero"`
 	LastKernelAttachmentHealSummary                string                       `json:"last_kernel_attachment_heal_summary,omitempty"`
 	LastKernelAttachmentHealError                  string                       `json:"last_kernel_attachment_heal_error,omitempty"`
 	DismissedNoteKeys                              []string                     `json:"dismissed_note_keys,omitempty"`
-	LastStatsSnapshotAt                            time.Time                    `json:"last_stats_snapshot_at,omitempty"`
+	LastStatsSnapshotAt                            time.Time                    `json:"last_stats_snapshot_at,omitzero"`
 	LastStatsSnapshotMs                            int64                        `json:"last_stats_snapshot_ms,omitempty"`
 	LastStatsSnapshotError                         string                       `json:"last_stats_snapshot_error,omitempty"`
 	Engines                                        []KernelEngineRuntimeView    `json:"engines"`
