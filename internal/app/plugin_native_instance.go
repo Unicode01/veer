@@ -500,6 +500,13 @@ func (instance *pluginNativeInstance) exchange(kind uint32, handler string, payl
 				return 0, nil, pluginHostProcessError(fmt.Errorf("native plugin %s exceeded %d host calls in one handler", instance.pluginID, pluginNativeMaxCallsPerEvent))
 			}
 			status, reply := calls(string(frame.Name), frame.Payload)
+			// A result too large for one message fails the call, not the
+			// exchange: the worker waits for this reply, and without one it
+			// refused every later message as nested until it restarted.
+			if limit := pluginNativeMaxHostFrameBytes - pluginNativeFrameHeaderLen; len(reply) > limit {
+				status = pluginNativeStatusError
+				reply = []byte(fmt.Sprintf("host call %s returned %d bytes, more than one plugin message carries (%d)", frame.Name, len(reply), limit))
+			}
 			if err := instance.write(pluginNativeFrame{
 				Type: pluginNativeFrameCallReply, Instance: instance.id, Reference: frame.ID,
 				Status: status, Payload: reply,
