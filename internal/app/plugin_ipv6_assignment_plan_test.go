@@ -3,6 +3,7 @@ package app
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Unicode01/veer/internal/store"
 )
@@ -166,5 +167,53 @@ func TestCompilePluginIPv6AssignmentPlanRejectsOverlap(t *testing.T) {
 	items, warnings := compilePluginIPv6AssignmentPlansWithWarnings([]store.PluginRecord{record}, existing)
 	if len(items) != 0 || len(warnings) != 1 {
 		t.Fatalf("items=%+v warnings=%v, want one overlap warning", items, warnings)
+	}
+}
+
+func TestCompilePluginIPv6AssignmentPlanCarriesParentPrefixDeadlines(t *testing.T) {
+	t.Parallel()
+
+	plan := func(deadlines string) []store.PluginRecord {
+		return []store.PluginRecord{{
+			PluginID:   "lan_core",
+			ResourceID: pluginIPv6AssignmentPlansResourceID,
+			RecordKey:  "lan-a",
+			DataJSON: `{"parent_interface":"veerlocal0","target_interface":"br-lan","parent_prefix":"240e:390:6aad:d550::/60",
+				"assigned_prefix_length":64,"subnet_index":5,"upstream_routed":true,"enabled":true` + deadlines + `}`,
+			Enabled: true,
+		}}
+	}
+	// Plugins written in Rust emit whole numbers as floats.
+	items, warnings := compilePluginIPv6AssignmentPlansWithWarnings(plan(`,"parent_preferred_until_ms":1800000000000.0,"parent_valid_until_ms":1800003600000`), nil)
+	if len(warnings) != 0 || len(items) != 1 {
+		t.Fatalf("items = %+v warnings = %v", items, warnings)
+	}
+	if got := items[0].prefixPreferredUntil; !got.Equal(time.UnixMilli(1800000000000)) {
+		t.Fatalf("prefixPreferredUntil = %v", got)
+	}
+	if got := items[0].prefixValidUntil; !got.Equal(time.UnixMilli(1800003600000)) {
+		t.Fatalf("prefixValidUntil = %v", got)
+	}
+	runtimePlan, err := buildIPv6AssignmentRuntimePlan(items[0])
+	if err != nil {
+		t.Fatalf("buildIPv6AssignmentRuntimePlan() error = %v", err)
+	}
+	if !runtimePlan.PrefixPreferredUntil.Equal(items[0].prefixPreferredUntil) || !runtimePlan.PrefixValidUntil.Equal(items[0].prefixValidUntil) {
+		t.Fatalf("runtime plan deadlines = %v/%v", runtimePlan.PrefixPreferredUntil, runtimePlan.PrefixValidUntil)
+	}
+	before := managedNetworkRuntimeReloadFingerprintIPv6Assignments(items)
+
+	// A renewal moves the deadlines; the reload fingerprint must change with
+	// them so the advertisements follow.
+	renewed, _ := compilePluginIPv6AssignmentPlansWithWarnings(plan(`,"parent_preferred_until_ms":1800001800000,"parent_valid_until_ms":1800007200000`), nil)
+	if after := managedNetworkRuntimeReloadFingerprintIPv6Assignments(renewed); after[0].PrefixValidUntilMS == before[0].PrefixValidUntilMS || after[0].PrefixValidUntilMS != 1800007200000 {
+		t.Fatalf("fingerprint valid until = %d before, %d after the renewal", before[0].PrefixValidUntilMS, after[0].PrefixValidUntilMS)
+	}
+
+	for _, deadlines := range []string{``, `,"parent_valid_until_ms":0`, `,"parent_valid_until_ms":-5`} {
+		items, warnings := compilePluginIPv6AssignmentPlansWithWarnings(plan(deadlines), nil)
+		if len(warnings) != 0 || len(items) != 1 || !items[0].prefixValidUntil.IsZero() || !items[0].prefixPreferredUntil.IsZero() {
+			t.Fatalf("deadlines %q: items = %+v warnings = %v, want no deadline", deadlines, items, warnings)
+		}
 	}
 }

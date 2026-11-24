@@ -171,6 +171,8 @@ struct World {
     recvs_at_client_ipcp_ack: usize,
     pending_terminate: Option<u64>,
     recv_error: String,
+    /// Fails sending a PADT with this error.
+    padt_send_error: String,
     missing_link: String,
     set_gso_error: String,
     // Another access concentrator (MAC, session id) answers from now on, as
@@ -623,6 +625,9 @@ const HOST: &[(&str, HostFn)] = &[
         Ok(json!(bytes_to_hex(&md5(&input))))
     }),
     ("net.l2.send", |w, a| {
+        if !w.padt_send_error.is_empty() && js::text(&arg(a, 0)["payload"]).to_lowercase().starts_with("11a7") {
+            return Err(w.padt_send_error.clone());
+        }
         w.send(&arg(a, 0));
         Ok(Value::Null)
     }),
@@ -1250,6 +1255,51 @@ fn dhcpv6_renew_rebind_and_recovery() {
     assert_eq!(session["dhcpv6_pd"]["phase"], "reply");
     assert_eq!(session["dhcpv6_pd"]["prefix"], "2001:db8:1234::/56");
     assert_eq!(session["dhcpv6_pd"]["reacquire_attempts"], 0);
+}
+
+#[test]
+fn a_failed_tunnel_install_clears_the_tunnel_config_even_when_the_padt_fails() {
+    let mut t = T::new(Opts { echo_replies: true, ..auth("pap") });
+    t.w().missing_link = "veerlocal0".to_string();
+    t.w().padt_send_error = "network is down".to_string();
+    t.h.fake.clear_calls();
+    let err = t.fails("probe_session", json!({
+        "interface": "eth0", "username": "user", "password": "pass", "auth": "pap", "timeout_ms": 50, "control_ack_timeout_ms": 10,
+        "control_idle_timeout_ms": 1, "max_frames": 4, "negotiate_ipv4": false, "negotiate_ipv6": false, "request_pd": false,
+        "install_tunnel": true, "send_padt": false, "local_interface": "veerlocal0", "pipeline_interface": PIPELINE, "wan_core_sync": false,
+    }));
+    assert!(err.contains("link not found"), "the install error comes first: {err}");
+    assert!(err.contains("network is down"), "the failed PADT is reported: {err}");
+    let cleared = t.h.fake.calls_to("resources.delete").iter().any(|args| js::text(&args[0]) == "tunnel_configs");
+    assert!(cleared, "the tunnel config must be cleared although the PADT failed");
+}
+
+#[test]
+fn delegated_prefixes_carry_when_they_stop_being_preferred_and_valid() {
+    let mut t = T::new(Opts { echo_replies: true, ..auth("pap") });
+    let before = now();
+    t.run("traffic_probe", dhcpv6_payload(json!({})));
+    let after = now();
+    let session = t.data("sessions", "last");
+    let acquired = js::number(&session["dhcpv6_pd"]["lease_acquired_ms"]);
+    assert!(acquired >= before.floor() && acquired <= after.ceil(), "acquired {acquired} outside {before}..{after}");
+    let published = js::array(&t.data("wan_links", "default")["pd_prefixes"]);
+    assert_eq!(published.len(), 1);
+    let prefix = &published[0];
+    assert_eq!(prefix["prefix"], "2001:db8:1234::/56");
+    assert_eq!(js::number(&prefix["preferred_until_ms"]), acquired + 3_600_000.0);
+    assert_eq!(js::number(&prefix["valid_until_ms"]), acquired + 7_200_000.0);
+    let address = &js::array(&session["dhcpv6_pd"]["addresses"])[0];
+    assert_eq!(js::number(&address["valid_until_ms"]), acquired + 7_200_000.0);
+
+    // An infinite lifetime has no deadline, and a zero one ends at once.
+    let stamped = stamp_dhcpv6_lease(
+        json!({"prefixes": [{"prefix": "2001:db8:1::/56", "preferred_lifetime": 0, "valid_lifetime": 4294967295u32}, {"prefix": "2001:db8:2::/56"}]}),
+        1_000_000.0,
+    );
+    assert_eq!(js::number(&stamped["prefixes"][0]["preferred_until_ms"]), 1_000_000.0);
+    assert_eq!(js::number(&stamped["prefixes"][0]["valid_until_ms"]), 0.0);
+    assert_eq!(js::number(&stamped["prefixes"][1]["valid_until_ms"]), 0.0);
 }
 
 #[test]

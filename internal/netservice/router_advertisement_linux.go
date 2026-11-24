@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net"
 	"slices"
 	"strings"
@@ -20,11 +21,16 @@ import (
 )
 
 const (
-	ipv6RAHopLimit             = 255
-	ipv6RACurHopLimit          = 64
-	ipv6RARouterLifetime       = 1800 * time.Second
-	ipv6RAValidLifetime        = 24 * time.Hour
-	ipv6RAPreferredLifetime    = 4 * time.Hour
+	ipv6RAHopLimit       = 255
+	ipv6RACurHopLimit    = 64
+	ipv6RARouterLifetime = 1800 * time.Second
+	// The prefix lifetimes are RFC 9096's ND_VALID_LIMIT and
+	// ND_PREFERRED_LIMIT: short enough that hosts drop a prefix that
+	// stopped routing soon even if they never hear it deprecated, and
+	// refreshed by every advertisement. They are further capped by the
+	// remaining lifetimes of the delegation (RAConfig.PrefixLifetimes).
+	ipv6RAValidLifetime        = 5400 * time.Second
+	ipv6RAPreferredLifetime    = 2700 * time.Second
 	ipv6RDNSSLifetime          = ipv6RARouterLifetime
 	ipv6RAAdvertisementPeriod  = 30 * time.Second
 	ipv6RAMinSolicitedInterval = 3 * time.Second
@@ -36,8 +42,10 @@ const (
 	// longer routes. A prefix the interface stops advertising is therefore
 	// advertised with zero lifetimes (RFC 9096) for one preferred lifetime:
 	// any host that hears an RA in that time deprecates its address, and
-	// one that hears none has seen it deprecate on its own.
-	ipv6RAStalePrefixRetention = ipv6RAPreferredLifetime
+	// one that hears none has seen it deprecate on its own. Versions up to
+	// v0.4.1 advertised a 4 h preferred lifetime, so prefixes are kept
+	// that long, which covers hosts that heard one of those.
+	ipv6RAStalePrefixRetention = 4 * time.Hour
 	ipv6RAMaxStalePrefixes     = 16
 	ipv6NextHeaderICMPv6       = 58
 	icmpv6TypeRouterSolicit    = 133
@@ -95,6 +103,7 @@ func cloneIPv6AssignmentRAConfig(config ipv6AssignmentRAConfig) ipv6AssignmentRA
 	config.Prefixes = append([]string(nil), config.Prefixes...)
 	config.Routes = append([]string(nil), config.Routes...)
 	config.DNSServers = append([]string(nil), config.DNSServers...)
+	config.PrefixLifetimes = maps.Clone(config.PrefixLifetimes)
 	return config
 }
 
@@ -103,7 +112,29 @@ func ipv6AssignmentRAConfigsEqual(a, b ipv6AssignmentRAConfig) bool {
 		a.Managed == b.Managed &&
 		slices.Equal(a.Prefixes, b.Prefixes) &&
 		slices.Equal(a.Routes, b.Routes) &&
-		slices.Equal(a.DNSServers, b.DNSServers)
+		slices.Equal(a.DNSServers, b.DNSServers) &&
+		maps.EqualFunc(a.PrefixLifetimes, b.PrefixLifetimes, func(x, y RAPrefixLifetime) bool {
+			return x.PreferredUntil.Equal(y.PreferredUntil) && x.ValidUntil.Equal(y.ValidUntil)
+		})
+}
+
+// ipv6RAPrefixLifetimes returns the valid and preferred lifetimes to
+// advertise for prefix at now: the advertiser's limits, cut to what is left
+// of the delegation's own lifetimes.
+func ipv6RAPrefixLifetimes(config ipv6AssignmentRAConfig, prefix string, now time.Time) (valid, preferred time.Duration) {
+	valid, preferred = ipv6RAValidLifetime, ipv6RAPreferredLifetime
+	if limit, ok := config.PrefixLifetimes[prefix]; ok {
+		valid = capIPv6RALifetime(valid, limit.ValidUntil, now)
+		preferred = capIPv6RALifetime(preferred, limit.PreferredUntil, now)
+	}
+	return valid, min(preferred, valid)
+}
+
+func capIPv6RALifetime(lifetime time.Duration, until, now time.Time) time.Duration {
+	if until.IsZero() {
+		return lifetime
+	}
+	return max(0, min(lifetime, until.Sub(now).Truncate(time.Second)))
 }
 
 func (adv *ipv6RouterAdvertiser) update(config ipv6AssignmentRAConfig) bool {
@@ -574,6 +605,9 @@ type ipv6RouterAdvertisementState struct {
 	Config  ipv6AssignmentRAConfig
 	// Deprecated prefixes go out with zero lifetimes.
 	Deprecated []string
+	// Now is when the advertisement is built, for the prefix lifetimes
+	// that count down; zero means the current time.
+	Now time.Time
 }
 
 func resolveIPv6RouterAdvertisementState(config ipv6AssignmentRAConfig) (ipv6RouterAdvertisementState, error) {
@@ -588,6 +622,13 @@ func resolveIPv6RouterAdvertisementState(config ipv6AssignmentRAConfig) (ipv6Rou
 	if err != nil {
 		return ipv6RouterAdvertisementState{}, err
 	}
+	return newIPv6RouterAdvertisementState(*iface, identity, config, time.Now()), nil
+}
+
+// newIPv6RouterAdvertisementState is what an advertisement of config goes
+// out with on iface: all of config (prefixes, routes, DNS servers and prefix
+// lifetimes) plus the interface's addresses.
+func newIPv6RouterAdvertisementState(iface net.Interface, identity ipv6ControlIdentity, config ipv6AssignmentRAConfig, now time.Time) ipv6RouterAdvertisementState {
 	return ipv6RouterAdvertisementState{
 		IfIndex: iface.Index,
 		IfName:  iface.Name,
@@ -595,13 +636,9 @@ func resolveIPv6RouterAdvertisementState(config ipv6AssignmentRAConfig) (ipv6Rou
 		MAC:     append(net.HardwareAddr(nil), identity.SourceMAC...),
 		SrcIP:   append(net.IP(nil), identity.SourceIP...),
 		DstIP:   append(net.IP(nil), ipv6AllNodesLinkLocal.To16()...),
-		Config: ipv6AssignmentRAConfig{
-			TargetInterface: config.TargetInterface,
-			Managed:         config.Managed,
-			Prefixes:        append([]string(nil), config.Prefixes...),
-			Routes:          append([]string(nil), config.Routes...),
-		},
-	}, nil
+		Config:  cloneIPv6AssignmentRAConfig(config),
+		Now:     now,
+	}
 }
 
 func selectIPv6LinkLocalAddress(iface net.Interface) (net.IP, error) {
@@ -703,6 +740,10 @@ func buildIPv6RouterAdvertisementPayload(state ipv6RouterAdvertisementState) ([]
 		body[1] |= 0x80
 	}
 	binary.BigEndian.PutUint16(body[2:4], uint16(ipv6RARouterLifetime/time.Second))
+	now := state.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
 	for _, prefixText := range state.Config.Prefixes {
 		_, prefix, err := net.ParseCIDR(prefixText)
 		if err != nil || prefix == nil {
@@ -712,7 +753,8 @@ func buildIPv6RouterAdvertisementPayload(state ipv6RouterAdvertisementState) ([]
 		if ones != 64 || bits != 128 {
 			return nil, fmt.Errorf("router advertisements require /64 prefixes, got %q", prefixText)
 		}
-		body = append(body, buildIPv6PrefixInfoOption(prefix, ipv6RAValidLifetime, ipv6RAPreferredLifetime)...)
+		valid, preferred := ipv6RAPrefixLifetimes(state.Config, prefixText, now)
+		body = append(body, buildIPv6PrefixInfoOption(prefix, valid, preferred)...)
 	}
 	for _, prefixText := range state.Deprecated {
 		// A valid lifetime of 0 only shortens a host's longer remaining
@@ -735,7 +777,10 @@ func buildIPv6RouterAdvertisementPayload(state ipv6RouterAdvertisementState) ([]
 		body = append(body, buildIPv6RouteInfoOption(route, ipv6RARouterLifetime)...)
 	}
 	if len(state.Config.DNSServers) > 0 {
-		option, err := buildIPv6RDNSSOption(state.Config.DNSServers, ipv6RDNSSLifetime)
+		// Several assignments on one interface may bring more servers than
+		// one option carries; the first ones go out.
+		servers := state.Config.DNSServers[:min(len(state.Config.DNSServers), ipv6RAMaxRDNSSServers)]
+		option, err := buildIPv6RDNSSOption(servers, ipv6RDNSSLifetime)
 		if err != nil {
 			return nil, err
 		}

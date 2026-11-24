@@ -63,6 +63,9 @@ type managedNetworkRuntimeReloadFingerprintIPv6Assign struct {
 	GatewayCIDR     string   `json:"gateway_cidr,omitempty"`
 	RejectPrefix    string   `json:"reject_prefix,omitempty"`
 	DNSServers      []string `json:"dns_servers,omitempty"`
+	// A renewed delegation moves these, and the advertisements must follow.
+	PrefixPreferredUntilMS int64 `json:"prefix_preferred_until_ms,omitempty"`
+	PrefixValidUntilMS     int64 `json:"prefix_valid_until_ms,omitempty"`
 }
 
 type managedNetworkRuntimeReloadFingerprintEgressNAT struct {
@@ -180,6 +183,9 @@ func managedNetworkRuntimeReloadFingerprintIPv6Assignments(items []IPv6Assignmen
 			GatewayCIDR:     strings.TrimSpace(item.gatewayCIDR),
 			RejectPrefix:    strings.TrimSpace(item.rejectPrefix),
 			DNSServers:      append([]string(nil), item.dnsServers...),
+
+			PrefixPreferredUntilMS: unixMilliOrZero(item.prefixPreferredUntil),
+			PrefixValidUntilMS:     unixMilliOrZero(item.prefixValidUntil),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

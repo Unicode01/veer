@@ -1777,14 +1777,22 @@ func pluginControlVMKey(plugin LoadedPlugin, mode string, workerName string) (st
 	if digest == "" {
 		digest = pluginControlDigest(plugin.Control)
 	}
-	return strings.Join([]string{
+	parts := []string{
 		plugin.ID,
 		mode,
 		workerName,
 		sum,
 		plugin.sourceFingerprint,
 		digest,
-	}, "\x00"), nil
+	}
+	// An instance registered before the kernel module was loaded runs the
+	// eBPF objects for a host without it, and the plugin keeps the features
+	// it read then. A different set makes a new instance, registered for the
+	// features the host has now, which takes over like an upgrade.
+	if plugin.nativeFollowsHostFeatures {
+		parts = append(parts, pluginChangingHostFeaturesKey())
+	}
+	return strings.Join(parts, "\x00"), nil
 }
 
 func (rt *pluginControlManager) applyRuntimeResourcesForReconcile(plugin LoadedPlugin) error {

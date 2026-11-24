@@ -83,6 +83,8 @@ fn array_size(map: &str) -> u32 {
 pub struct Firewall {
     /// Whether the host runs the tc_egress program connection tracking
     /// needs; learned on the first message (host calls wait for handle()).
+    /// It depends only on what the kernel supports, so it holds for the
+    /// life of the instance, like the objects the host registered for it.
     tc_egress: Option<bool>,
     /// The latest sampled drops, oldest first.
     drop_log: VecDeque<Value>,

@@ -669,6 +669,15 @@ fn apply_session(host: &Host, plan: &Plan) -> Result<()> {
             "segmentation_ready": previous_segmentation_ready,
             "noarp_ready": previous_segmentation_ready,
             "veer_core": veer_core_handoff(profile, previous_segmentation_ready),
+            // Nothing is removed while the session is down. Keep the record
+            // of what the last apply installed, so the next apply or a
+            // teardown can remove what is no longer wanted.
+            "addresses": g(&previous, "addresses"),
+            "routes": g(&previous, "routes"),
+            "rules": g(&previous, "rules"),
+            "neighbors": g(&previous, "neighbors"),
+            "ipv6_route_table": g(&previous, "ipv6_route_table"),
+            "ipv6_rule_priority": g(&previous, "ipv6_rule_priority"),
         });
         return set_record_if_changed(host, "status", &plan.key, &status, false);
     }

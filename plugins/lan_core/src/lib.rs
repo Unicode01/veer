@@ -319,8 +319,8 @@ fn mark_apply_error(host: &Host, key: &Value, error: &Error) -> Result<()> {
 
 /// The status fields a teardown reads to tell what this plugin owns: the
 /// bridge it created, the ports it attached and the addresses it added.
-const OWNERSHIP_FIELDS: [&str; 8] =
-    ["bridge", "bridge_ifindex", "bridge_created", "bridge_existing", "bridge_addresses", "preserve_bridge", "configured_ports", "managed_ports"];
+const OWNERSHIP_FIELDS: [&str; 9] =
+    ["bridge", "bridge_ifindex", "bridge_created", "bridge_existing", "bridge_addresses", "preserve_bridge", "configured_ports", "managed_ports", "retired_bridges"];
 
 /// Carries the ownership of a status that is being replaced (an error, a
 /// disabled profile) into the new one. Without it a later teardown found no
@@ -411,6 +411,8 @@ fn apply_bridge_network(host: &Host, plan: &Plan, previous: &Value, bridge: &Val
     }
     let mut cleanup_errors = cleanup_managed_bridge_state(host, &previous, profile);
     cleanup_managed_ports(host, &previous, profile, &mut cleanup_errors);
+    let retired = delete_retired_bridges(host, &plan.key, retired_bridges(previous, profile), &mut cleanup_errors);
+    owned["retired_bridges"] = json!(retired);
     replace_addrs(host, &bridge_name, &js::array(&profile["addresses"]))?;
 
     let mut members = Vec::new();
@@ -488,6 +490,7 @@ fn apply_bridge_network(host: &Host, plan: &Plan, previous: &Value, bridge: &Val
         "managed_ports": managed_ports,
         "missing_ports": missing_ports,
         "failed_ports": failed_ports,
+        "retired_bridges": owned["retired_bridges"],
         "wan_ref": profile["wan_ref"],
         "wan_plugin": profile["wan_plugin"],
         "wan_egress": wan_egress,
@@ -509,10 +512,69 @@ fn bridge_created_by_plugin(previous: &Value, profile: &Value, bridge_existed: b
     if !bridge_existed {
         return true;
     }
+    let bridge = safe_iface_name(&profile["bridge"]);
+    // A profile renamed back to a bridge it created and has not deleted yet
+    // still owns it.
+    if previous_retired_bridges(previous).contains(&bridge) {
+        return true;
+    }
     if !truthy(g(previous, "bridge_created")) {
         return false;
     }
-    safe_iface_name(g(previous, "bridge")) == safe_iface_name(&profile["bridge"])
+    safe_iface_name(g(previous, "bridge")) == bridge
+}
+
+fn previous_retired_bridges(previous: &Value) -> Vec<String> {
+    if js::text(g(previous, "phase")) == "deleted" {
+        return Vec::new();
+    }
+    iface_list(g(previous, "retired_bridges")).unwrap_or_default()
+}
+
+/// The bridges this profile created and no longer uses, still to delete:
+/// the previous bridge when the profile now names another one, and any whose
+/// delete failed earlier.
+fn retired_bridges(previous: &Value, profile: &Value) -> Vec<String> {
+    let mut out = previous_retired_bridges(previous);
+    let old = safe_iface_name(g(previous, "bridge"));
+    if !old.is_empty()
+        && js::text(g(previous, "phase")) != "deleted"
+        && js::is_true(g(previous, "bridge_created"))
+        && !js::is_true(g(previous, "preserve_bridge"))
+        && !out.contains(&old)
+    {
+        out.push(old);
+    }
+    let next = safe_iface_name(&profile["bridge"]);
+    out.retain(|name| *name != next);
+    out
+}
+
+/// Deletes the retired bridges and returns those that are still to delete
+/// because the delete failed. A bridge that another profile names now
+/// belongs to that profile and is left alone.
+fn delete_retired_bridges(host: &Host, key: &str, bridges: Vec<String>, errors: &mut Vec<String>) -> Vec<String> {
+    if bridges.is_empty() {
+        return bridges;
+    }
+    let in_use: BTreeSet<String> = host
+        .resources_list("profiles")
+        .unwrap_or_default()
+        .iter()
+        .filter(|record| !record.is_null() && record_token(record) != key)
+        .map(|record| safe_iface_name(js::first(&[g(g(record, "data"), "bridge"), g(g(record, "data"), "bridge_interface"), &json!("br-lan")])))
+        .collect();
+    let mut left = Vec::new();
+    for bridge in bridges {
+        if in_use.contains(&bridge) || !link_exists(host, &bridge) {
+            continue;
+        }
+        if let Err(err) = host.call("net.link.delete", json!([bridge])) {
+            errors.push(format!("retired bridge {bridge}: {err}"));
+            left.push(bridge);
+        }
+    }
+    left
 }
 
 fn cleanup_managed_bridge_state(host: &Host, previous: &Value, profile: &Value) -> Vec<String> {
@@ -600,7 +662,8 @@ fn teardown_network(host: &Host, plan: &Plan) -> Result<()> {
             bridge_error = err.to_string();
         }
     }
-    let phase = if !failed_ports.is_empty() || !bridge_error.is_empty() { "delete_partial" } else { "deleted" };
+    let retired = delete_retired_bridges(host, &plan.key, retired_bridges(&previous, profile), &mut cleanup_errors);
+    let phase = if !failed_ports.is_empty() || !bridge_error.is_empty() || !retired.is_empty() { "delete_partial" } else { "deleted" };
     let bridge_ifindex = json!(js::int_value(g(&previous, "bridge_ifindex"), 0, 2147483647, 0));
     let bridge_state = read_bridge_members(host, &bridge_name, &bridge_ifindex, &iface_set(&profile["ports"]), &BTreeSet::new(), &[]);
     let mut status = json!({
@@ -618,6 +681,7 @@ fn teardown_network(host: &Host, plan: &Plan) -> Result<()> {
         "member_gro": disabled_member_gro_state(&profile["mtu"], &gro_restore),
         "managed_ports": managed_ports,
         "failed_ports": failed_ports,
+        "retired_bridges": retired,
         "wan_ref": profile["wan_ref"],
     });
     if !bridge_error.is_empty() {
@@ -1086,6 +1150,16 @@ fn build_ipv6_assignment_plan(host: &Host, key: &str, profile: &Value, wan_egres
         plan["note"] = json!(note);
         return plan;
     }
+    // The LAN's router advertisements must not outlive the delegation.
+    let parent = js::text(&plan["parent_prefix"]);
+    if let Some(delegation) = js::array(g(wan_egress, "pd_prefixes")).iter().find(|item| js::text(g(item, "prefix")) == parent) {
+        for field in ["preferred_until_ms", "valid_until_ms"] {
+            let ms = js::number(g(delegation, field));
+            if ms.is_finite() && ms > 0.0 {
+                plan[format!("parent_{field}")] = json!(ms.floor() as i64);
+            }
+        }
+    }
     match host.call("net.prefix.subnet", json!([{"prefix": plan["parent_prefix"], "new_length": 64, "index": plan["subnet_index"]}])) {
         Ok(assigned) => {
             plan["assigned_prefix"] = assigned;
@@ -1216,6 +1290,7 @@ fn iface_name(value: &str, label: &str) -> Result<String> {
 }
 
 /// Interface names from an array or a comma list; every entry must be valid.
+/// Blank entries, such as the one after a trailing comma, are skipped.
 fn iface_list(value: &Value) -> Result<Vec<String>> {
     let raw: Vec<Value> = match value {
         Value::Array(items) => items.clone(),
@@ -1223,7 +1298,11 @@ fn iface_list(value: &Value) -> Result<Vec<String>> {
     };
     let mut out: Vec<String> = Vec::new();
     for item in raw {
-        let name = iface_name(&js::text(&item), "port")?;
+        let text = js::text(&item);
+        if text.trim().is_empty() {
+            continue;
+        }
+        let name = iface_name(&text, "port")?;
         if !out.contains(&name) {
             out.push(name);
         }

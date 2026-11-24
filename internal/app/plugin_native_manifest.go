@@ -381,7 +381,56 @@ func resolvePluginNativeControl(plugin *LoadedPlugin) error {
 	plugin.controlMainPath = manifestPath
 	sum := sha256.Sum256([]byte(strings.Join(digests, ";")))
 	plugin.Control.ResolvedSHA256 = fmt.Sprintf("%x", sum)
+	plugin.nativeFollowsHostFeatures = pluginNativeRegistrationFollowsChangingFeatures(plugin.Control.Register)
 	return nil
+}
+
+// pluginChangingHostFeatures can become available while the daemon runs:
+// the optional kernel module may be loaded after it started.
+var pluginChangingHostFeatures = map[string]struct{}{
+	"dataplane.kfuncs.handoff.v1":         {},
+	"dataplane.kfuncs.handoff_ingress.v1": {},
+	"dataplane.kfuncs.wan.v1":             {},
+}
+
+// pluginNativeRegistrationFollowsChangingFeatures reports whether an entry
+// of register is conditioned on a feature in pluginChangingHostFeatures. Such
+// an instance chose its eBPF objects, and a plugin its mode, for the features
+// it was registered with.
+func pluginNativeRegistrationFollowsChangingFeatures(register *PluginNativeRegistration) bool {
+	if register == nil {
+		return false
+	}
+	sections := [][]json.RawMessage{
+		register.VirtualInterfaces, register.PipelineNodes, register.Handoffs, register.Objects, register.RingSubscriptions,
+		register.PipelineAttach, register.Hooks, register.Resources, register.Actions, register.Services, register.Subscriptions,
+	}
+	for _, entries := range sections {
+		for _, raw := range entries {
+			_, condition, err := decodePluginNativeRegisterEntry(raw)
+			if err != nil || condition == nil {
+				continue
+			}
+			_, feature := pluginChangingHostFeatures[condition.Feature]
+			_, notFeature := pluginChangingHostFeatures[condition.NotFeature]
+			if feature || notFeature {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// pluginChangingHostFeaturesKey identifies which of pluginChangingHostFeatures
+// the host has now.
+func pluginChangingHostFeaturesKey() string {
+	state := func(status PluginHostFeatureStatus) string {
+		if status.Available {
+			return "1"
+		}
+		return "0"
+	}
+	return "kfuncs=" + state(optionalKernelModuleFeatureStatus()) + state(optionalKernelModuleIngressFeatureStatus()) + state(optionalKernelModuleWANFeatureStatus())
 }
 
 func fillPluginNativeRegisterDigest(plugin LoadedPlugin, method string, entry map[string]any) error {

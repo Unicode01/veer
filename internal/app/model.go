@@ -227,6 +227,11 @@ type IPv6Assignment struct {
 	gatewayCIDR          string
 	rejectPrefix         string
 	dnsServers           []string
+	// prefixPreferredUntil and prefixValidUntil are when the delegated
+	// parent prefix of a plugin plan stops being preferred and valid; zero
+	// when unknown or unlimited.
+	prefixPreferredUntil time.Time
+	prefixValidUntil     time.Time
 }
 
 type EgressNAT struct {

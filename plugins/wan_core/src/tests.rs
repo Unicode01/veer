@@ -531,6 +531,32 @@ fn direct_boundaries_check_the_single_dummy() {
 }
 
 #[test]
+fn a_skipped_session_keeps_what_it_installed_for_the_next_apply_to_clean_up() {
+    let mut f = Fixture::new(session());
+    let applied = f.status();
+    assert_eq!(applied["phase"], "applied");
+    let has = |f: &Fixture, cidr: &str| f.link(LOCAL, |link| link.addresses.iter().any(|a| a.starts_with(cidr))).unwrap_or(false);
+    assert!(has(&f, "192.0.2.2"), "{applied}");
+
+    let mut down = session();
+    down["usable"] = json!(false);
+    down["state"] = json!("down");
+    f.h.action("apply_session", down).unwrap();
+    let skipped = f.status();
+    assert_eq!(skipped["phase"], "skipped");
+    for field in ["addresses", "routes", "rules", "neighbors"] {
+        assert_eq!(skipped[field], applied[field], "{field} of the skipped status");
+    }
+
+    let mut renumbered = session();
+    renumbered["ipv4"] = json!("192.0.2.3");
+    f.h.action("apply_session", renumbered).unwrap();
+    assert_eq!(f.status()["phase"], "applied");
+    assert!(has(&f, "192.0.2.3"));
+    assert!(!has(&f, "192.0.2.2"), "the address of the session before the skip is left behind");
+}
+
+#[test]
 fn each_session_backs_off_on_its_own() {
     let mut f = Fixture::new(session());
     let mut second = session();
