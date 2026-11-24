@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeIPv6RuntimeOps struct {
@@ -510,5 +511,35 @@ func TestIPv6AssignmentRuntimeReportsAndRevivesReturnedDormantTargets(t *testing
 	}
 	if got := rt.DormantTargets(); len(got) != 0 {
 		t.Fatalf("DormantTargets() = %v after the target returned, want none", got)
+	}
+}
+
+func TestIPv6AssignmentRuntimeCarriesDelegationLifetimesToTheRA(t *testing.T) {
+	t.Parallel()
+
+	preferred := time.Unix(1_800_000_000, 0)
+	valid := preferred.Add(time.Hour)
+	ops := &fakeIPv6RuntimeOps{}
+	rt := NewIPv6AssignmentRuntime(ops)
+	plans := []IPv6AssignmentPlan{
+		{ID: 1, ParentInterface: "wan0", TargetInterface: "lan0", ParentPrefix: "2001:db8::/56", AssignedPrefix: "2001:db8:0:1::/64",
+			DNSServers: []string{"2001:db8::53"}, NeedsForwarding: true, NeedsRA: true,
+			PrefixPreferredUntil: preferred, PrefixValidUntil: valid},
+		{ID: 2, ParentInterface: "wan0", TargetInterface: "lan0", ParentPrefix: "2001:db8:1::/48", AssignedPrefix: "2001:db8:1:1::/64",
+			NeedsForwarding: true, NeedsRA: true},
+	}
+	if err := rt.Reconcile(plans, nil); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if len(ops.ensureRAs) != 1 {
+		t.Fatalf("ensureRAs = %v, want one config for lan0", ops.ensureRAs)
+	}
+	ra := ops.ensureRAs[0]
+	if !slices.Equal(ra.DNSServers, []string{"2001:db8::53"}) {
+		t.Fatalf("RA DNS servers = %v", ra.DNSServers)
+	}
+	want := map[string]RAPrefixLifetime{"2001:db8:0:1::/64": {PreferredUntil: preferred, ValidUntil: valid}}
+	if len(ra.PrefixLifetimes) != 1 || !ra.PrefixLifetimes["2001:db8:0:1::/64"].ValidUntil.Equal(valid) || !ra.PrefixLifetimes["2001:db8:0:1::/64"].PreferredUntil.Equal(preferred) {
+		t.Fatalf("RA prefix lifetimes = %v, want %v (none for the prefix without deadlines)", ra.PrefixLifetimes, want)
 	}
 }

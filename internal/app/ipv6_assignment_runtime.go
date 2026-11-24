@@ -5,6 +5,7 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Unicode01/veer/internal/netservice"
 )
@@ -41,6 +42,10 @@ type ipv6AssignmentRuntimePlan struct {
 	GatewayCIDR       string
 	RejectPrefix      string
 	DNSServers        []string
+	// PrefixPreferredUntil and PrefixValidUntil bound the advertised
+	// lifetimes of AssignedPrefix; zero when unlimited.
+	PrefixPreferredUntil time.Time
+	PrefixValidUntil     time.Time
 }
 
 type ipv6AssignmentClosePreserver interface {
@@ -193,6 +198,9 @@ func buildIPv6AssignmentRuntimePlan(item IPv6Assignment) (ipv6AssignmentRuntimeP
 		GatewayCIDR:       strings.TrimSpace(item.gatewayCIDR),
 		RejectPrefix:      strings.TrimSpace(item.rejectPrefix),
 		DNSServers:        append([]string(nil), item.dnsServers...),
+
+		PrefixPreferredUntil: item.prefixPreferredUntil,
+		PrefixValidUntil:     item.prefixValidUntil,
 	}
 	if plan.NeedsProxyNDP {
 		plan.ProxyAddress = canonicalIPLiteral(assignedNet.IP)
@@ -256,6 +264,10 @@ func (rt *managedIPv6AssignmentRuntime) Reconcile(items []IPv6Assignment) error 
 			GatewayCIDR:     plan.GatewayCIDR,
 			RejectPrefix:    plan.RejectPrefix,
 			DNSServers:      append([]string(nil), plan.DNSServers...),
+
+			PrefixPreferredUntil: plan.PrefixPreferredUntil,
+			PrefixValidUntil:     plan.PrefixValidUntil,
+
 			NeedsForwarding: plan.NeedsForwarding,
 			NeedsProxyNDP:   plan.NeedsProxyNDP,
 			NeedsRA:         plan.NeedsRADvertise,

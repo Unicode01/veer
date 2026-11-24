@@ -475,3 +475,111 @@ func TestBuildIPv6RouterAdvertisementPayloadDeprecatesStalePrefixes(t *testing.T
 		t.Fatalf("deprecated prefix lifetimes = %v (present %t), want zero", got, ok)
 	}
 }
+
+// The state an advertisement goes out with used to keep only the prefixes and
+// routes of its config, so the DNS servers never reached the RDNSS option.
+func TestNewIPv6RouterAdvertisementStateKeepsTheWholeConfig(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_800_000_000, 0)
+	config := ipv6AssignmentRAConfig{
+		TargetInterface: "br-lan",
+		Prefixes:        []string{"2001:db8:100::/64"},
+		Routes:          []string{"2001:db8::/48"},
+		DNSServers:      []string{"2001:4860:4860::8888"},
+		PrefixLifetimes: map[string]RAPrefixLifetime{
+			"2001:db8:100::/64": {PreferredUntil: now.Add(10 * time.Minute), ValidUntil: now.Add(20 * time.Minute)},
+		},
+	}
+	state := newIPv6RouterAdvertisementState(
+		net.Interface{Index: 7, Name: "br-lan", MTU: 1500},
+		ipv6ControlIdentity{SourceMAC: net.HardwareAddr{0x02, 0, 0, 0, 0, 1}, SourceIP: net.ParseIP("fe80::1")},
+		config, now)
+	if !ipv6AssignmentRAConfigsEqual(state.Config, config) {
+		t.Fatalf("state config = %+v, want %+v", state.Config, config)
+	}
+	config.DNSServers[0] = "2001:db8::bad"
+	config.PrefixLifetimes["2001:db8:100::/64"] = RAPrefixLifetime{}
+	if state.Config.DNSServers[0] != "2001:4860:4860::8888" || state.Config.PrefixLifetimes["2001:db8:100::/64"].ValidUntil.IsZero() {
+		t.Fatal("state shares the caller's DNS servers or prefix lifetimes")
+	}
+
+	payload, err := buildIPv6RouterAdvertisementPayload(state)
+	if err != nil {
+		t.Fatalf("buildIPv6RouterAdvertisementPayload() error = %v", err)
+	}
+	options := parseIPv6RouterAdvertisementOptions(t, parseIPv6RouterAdvertisementBody(t, payload)[12:])
+	if rdnss := findIPv6RouterAdvertisementOption(options, 25); len(rdnss) != 1 || !net.IP(rdnss[0][8:24]).Equal(net.ParseIP("2001:4860:4860::8888")) {
+		t.Fatalf("RDNSS options = %v, want the configured server", rdnss)
+	}
+	prefixInfo := findIPv6RouterAdvertisementOption(options, 3)
+	if len(prefixInfo) != 1 {
+		t.Fatalf("prefix info options = %d, want 1", len(prefixInfo))
+	}
+	if valid, preferred := binary.BigEndian.Uint32(prefixInfo[0][4:8]), binary.BigEndian.Uint32(prefixInfo[0][8:12]); valid != 1200 || preferred != 600 {
+		t.Fatalf("prefix lifetimes = %d/%d, want what is left of the delegation (1200/600)", valid, preferred)
+	}
+}
+
+func TestIPv6RAPrefixLifetimesKeepWithinTheDelegation(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_800_000_000, 0)
+	limit := func(preferred, valid time.Duration) map[string]RAPrefixLifetime {
+		entry := RAPrefixLifetime{}
+		if preferred != 0 {
+			entry.PreferredUntil = now.Add(preferred)
+		}
+		if valid != 0 {
+			entry.ValidUntil = now.Add(valid)
+		}
+		return map[string]RAPrefixLifetime{"2001:db8:1::/64": entry}
+	}
+	for _, tc := range []struct {
+		name             string
+		lifetimes        map[string]RAPrefixLifetime
+		valid, preferred time.Duration
+	}{
+		{"no delegation lifetimes", nil, ipv6RAValidLifetime, ipv6RAPreferredLifetime},
+		{"long delegation", limit(24*time.Hour, 48*time.Hour), ipv6RAValidLifetime, ipv6RAPreferredLifetime},
+		{"short delegation", limit(30*time.Minute, time.Hour), time.Hour, 30 * time.Minute},
+		{"only valid known", limit(0, 20*time.Minute), 20 * time.Minute, 20 * time.Minute},
+		{"fractions round down", limit(90*time.Second+900*time.Millisecond, 0), ipv6RAValidLifetime, 90 * time.Second},
+		{"no longer preferred", limit(-time.Minute, 10*time.Minute), 10 * time.Minute, 0},
+		{"expired", limit(-time.Hour, -time.Minute), 0, 0},
+	} {
+		config := ipv6AssignmentRAConfig{Prefixes: []string{"2001:db8:1::/64"}, PrefixLifetimes: tc.lifetimes}
+		valid, preferred := ipv6RAPrefixLifetimes(config, "2001:db8:1::/64", now)
+		if valid != tc.valid || preferred != tc.preferred {
+			t.Errorf("%s: lifetimes = %v/%v, want %v/%v", tc.name, valid, preferred, tc.valid, tc.preferred)
+		}
+	}
+	if ipv6RAValidLifetime != 5400*time.Second || ipv6RAPreferredLifetime != 2700*time.Second {
+		t.Fatalf("advertiser limits = %v/%v, want RFC 9096's ND_VALID_LIMIT/ND_PREFERRED_LIMIT", ipv6RAValidLifetime, ipv6RAPreferredLifetime)
+	}
+}
+
+func TestIPv6RouterAdvertiserUpdateNoticesARenewedDelegation(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_800_000_000, 0)
+	config := ipv6AssignmentRAConfig{
+		TargetInterface: "br-lan",
+		Prefixes:        []string{"2001:db8:1::/64"},
+		PrefixLifetimes: map[string]RAPrefixLifetime{"2001:db8:1::/64": {ValidUntil: now.Add(time.Hour)}},
+	}
+	advertiser := newIPv6RouterAdvertiser(config)
+	same := advertiser.snapshot()
+	same.PrefixLifetimes["2001:db8:1::/64"] = RAPrefixLifetime{ValidUntil: now.Add(time.Hour).In(time.UTC)}
+	if advertiser.update(same) {
+		t.Fatal("the same deadline in another location reported a change")
+	}
+	renewed := advertiser.snapshot()
+	renewed.PrefixLifetimes["2001:db8:1::/64"] = RAPrefixLifetime{ValidUntil: now.Add(2 * time.Hour)}
+	if !advertiser.update(renewed) {
+		t.Fatal("a renewed delegation was ignored")
+	}
+	if got := advertiser.snapshot().PrefixLifetimes["2001:db8:1::/64"].ValidUntil; !got.Equal(now.Add(2 * time.Hour)) {
+		t.Fatalf("valid until = %v after the renewal", got)
+	}
+}

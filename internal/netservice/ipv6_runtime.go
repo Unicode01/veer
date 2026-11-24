@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 type IPv6AssignmentRuntimeStats struct {
@@ -27,10 +28,16 @@ type IPv6AssignmentPlan struct {
 	GatewayCIDR     string
 	RejectPrefix    string
 	DNSServers      []string
-	NeedsForwarding bool
-	NeedsProxyNDP   bool
-	NeedsRA         bool
-	IsSingleAddress bool
+	// PrefixPreferredUntil and PrefixValidUntil are when the delegation
+	// AssignedPrefix comes from stops being preferred and valid; zero when
+	// unknown or unlimited. Router advertisements of the prefix keep within
+	// them.
+	PrefixPreferredUntil time.Time
+	PrefixValidUntil     time.Time
+	NeedsForwarding      bool
+	NeedsProxyNDP        bool
+	NeedsRA              bool
+	IsSingleAddress      bool
 }
 
 type IPv6AssignmentPlanIssue struct {
@@ -264,6 +271,15 @@ func (rt *IPv6AssignmentRuntime) Reconcile(plans []IPv6AssignmentPlan, planIssue
 			cfg := desiredAdvertisements[plan.TargetInterface]
 			cfg.TargetInterface = plan.TargetInterface
 			cfg.Prefixes = append(cfg.Prefixes, plan.AssignedPrefix)
+			if !plan.PrefixPreferredUntil.IsZero() || !plan.PrefixValidUntil.IsZero() {
+				if cfg.PrefixLifetimes == nil {
+					cfg.PrefixLifetimes = make(map[string]RAPrefixLifetime)
+				}
+				cfg.PrefixLifetimes[strings.TrimSpace(plan.AssignedPrefix)] = RAPrefixLifetime{
+					PreferredUntil: plan.PrefixPreferredUntil,
+					ValidUntil:     plan.PrefixValidUntil,
+				}
+			}
 			desiredAdvertisements[plan.TargetInterface] = cfg
 		}
 		if len(plan.DNSServers) > 0 {

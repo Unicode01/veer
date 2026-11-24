@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"math"
 	"net"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Unicode01/veer/internal/store"
 )
@@ -26,6 +28,28 @@ type pluginIPv6AssignmentPlan struct {
 	DNSServers        []string `json:"dns_servers"`
 	Remark            string   `json:"remark"`
 	Enabled           bool     `json:"enabled"`
+	// ParentPreferredUntilMS and ParentValidUntilMS are when parent_prefix
+	// stops being preferred and valid, in Unix milliseconds; 0 when unknown
+	// or unlimited. Router advertisements of the assigned prefix keep
+	// within them.
+	ParentPreferredUntilMS float64 `json:"parent_preferred_until_ms"`
+	ParentValidUntilMS     float64 `json:"parent_valid_until_ms"`
+}
+
+// pluginIPv6PlanDeadline turns a plan's Unix millisecond deadline into a
+// time; anything not a positive finite number is no deadline.
+func pluginIPv6PlanDeadline(ms float64) time.Time {
+	if !(ms > 0) || math.IsInf(ms, 0) || ms > 1<<53 {
+		return time.Time{}
+	}
+	return time.UnixMilli(int64(ms))
+}
+
+func unixMilliOrZero(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixMilli()
 }
 
 func loadActivePluginIPv6AssignmentPlanRecordsWithCatalog(db sqlRuleStore, cfg *Config, catalog *PluginCatalog) ([]store.PluginRecord, error) {
@@ -151,6 +175,9 @@ func pluginIPv6AssignmentPlanRecordToItem(record store.PluginRecord, existing []
 		Enabled:         true,
 		upstreamRouted:  plan.UpstreamRouted,
 		dnsServers:      dnsServers,
+
+		prefixPreferredUntil: pluginIPv6PlanDeadline(plan.ParentPreferredUntilMS),
+		prefixValidUntil:     pluginIPv6PlanDeadline(plan.ParentValidUntilMS),
 	}
 	if item.Remark == "" {
 		item.Remark = fmt.Sprintf("plugin %s/%s", pluginID, key)
