@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Unicode01/veer/internal/nlretry"
@@ -674,6 +675,8 @@ type linuxKernelRuleRuntime struct {
 	observability                kernelRuntimeObservabilityState
 	maintenanceState             kernelAdaptiveMaintenanceState
 	orphanNATPruneLog            kernelCountLogState
+	reconciling                  kernelReconcileGate
+	lastPluginSnapshot           atomic.Pointer[pluginRuntimeSnapshot]
 	statsCorrection              map[uint32]kernelRuleStats
 	flowPurgeRetry               kernelFlowPurgeRetryState
 	deferredFlows                kernelDeferredFlowRules[preparedKernelRule]
@@ -893,7 +896,12 @@ func (rt *linuxKernelRuleRuntime) logVanishedAttachLinksLocked(sets kernelAttach
 	rt.vanishedLinkLog.Logf("kernel dataplane reconcile: skipping tc hooks on interface(s) that no longer exist, ifindex %s; their entries stay until the interface inventory drops them", summary)
 }
 
+func (rt *linuxKernelRuleRuntime) reconcileInProgress() bool {
+	return rt.reconciling.active()
+}
+
 func (rt *linuxKernelRuleRuntime) reconcileWithPluginCatalog(rules []Rule, pluginCatalogOverride *PluginCatalog) (results map[int64]kernelRuleApplyResult, reconcileErr error) {
+	defer rt.reconciling.begin()()
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	if rt.coll == nil && kernelHotRestartStateExists(kernelEngineTC) {

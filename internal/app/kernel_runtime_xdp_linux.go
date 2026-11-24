@@ -213,6 +213,7 @@ type xdpKernelRuleRuntime struct {
 	observability      kernelRuntimeObservabilityState
 	maintenanceState   kernelAdaptiveMaintenanceState
 	orphanNATPruneLog  kernelCountLogState
+	reconciling        kernelReconcileGate
 	statsCorrection    map[uint32]kernelRuleStats
 	flowPurgeRetry     kernelFlowPurgeRetryState
 	deferredFlows      kernelDeferredFlowRules[preparedXDPKernelRule]
@@ -313,7 +314,12 @@ func (rt *xdpKernelRuleRuntime) SupportsRule(rule Rule) (bool, string) {
 	return true, ""
 }
 
+func (rt *xdpKernelRuleRuntime) reconcileInProgress() bool {
+	return rt.reconciling.active()
+}
+
 func (rt *xdpKernelRuleRuntime) Reconcile(rules []Rule) (results map[int64]kernelRuleApplyResult, reconcileErr error) {
+	defer rt.reconciling.begin()()
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	if rt.coll == nil && kernelHotRestartStateExists(kernelEngineXDP) {

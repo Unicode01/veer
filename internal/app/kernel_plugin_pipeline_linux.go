@@ -359,13 +359,23 @@ type loadedKernelPluginPipelineProgram struct {
 	prog *ebpf.Program
 }
 
+// PluginSnapshot returns the plugin pipeline state. While a reconcile holds
+// rt.mu it returns the state from before that reconcile, as the last call saw
+// it, rather than waiting for the reconcile to finish.
 func (rt *linuxKernelRuleRuntime) PluginSnapshot() pluginRuntimeSnapshot {
-	rt.mu.Lock()
+	if !rt.mu.TryLock() {
+		if last := rt.lastPluginSnapshot.Load(); last != nil && rt.reconciling.active() {
+			return clonePluginRuntimeSnapshot(*last)
+		}
+		rt.mu.Lock()
+	}
 	defer rt.mu.Unlock()
 	snapshot := clonePluginRuntimeSnapshot(rt.pluginRuntimeSnapshot)
 	if rt.coll != nil {
 		populateKernelPluginMetrics(snapshot, rt.coll.Maps[kernelTCPluginMetricsMapName])
 	}
+	last := clonePluginRuntimeSnapshot(snapshot)
+	rt.lastPluginSnapshot.Store(&last)
 	return snapshot
 }
 

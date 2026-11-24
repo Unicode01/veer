@@ -424,6 +424,14 @@ func (pm *ProcessManager) snapshotKernelRuntimeShared(now time.Time, force bool)
 			pm.mu.Unlock()
 			return snapshot
 		}
+		// A reconcile holds the runtime's lock throughout, seconds on a small
+		// machine. The view from before it beats a page that hangs, even for
+		// a forced refresh.
+		if !pm.kernelRuntimeSnapshotAt.IsZero() && kernelRuntimeReconcileInProgress(pm.kernelRuntime) {
+			snapshot := pm.kernelRuntimeSnapshot
+			pm.mu.Unlock()
+			return snapshot
+		}
 		if wait := pm.kernelRuntimeSnapshotWait; wait != nil {
 			pm.mu.Unlock()
 			waitForKernelRuntimeSnapshot(wait)
@@ -4599,7 +4607,9 @@ func (pm *ProcessManager) snapshotKernelStatsShared(now time.Time) (kernelRuleSt
 		pm.mu.Unlock()
 		return emptyKernelRuleStatsSnapshot(), now, nil
 	}
-	if !pm.kernelStatsSnapshotAt.IsZero() && now.Sub(pm.kernelStatsSnapshotAt) < kernelStatsSnapshotShareTTL {
+	// While a reconcile holds the runtime's lock, the last sample stands; its
+	// time stays with it, so traffic speeds are still worked out right.
+	if !pm.kernelStatsSnapshotAt.IsZero() && (now.Sub(pm.kernelStatsSnapshotAt) < kernelStatsSnapshotShareTTL || kernelRuntimeReconcileInProgress(pm.kernelRuntime)) {
 		snapshot := pm.kernelStatsSnapshot
 		sampledAt := pm.kernelStatsSnapshotAt
 		pm.mu.Unlock()
@@ -4716,6 +4726,11 @@ func (pm *ProcessManager) refreshKernelStatsCacheNow() {
 		pm.kernelStatsLastError = err.Error()
 		pm.mu.Unlock()
 		log.Printf("kernel dataplane stats snapshot failed: %v", err)
+		return
+	}
+	// The sample these stats were built from, handed out again while a
+	// reconcile runs: rebuilding would only zero the speeds.
+	if !prevStatsAt.IsZero() && !sampledAt.After(prevStatsAt) {
 		return
 	}
 

@@ -1,6 +1,37 @@
 package app
 
-import "strings"
+import (
+	"strings"
+	"sync/atomic"
+)
+
+// kernelReconcileGate marks the reconciles of a runtime that holds its lock
+// for a whole reconcile, which loads and verifies programs and can take
+// seconds on a small machine. Views that only show state answer from their
+// last result while one runs instead of waiting behind it.
+type kernelReconcileGate struct {
+	running atomic.Int32
+}
+
+// begin marks a reconcile; call the returned function when it ends.
+func (g *kernelReconcileGate) begin() func() {
+	g.running.Add(1)
+	return func() { g.running.Add(-1) }
+}
+
+func (g *kernelReconcileGate) active() bool {
+	return g.running.Load() > 0
+}
+
+// kernelReconcileProgressRuntime is a runtime that reports a running reconcile.
+type kernelReconcileProgressRuntime interface {
+	reconcileInProgress() bool
+}
+
+func kernelRuntimeReconcileInProgress(rt kernelRuleRuntime) bool {
+	progress, ok := rt.(kernelReconcileProgressRuntime)
+	return ok && progress.reconcileInProgress()
+}
 
 type kernelRuleApplyResult struct {
 	Running bool

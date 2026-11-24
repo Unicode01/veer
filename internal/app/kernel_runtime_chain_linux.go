@@ -28,6 +28,7 @@ type orderedKernelRuleRuntime struct {
 	// without rt.mu so plugin handlers can query it while a reconcile that
 	// runs their migration handlers holds the lock.
 	corePinnedToTC atomic.Bool
+	reconciling    kernelReconcileGate
 	// yieldXDPToPlugins is set for a reconcile whose catalog has active XDP
 	// plugin hooks: the unassigned XDP engine then detaches rather than
 	// drains, because the plugin dispatcher needs those interfaces.
@@ -94,11 +95,12 @@ func (rt *orderedKernelRuleRuntime) CoreEnginePinnedToTC() bool {
 	return rt != nil && rt.corePinnedToTC.Load()
 }
 
+// PluginSnapshot reads entries and xdpPlugins, which are fixed at
+// construction, without rt.mu: a reconcile holds that lock throughout, and the
+// plugin views must not wait for it.
 func (rt *orderedKernelRuleRuntime) PluginSnapshot() pluginRuntimeSnapshot {
-	rt.mu.Lock()
-	entries := append([]orderedKernelRuntimeEntry(nil), rt.entries...)
+	entries := rt.entries
 	xdpPlugins := rt.xdpPlugins
-	rt.mu.Unlock()
 
 	snapshots := make([]pluginRuntimeSnapshot, 0, 2)
 	for _, entry := range entries {
@@ -326,7 +328,23 @@ func (rt *orderedKernelRuleRuntime) ReconcileWithPluginCatalog(rules []Rule, cat
 	return rt.reconcileWithOptionalPluginCatalog(rules, &catalog)
 }
 
+// reconcileInProgress reports a reconcile of this runtime or of one of its
+// engines, which a plugin reconcile can start on its own. entries is fixed at
+// construction, so it is read without rt.mu.
+func (rt *orderedKernelRuleRuntime) reconcileInProgress() bool {
+	if rt.reconciling.active() {
+		return true
+	}
+	for _, entry := range rt.entries {
+		if kernelRuntimeReconcileInProgress(entry.rt) {
+			return true
+		}
+	}
+	return false
+}
+
 func (rt *orderedKernelRuleRuntime) reconcileWithOptionalPluginCatalog(rules []Rule, catalog *PluginCatalog) (map[int64]kernelRuleApplyResult, error) {
+	defer rt.reconciling.begin()()
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	rt.yieldXDPToPlugins = catalog != nil && kernelXDPPluginCatalogHasRuntimeHooks(*catalog, rt.cfg)
@@ -455,6 +473,7 @@ func (rt *orderedKernelRuleRuntime) ReconcileRetainingAssignmentsWithPluginCatal
 }
 
 func (rt *orderedKernelRuleRuntime) reconcileRetainingAssignmentsWithOptionalPluginCatalog(retainedByEngine map[string][]Rule, newRules []Rule, catalog *PluginCatalog) (map[int64]kernelRuleApplyResult, error) {
+	defer rt.reconciling.begin()()
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	rt.yieldXDPToPlugins = catalog != nil && kernelXDPPluginCatalogHasRuntimeHooks(*catalog, rt.cfg)
