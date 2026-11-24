@@ -1043,7 +1043,12 @@ with tarfile.open(archive_path, "r:gz") as archive:
         member.mode = 0o755 if member.isdir() else 0o644
         member.uid = member.gid = 0
         member.uname = member.gname = "root"
-    archive.extractall(target, members=members)
+    # The entries are checked above; the "data" filter is the same policy,
+    # and naming it keeps Python 3.12+ from warning about the default.
+    if hasattr(tarfile, "data_filter"):
+        archive.extractall(target, members=members, filter="data")
+    else:
+        archive.extractall(target, members=members)
 
 plugin_root = target / "plugins"
 if not plugin_root.is_dir():

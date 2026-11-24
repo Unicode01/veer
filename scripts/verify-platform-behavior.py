@@ -330,6 +330,8 @@ install_bundled_plugins
                     self.assertIn(case["says"], result.stdout + result.stderr)
                 if "upgrade" in case:
                     self.assertIn(f"upgrade={case['upgrade']} keep={case.get('keep', '')}\n", result.stdout)
+                # Python 3.12+ warns when tar extraction names no filter.
+                self.assertNotIn("DeprecationWarning", result.stderr)
                 replaced = case.get("replaced", False)
                 self.assertEqual((plugins / "wan_core" / "lib" / "libwan_core.so").exists(), replaced)
                 self.assertEqual((plugins / "wan_core" / "control.js").exists(), not replaced)
