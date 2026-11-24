@@ -1954,7 +1954,8 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 					driftDetected = true
 					log.Printf("kernel dataplane maintenance: pruned %d orphan tc flow front(s)", orphanFlowDeleted)
 				}
-				natEntries, deleted, nextNATPruneState, natErr := pruneOrphanKernelNATBanks(refs, live.NATByBank, natPruneState)
+				// Reclaimed shared ports are routine: neither drift nor news.
+				natEntries, deleted, _, nextNATPruneState, natErr := pruneOrphanKernelNATBanks(refs, live.NATByBank, natPruneState)
 				if natErr != nil {
 					fullSuccess = false
 					log.Printf("kernel dataplane maintenance: prune orphan tc nat reservations failed: %v", natErr)
@@ -1963,13 +1964,13 @@ func (rt *linuxKernelRuleRuntime) Maintain() error {
 				} else {
 					natPruneState = nextNATPruneState
 				}
-				if fullSuccess && deleted > 0 {
-					driftDetected = true
-					if rt.orphanNATPruneLog.ShouldLog(deleted, startedAt, kernelOrphanNATPruneLogEvery) {
-						log.Printf("kernel dataplane maintenance: pruned %d orphan tc nat reservation(s)", deleted)
+				if fullSuccess {
+					if deleted > 0 {
+						driftDetected = true
 					}
-				} else if fullSuccess {
-					rt.orphanNATPruneLog.Reset()
+					if total, ok := rt.orphanNATPruneLog.Observe(deleted, startedAt, kernelOrphanNATPruneLogEvery); ok {
+						log.Printf("kernel dataplane maintenance: pruned %d orphan tc nat reservation(s)", total)
+					}
 				}
 				if fullSuccess {
 					flowEntries := max(live.FlowEntries-orphanFlowDeleted, 0)

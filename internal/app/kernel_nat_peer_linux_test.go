@@ -320,12 +320,12 @@ func TestPruneOrphanKernelNATBanksReclaimsSharedPortAfterItsLastMapping(t *testi
 		activeV4:      map[kernelNATReservationOwnerV4]struct{}{exclusiveOwner: {}},
 		peersActiveV4: map[kernelNATPeerOwnerV4]struct{}{owner: {}},
 	}
-	natEntries, deleted, state, err := pruneOrphanKernelNATBanks(refs, used, kernelNATPruneState{})
+	natEntries, deleted, reclaimed, state, err := pruneOrphanKernelNATBanks(refs, used, kernelNATPruneState{})
 	if err != nil {
 		t.Fatalf("pass with a live mapping error = %v", err)
 	}
-	if natEntries != 2 || deleted != 0 {
-		t.Fatalf("pass with a live mapping entries/deleted = %d/%d, want 2/0: mappings, not the shared port, count", natEntries, deleted)
+	if natEntries != 2 || deleted != 0 || reclaimed != 0 {
+		t.Fatalf("pass with a live mapping entries/deleted/reclaimed = %d/%d/%d, want 2/0/0: mappings, not the shared port, count", natEntries, deleted, reclaimed)
 	}
 	if mode, _ := natPortModeForTest(t, ports, class); mode != kernelNATPortShared {
 		t.Fatalf("shared port mode = %d while a mapping uses it, want shared", mode)
@@ -333,20 +333,20 @@ func TestPruneOrphanKernelNATBanksReclaimsSharedPortAfterItsLastMapping(t *testi
 
 	used.peersActiveV4 = nil
 	for pass, want := range []struct {
-		entries, deleted int
-		mode             uint32
-		present          bool
+		entries, deleted, reclaimed int
+		mode                        uint32
+		present                     bool
 	}{
-		{entries: 2, deleted: 0, mode: kernelNATPortShared, present: true},   // the orphan peer becomes a candidate
+		{entries: 2, mode: kernelNATPortShared, present: true},               // the orphan peer becomes a candidate
 		{entries: 1, deleted: 1, mode: kernelNATPortDraining, present: true}, // it goes, and the port drains
-		{entries: 1, deleted: 1, present: false},                             // the drained port goes
+		{entries: 1, reclaimed: 1, present: false},                           // the drained port goes
 	} {
-		natEntries, deleted, state, err = pruneOrphanKernelNATBanks(refs, used, state)
+		natEntries, deleted, reclaimed, state, err = pruneOrphanKernelNATBanks(refs, used, state)
 		if err != nil {
 			t.Fatalf("pass %d error = %v", pass, err)
 		}
-		if natEntries != want.entries || deleted != want.deleted {
-			t.Fatalf("pass %d entries/deleted = %d/%d, want %d/%d", pass, natEntries, deleted, want.entries, want.deleted)
+		if natEntries != want.entries || deleted != want.deleted || reclaimed != want.reclaimed {
+			t.Fatalf("pass %d entries/deleted/reclaimed = %d/%d/%d, want %d/%d/%d", pass, natEntries, deleted, reclaimed, want.entries, want.deleted, want.reclaimed)
 		}
 		mode, present := natPortModeForTest(t, ports, class)
 		if present != want.present || (present && mode != want.mode) {
@@ -355,6 +355,37 @@ func TestPruneOrphanKernelNATBanksReclaimsSharedPortAfterItsLastMapping(t *testi
 	}
 	if _, ok := natPortModeForTest(t, ports, exclusiveKey); !ok {
 		t.Fatal("the reclaim deleted an exclusive port in use")
+	}
+}
+
+// When a mapping ends the datapath deletes its peer entry itself and leaves
+// the shared port for maintenance to reclaim. That happens for every
+// connection through a port forward, so it must not count as an orphan:
+// orphans mark the pass as having found drift and are logged.
+func TestPruneOrphanKernelNATBanksDoesNotCountRoutineReclaimsAsOrphans(t *testing.T) {
+	ports := newNATPortsTestMapV4(t, kernelNatPortsMapNameV4)
+	peers := newNATPeersTestMapV4(t, kernelNatPeersMapNameV4)
+	refs := kernelRuntimeMapRefs{natV4: ports, natPeersV4: peers}
+
+	var state kernelNATPruneState
+	orphans, reclaimed := 0, 0
+	for i := range 3 {
+		class := tcNATPortKeyV4{IfIndex: 3, NATAddr: 0xc6130001, NATPort: uint16(25000 + i), Proto: unix.IPPROTO_TCP}
+		if err := ports.Put(class, tcNATPortValue{RuleID: 1, Mode: kernelNATPortShared}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for pass := range 2 {
+		_, deleted, passReclaimed, next, err := pruneOrphanKernelNATBanks(refs, kernelNATBankUsage{}, state)
+		if err != nil {
+			t.Fatalf("pass %d error = %v", pass, err)
+		}
+		state = next
+		orphans += deleted
+		reclaimed += passReclaimed
+	}
+	if orphans != 0 || reclaimed != 3 {
+		t.Fatalf("orphans/reclaimed = %d/%d, want 0/3", orphans, reclaimed)
 	}
 }
 

@@ -256,7 +256,7 @@ func TestKernelFlowLifecycleMatrixAcrossBanks(t *testing.T) {
 					t.Fatalf("put recoverable orphan nat reservation: %v", err)
 				}
 				live = snapshot()
-				natEntries, deleted, pruneState, err := pruneOrphanKernelNATBanks(refs, live.NATByBank, kernelNATPruneState{})
+				natEntries, deleted, _, pruneState, err := pruneOrphanKernelNATBanks(refs, live.NATByBank, kernelNATPruneState{})
 				if err != nil {
 					t.Fatalf("mark orphan nat reservation: %v", err)
 				}
@@ -274,7 +274,7 @@ func TestKernelFlowLifecycleMatrixAcrossBanks(t *testing.T) {
 					LastSeenNS: nowNS, RuleRevision: 40101, SessionID: recoveredSessionID,
 				})
 				live = snapshot()
-				natEntries, deleted, pruneState, err = pruneOrphanKernelNATBanks(refs, live.NATByBank, pruneState)
+				natEntries, deleted, _, pruneState, err = pruneOrphanKernelNATBanks(refs, live.NATByBank, pruneState)
 				if err != nil {
 					t.Fatalf("cancel recovered orphan deletion: %v", err)
 				}
@@ -286,14 +286,14 @@ func TestKernelFlowLifecycleMatrixAcrossBanks(t *testing.T) {
 					t.Fatalf("remove recovered flow for orphan confirmation: %v", err)
 				}
 				live = snapshot()
-				natEntries, deleted, pruneState, err = pruneOrphanKernelNATBanks(refs, live.NATByBank, pruneState)
+				natEntries, deleted, _, pruneState, err = pruneOrphanKernelNATBanks(refs, live.NATByBank, pruneState)
 				if err != nil {
 					t.Fatalf("remark missing orphan nat reservation: %v", err)
 				}
 				if natEntries != 3 || deleted != 0 {
 					t.Fatalf("orphan remark entries/deleted = %d/%d, want 3/0", natEntries, deleted)
 				}
-				natEntries, deleted, _, err = pruneOrphanKernelNATBanks(refs, live.NATByBank, pruneState)
+				natEntries, deleted, _, _, err = pruneOrphanKernelNATBanks(refs, live.NATByBank, pruneState)
 				if err != nil {
 					t.Fatalf("confirm missing orphan nat reservation: %v", err)
 				}
@@ -485,7 +485,7 @@ func TestKernelIPv6FlowLifecycleMatrixAcrossBanks(t *testing.T) {
 					t.Fatalf("put recoverable IPv6 nat reservation: %v", err)
 				}
 				live = snapshot()
-				natEntries, deleted, pruneState, err := pruneOrphanKernelNATBanks(refs, live.NATByBank, kernelNATPruneState{})
+				natEntries, deleted, _, pruneState, err := pruneOrphanKernelNATBanks(refs, live.NATByBank, kernelNATPruneState{})
 				if err != nil {
 					t.Fatalf("mark orphan IPv6 nat reservation: %v", err)
 				}
@@ -505,7 +505,7 @@ func TestKernelIPv6FlowLifecycleMatrixAcrossBanks(t *testing.T) {
 					t.Fatalf("put recovered IPv6 flow: %v", err)
 				}
 				live = snapshot()
-				natEntries, deleted, pruneState, err = pruneOrphanKernelNATBanks(refs, live.NATByBank, pruneState)
+				natEntries, deleted, _, pruneState, err = pruneOrphanKernelNATBanks(refs, live.NATByBank, pruneState)
 				if err != nil {
 					t.Fatalf("cancel recovered IPv6 orphan deletion: %v", err)
 				}
@@ -517,14 +517,14 @@ func TestKernelIPv6FlowLifecycleMatrixAcrossBanks(t *testing.T) {
 					t.Fatalf("remove recovered IPv6 flow for orphan confirmation: %v", err)
 				}
 				live = snapshot()
-				natEntries, deleted, pruneState, err = pruneOrphanKernelNATBanks(refs, live.NATByBank, pruneState)
+				natEntries, deleted, _, pruneState, err = pruneOrphanKernelNATBanks(refs, live.NATByBank, pruneState)
 				if err != nil {
 					t.Fatalf("remark missing IPv6 orphan nat reservation: %v", err)
 				}
 				if natEntries != 3 || deleted != 0 {
 					t.Fatalf("IPv6 orphan remark entries/deleted = %d/%d, want 3/0", natEntries, deleted)
 				}
-				natEntries, deleted, _, err = pruneOrphanKernelNATBanks(refs, live.NATByBank, pruneState)
+				natEntries, deleted, _, _, err = pruneOrphanKernelNATBanks(refs, live.NATByBank, pruneState)
 				if err != nil {
 					t.Fatalf("confirm missing IPv6 orphan nat reservation: %v", err)
 				}

@@ -30,9 +30,13 @@ type kernelKeyedStateLogger struct {
 	last map[string]string
 }
 
+// kernelCountLogState rate-limits a line about things maintenance passes
+// removed. The first removal is reported at once; later ones are added up and
+// reported at most once per interval, so a steady trickle costs one line per
+// interval however much the per-pass counts vary.
 type kernelCountLogState struct {
-	lastCount int
-	lastAt    time.Time
+	pending int
+	lastAt  time.Time
 }
 
 func newKernelSkipLogger(engine string) *kernelSkipLogger {
@@ -108,30 +112,27 @@ func (l *kernelStateLogger) Reset() {
 	l.last = ""
 }
 
-func (s *kernelCountLogState) Reset() {
+// Observe adds one pass's count and returns the total to report now, if a
+// line is due: on the first removal, or once repeatEvery has passed since the
+// last line. A pass that removed nothing still reports what earlier passes
+// left pending once the interval is up.
+func (s *kernelCountLogState) Observe(count int, now time.Time, repeatEvery time.Duration) (int, bool) {
 	if s == nil {
-		return
+		return count, count > 0
 	}
-	s.lastCount = 0
-	s.lastAt = time.Time{}
-}
-
-func (s *kernelCountLogState) ShouldLog(count int, now time.Time, repeatEvery time.Duration) bool {
-	if count <= 0 {
-		if s != nil {
-			s.Reset()
-		}
-		return false
+	if count > 0 {
+		s.pending += count
 	}
-	if s == nil {
-		return true
+	if s.pending == 0 {
+		return 0, false
 	}
-	if s.lastCount != count || s.lastAt.IsZero() || (repeatEvery > 0 && now.Sub(s.lastAt) >= repeatEvery) {
-		s.lastCount = count
-		s.lastAt = now
-		return true
+	if !s.lastAt.IsZero() && repeatEvery > 0 && now.Sub(s.lastAt) < repeatEvery {
+		return 0, false
 	}
-	return false
+	total := s.pending
+	s.pending = 0
+	s.lastAt = now
+	return total, true
 }
 
 func (l *kernelKeyedStateLogger) Logf(key string, format string, args ...interface{}) {

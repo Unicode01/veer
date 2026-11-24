@@ -212,6 +212,7 @@ type xdpKernelRuleRuntime struct {
 	tcpIdleTimeout     kernelTCPIdleTimeoutState
 	observability      kernelRuntimeObservabilityState
 	maintenanceState   kernelAdaptiveMaintenanceState
+	orphanNATPruneLog  kernelCountLogState
 	statsCorrection    map[uint32]kernelRuleStats
 	flowPurgeRetry     kernelFlowPurgeRetryState
 	deferredFlows      kernelDeferredFlowRules[preparedXDPKernelRule]
@@ -1196,7 +1197,8 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 					driftDetected = true
 					log.Printf("xdp dataplane maintenance: pruned %d orphan xdp flow front(s)", orphanFlowDeleted)
 				}
-				natEntries, deleted, nextNATPruneState, natErr := pruneOrphanKernelNATBanks(refs, live.NATByBank, natPruneState)
+				// Reclaimed shared ports are routine: neither drift nor news.
+				natEntries, deleted, _, nextNATPruneState, natErr := pruneOrphanKernelNATBanks(refs, live.NATByBank, natPruneState)
 				if natErr != nil {
 					fullSuccess = false
 					log.Printf("xdp dataplane maintenance: prune orphan xdp nat reservations failed: %v", natErr)
@@ -1205,9 +1207,13 @@ func (rt *xdpKernelRuleRuntime) Maintain() error {
 				} else {
 					natPruneState = nextNATPruneState
 				}
-				if fullSuccess && deleted > 0 {
-					driftDetected = true
-					log.Printf("xdp dataplane maintenance: pruned %d orphan xdp nat reservation(s)", deleted)
+				if fullSuccess {
+					if deleted > 0 {
+						driftDetected = true
+					}
+					if total, ok := rt.orphanNATPruneLog.Observe(deleted, startedAt, kernelOrphanNATPruneLogEvery); ok {
+						log.Printf("xdp dataplane maintenance: pruned %d orphan xdp nat reservation(s)", total)
+					}
 				}
 				if fullSuccess {
 					flowEntries := max(live.FlowEntries-orphanFlowDeleted, 0)

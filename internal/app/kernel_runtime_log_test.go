@@ -49,29 +49,31 @@ func TestLogKernelLineSetOnceKeepsSeenLines(t *testing.T) {
 	}
 }
 
-func TestKernelCountLogStateShouldLog(t *testing.T) {
+func TestKernelCountLogStateReportsATrickleOncePerInterval(t *testing.T) {
 	var state kernelCountLogState
 	now := time.Unix(100, 0)
-
-	if !state.ShouldLog(1, now, time.Minute) {
-		t.Fatal("first non-zero count should log")
+	steps := []struct {
+		at    time.Duration
+		count int
+		total int
+		log   bool
+	}{
+		{at: 0, count: 0}, // nothing removed yet
+		{at: 10 * time.Second, count: 3, total: 3, log: true}, // the first removal reports at once
+		{at: 40 * time.Second, count: 5},                      // counts that differ do not break the limit
+		{at: 50 * time.Second, count: 0},                      // nor does a pass that removed nothing
+		{at: 60 * time.Second, count: 7},
+		{at: 70 * time.Second, count: 1, total: 13, log: true}, // a minute on: everything since the last line
+		{at: 80 * time.Second, count: 0},
+		{at: 100 * time.Second, count: 2},
+		{at: 130 * time.Second, count: 0, total: 2, log: true}, // a quiet pass still reports what is pending
+		{at: 400 * time.Second, count: 0},                      // nothing pending, nothing to say
+		{at: 500 * time.Second, count: 4, total: 4, log: true}, // after a quiet spell, at once again
 	}
-	if state.ShouldLog(1, now.Add(30*time.Second), time.Minute) {
-		t.Fatal("repeated count inside debounce window should be suppressed")
-	}
-	if !state.ShouldLog(2, now.Add(40*time.Second), time.Minute) {
-		t.Fatal("count change should log immediately")
-	}
-	if state.ShouldLog(0, now.Add(50*time.Second), time.Minute) {
-		t.Fatal("zero count should reset state without logging")
-	}
-	if !state.ShouldLog(2, now.Add(55*time.Second), time.Minute) {
-		t.Fatal("same count should log again after reset")
-	}
-	if state.ShouldLog(2, now.Add(56*time.Second), time.Minute) {
-		t.Fatal("same count immediately after reset log should still be suppressed")
-	}
-	if !state.ShouldLog(2, now.Add(2*time.Minute), time.Minute) {
-		t.Fatal("persistent count should log again after repeat window")
+	for _, step := range steps {
+		total, ok := state.Observe(step.count, now.Add(step.at), time.Minute)
+		if ok != step.log || total != step.total {
+			t.Fatalf("at %v count %d: Observe = %d, %v; want %d, %v", step.at, step.count, total, ok, step.total, step.log)
+		}
 	}
 }

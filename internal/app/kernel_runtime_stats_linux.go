@@ -1427,11 +1427,18 @@ func pruneOrphanKernelNATReservationsV6(natPortsMap *ebpf.Map, used map[kernelNA
 // exclusive ports and the peer entries of mappings, each deleted on the
 // second pass that finds it orphaned, and the shared ports without any peer
 // entry, which it reclaims. It returns the mappings left (exclusive ports and
-// peer entries), the entries it deleted, and the state for the next pass.
-func pruneOrphanKernelNATBanks(refs kernelRuntimeMapRefs, used kernelNATBankUsage, state kernelNATPruneState) (int, int, kernelNATPruneState, error) {
+// peer entries), the orphans it deleted, the shared ports it reclaimed, and
+// the state for the next pass.
+//
+// Orphans mean the datapath lost track of an entry and are worth a log line.
+// Reclaimed shared ports are not: the datapath leaves every shared port to be
+// reclaimed here once its last mapping ends, so on a router with port
+// forwards that is a steady stream that says nothing went wrong.
+func pruneOrphanKernelNATBanks(refs kernelRuntimeMapRefs, used kernelNATBankUsage, state kernelNATPruneState) (int, int, int, kernelNATPruneState, error) {
 	nextState := state.clone()
 	natEntries := 0
 	deleted := 0
+	reclaimed := 0
 
 	for _, item := range []struct {
 		m         *ebpf.Map
@@ -1444,7 +1451,7 @@ func pruneOrphanKernelNATBanks(refs kernelRuntimeMapRefs, used kernelNATBankUsag
 	} {
 		remaining, itemDeleted, next, err := pruneOrphanKernelNATReservations(item.m, item.used, item.previous)
 		if err != nil {
-			return 0, 0, state, err
+			return 0, 0, 0, state, err
 		}
 		item.storeNext(next)
 		natEntries += remaining
@@ -1462,7 +1469,7 @@ func pruneOrphanKernelNATBanks(refs kernelRuntimeMapRefs, used kernelNATBankUsag
 	} {
 		remaining, itemDeleted, next, err := pruneOrphanKernelNATReservationsV6(item.m, item.used, item.previous)
 		if err != nil {
-			return 0, 0, state, err
+			return 0, 0, 0, state, err
 		}
 		item.storeNext(next)
 		natEntries += remaining
@@ -1478,12 +1485,13 @@ func pruneOrphanKernelNATBanks(refs kernelRuntimeMapRefs, used kernelNATBankUsag
 		{refs.natV4, refs.natPeersV4, used.peersActiveV4, &nextState.peersActiveV4, &nextState.drainingActiveV4},
 		{refs.natOldV4, refs.natPeersOldV4, used.peersOldV4, &nextState.peersOldV4, &nextState.drainingOldV4},
 	} {
-		remaining, itemDeleted, err := pruneKernelNATPeerBank(bank.ports, bank.peers, bank.used, bank.previous, bank.draining)
+		remaining, itemDeleted, itemReclaimed, err := pruneKernelNATPeerBank(bank.ports, bank.peers, bank.used, bank.previous, bank.draining)
 		if err != nil {
-			return 0, 0, state, err
+			return 0, 0, 0, state, err
 		}
 		natEntries += remaining
 		deleted += itemDeleted
+		reclaimed += itemReclaimed
 	}
 	for _, bank := range []struct {
 		ports, peers *ebpf.Map
@@ -1494,35 +1502,37 @@ func pruneOrphanKernelNATBanks(refs kernelRuntimeMapRefs, used kernelNATBankUsag
 		{refs.natV6, refs.natPeersV6, used.peersActiveV6, &nextState.peersActiveV6, &nextState.drainingActiveV6},
 		{refs.natOldV6, refs.natPeersOldV6, used.peersOldV6, &nextState.peersOldV6, &nextState.drainingOldV6},
 	} {
-		remaining, itemDeleted, err := pruneKernelNATPeerBank(bank.ports, bank.peers, bank.used, bank.previous, bank.draining)
+		remaining, itemDeleted, itemReclaimed, err := pruneKernelNATPeerBank(bank.ports, bank.peers, bank.used, bank.previous, bank.draining)
 		if err != nil {
-			return 0, 0, state, err
+			return 0, 0, 0, state, err
 		}
 		natEntries += remaining
 		deleted += itemDeleted
+		reclaimed += itemReclaimed
 	}
 
-	return natEntries, deleted, nextState, nil
+	return natEntries, deleted, reclaimed, nextState, nil
 }
 
 // pruneKernelNATPeerBank prunes one bank's orphan peer entries, then
 // reclaims its shared ports that no peer entry uses any more. previous and
-// draining hold the state of the last pass and receive this pass's.
-func pruneKernelNATPeerBank[K kernelNATPeerKey[C], C comparable](ports, peers *ebpf.Map, used map[kernelNATPeerOwner[K]]struct{}, previous *map[kernelNATPeerOwner[K]]struct{}, draining *map[C]struct{}) (int, int, error) {
+// draining hold the state of the last pass and receive this pass's. It
+// returns the peer entries left, the orphans deleted and the ports reclaimed.
+func pruneKernelNATPeerBank[K kernelNATPeerKey[C], C comparable](ports, peers *ebpf.Map, used map[kernelNATPeerOwner[K]]struct{}, previous *map[kernelNATPeerOwner[K]]struct{}, draining *map[C]struct{}) (int, int, int, error) {
 	if peers == nil {
-		return 0, 0, nil
+		return 0, 0, 0, nil
 	}
 	remaining, deleted, next, inUse, err := pruneOrphanKernelNATPeers[K, C](peers, used, *previous)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	*previous = next
 	reclaimed, nextDraining, err := reclaimKernelSharedNATPorts(ports, inUse, *draining)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	*draining = nextDraining
-	return remaining, deleted + reclaimed, nil
+	return remaining, deleted, reclaimed, nil
 }
 
 // pruneOrphanKernelNATPeers deletes the peer entries no flow uses, each on

@@ -1670,14 +1670,14 @@ func TestPruneOrphanKernelNATBanksIsolatesIPv4Ownership(t *testing.T) {
 					t.Fatalf("old bank used owners = %d, want %d", got, want)
 				}
 
-				natEntries, deleted, state, err := pruneOrphanKernelNATBanks(refs, live.NATByBank, kernelNATPruneState{})
+				natEntries, deleted, _, state, err := pruneOrphanKernelNATBanks(refs, live.NATByBank, kernelNATPruneState{})
 				if err != nil {
 					t.Fatalf("first bank prune: %v", err)
 				}
 				if natEntries != 2 || deleted != 0 {
 					t.Fatalf("first bank prune entries/deleted = %d/%d, want 2/0", natEntries, deleted)
 				}
-				natEntries, deleted, _, err = pruneOrphanKernelNATBanks(refs, live.NATByBank, state)
+				natEntries, deleted, _, _, err = pruneOrphanKernelNATBanks(refs, live.NATByBank, state)
 				if err != nil {
 					t.Fatalf("second bank prune: %v", err)
 				}
@@ -1797,14 +1797,14 @@ func TestPruneOrphanKernelNATBanksIsolatesIPv6Ownership(t *testing.T) {
 					t.Fatalf("old IPv6 bank used owners = %d, want %d", got, want)
 				}
 
-				natEntries, deleted, state, err := pruneOrphanKernelNATBanks(refs, live.NATByBank, kernelNATPruneState{})
+				natEntries, deleted, _, state, err := pruneOrphanKernelNATBanks(refs, live.NATByBank, kernelNATPruneState{})
 				if err != nil {
 					t.Fatalf("first IPv6 bank prune: %v", err)
 				}
 				if natEntries != 2 || deleted != 0 {
 					t.Fatalf("first IPv6 bank prune entries/deleted = %d/%d, want 2/0", natEntries, deleted)
 				}
-				natEntries, deleted, _, err = pruneOrphanKernelNATBanks(refs, live.NATByBank, state)
+				natEntries, deleted, _, _, err = pruneOrphanKernelNATBanks(refs, live.NATByBank, state)
 				if err != nil {
 					t.Fatalf("second IPv6 bank prune: %v", err)
 				}
